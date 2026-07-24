@@ -1,0 +1,26 @@
+{
+  "name": "盤勢雷達 Stock1",
+  "short_name": "盤勢雷達",
+  "description": "私人台股看盤：隔日沖、波段雷達、技術分析、處置看板、基本面",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0c0d",
+  "theme_color": "#0b0c0d",
+  "lang": "zh-Hant",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

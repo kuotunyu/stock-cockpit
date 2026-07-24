@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "stock1",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.mjs"],
+      "port": 5174,
+      "autoPort": true
+    },
+    {
+      "name": "stock1-test",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.mjs"],
+      "port": 5180,
+      "autoPort": true,
+      "env": { "PORT": "5180", "DATA_DIR": ".data-preview" }
+    }
+  ]
+}

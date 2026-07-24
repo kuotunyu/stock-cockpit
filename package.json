@@ -1,0 +1,23 @@
+{
+  "name": "stock1",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/backend/*.test.mjs tests/frontend/*.test.mjs",
+    "test:backend": "node --test tests/backend/*.test.mjs",
+    "test:frontend": "node --test tests/frontend/*.test.mjs",
+    "test:live": "node --test tests/live/*.test.mjs",
+    "test:coverage": "node scripts/test-coverage.mjs"
+  },
+  "dependencies": {
+    "fubon-neo": "^2.2.2"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

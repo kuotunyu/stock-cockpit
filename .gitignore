@@ -1,0 +1,12 @@
+node_modules/
+.data/
+.data-preview/
+log/
+.env
+*.pfx
+*.p12
+*.pem
+*.key
+npm-debug.log*
+.claude/settings.local.json
+.impeccable/

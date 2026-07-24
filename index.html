@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0c0d" />
+    <link rel="manifest" href="manifest.json" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <title>盤勢雷達</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script
+      defer
+      src="lucide.min.js"
+      integrity="sha384-mooE85Luwgx+AyykX7e90VcN8/QCFTSIwPuHLmvcsLVoA0en7lKYb9XlOzn5G2co"
+    ></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <div id="globalLoadingBar" class="global-loading-bar" role="status" aria-label="資料更新中" hidden></div>
+    <div class="app-shell">
+      <aside class="rail-nav" aria-label="主功能">
+        <button class="nav-action is-active" data-screen="overnight" type="button">
+          <i data-lucide="candlestick-chart"></i>
+          <span>隔日沖</span>
+        </button>
+        <button class="nav-action" data-screen="screener" type="button">
+          <i data-lucide="trending-up"></i>
+          <span>盤中選股</span>
+        </button>
+        <button class="nav-action" data-screen="strategy" type="button">
+          <i data-lucide="radar"></i>
+          <span>策略雷達</span>
+        </button>
+        <button class="nav-action" data-screen="watchlist" type="button">
+          <i data-lucide="list-checks"></i>
+          <span>自選股</span>
+        </button>
+        <button class="nav-action" data-screen="technical" type="button">
+          <i data-lucide="chart-no-axes-combined"></i>
+          <span>技術分析</span>
+        </button>
+        <button class="nav-action" data-screen="surveillance" type="button">
+          <i data-lucide="gavel"></i>
+          <span>處置看板</span>
+        </button>
+        <button class="nav-action" data-screen="more" type="button">
+          <i data-lucide="more-horizontal"></i>
+          <span>更多</span>
+        </button>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <button class="market-pill" id="marketPill" type="button" title="點一下切換 加權／台指">
+            <span id="marketLabel">台指</span>
+            <strong>--</strong>
+            <em class="pill-swap" aria-hidden="true">⇄</em>
+          </button>
+          <h1 id="screenTitle">隔日沖</h1>
+          <div class="source-switch" aria-label="資料來源切換">
+            <div class="source-switch-buttons" role="group" aria-label="資料來源">
+              <button class="is-active" data-source-option="official" type="button">官方資料</button>
+              <button data-source-option="broker" type="button">券商資料</button>
+            </div>
+            <small id="sourceMeta">等待更新</small>
+          </div>
+          <div class="top-actions">
+            <button class="icon-button" id="searchOpen" type="button" aria-label="搜尋" aria-haspopup="dialog" aria-controls="searchModal">
+              <i data-lucide="search"></i>
+            </button>
+            <button class="icon-button" id="filterOpen" type="button" aria-label="篩選" aria-haspopup="dialog" aria-controls="filterDrawer">
+              <i data-lucide="filter"></i>
+            </button>
+            <button class="icon-button" id="glossaryOpen" type="button" aria-label="名詞解釋" aria-haspopup="dialog" aria-controls="glossaryModal" title="名詞 / 觀念解釋：看不懂的詞點這裡查">
+              <i data-lucide="book-open"></i>
+            </button>
+          </div>
+        </header>
+
+        <section class="screen is-active" data-screen-panel="overnight">
+          <div class="screen-head">
+            <div class="segment-tabs" role="tablist" aria-label="隔日沖分群">
+              <button class="segment is-active" data-overnight-view="overview" type="button" title="隔日沖＝看訊號日收盤後的短線型態，觀察實際下一交易日的慣性（通常抱約 1 個交易日）。總覽把三種型態合在一起看。和「策略雷達」的波段（抱數天~數週、附完整進出場計畫）是不同維度的工具。">總覽</button>
+              <button class="segment" data-overnight-view="strongContinuation" type="button" title="隔日沖的短線型態：訊號日收盤強勢（收在高檔、量能放大、站上均線），觀察實際下一交易日慣性。和「策略雷達」的上軌續攻是不同週期。">強勢續攻</button>
+              <button class="segment" data-overnight-view="volumeDanger" type="button" title="隔日沖的短線型態：今天爆量、振幅大或收盤轉弱的高風險股，用來提醒控管追高風險（看當天，不是買進建議）。">爆量高危</button>
+              <button class="segment" data-overnight-view="pullbackReversal" type="button" title="隔日沖的短線型態：訊號日小漲收紅、守住短均、回檔後重新轉強，觀察下一交易日是否延續。">回檔轉強</button>
+              <button class="segment" data-overnight-view="performance" type="button" title="回測這些隔日沖型態過去在實際下一交易日的開盤／最高／收盤報酬與 +2% 命中率；是歷史統計，不是預測。">策略表現</button>
+            </div>
+          </div>
+          <section class="overnight-groups" id="overnightGroups" hidden></section>
+          <div class="quote-table">
+            <div class="table-scroller">
+              <div class="table-grid table-head">
+                <button data-sort="signal" type="button" title="依代號排序"><span>K棒</span><em>標的</em></button>
+                <button data-sort="price" type="button" title="依漲跌幅排序"><span>成交價</span><em>漲跌幅</em></button>
+                <button data-sort="stage" type="button" title="依最高價排序"><em>最高</em><span>最低</span></button>
+                <button class="is-sorted" data-sort="flow" type="button" title="依總量排序"><span>單量</span><em>總量</em></button>
+                <button data-sort="turnover" type="button" title="依週轉率排序"><em>週轉率</em><span>量比5</span></button>
+                <span>即時走勢</span>
+              </div>
+              <div id="overnightRows"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen screener-screen" data-screen-panel="screener">
+          <div class="screen-head compact">
+            <p class="screen-scope-note"><strong>即時</strong>動能・觀察用：秒級更新、本機粗估，只看「已載入的股票」(自選＋隔日沖＋你查過的)。想找<strong>波段</strong>型態＋完整進出場計畫 → 看「策略雷達」。</p>
+            <div class="segment-tabs" role="tablist" aria-label="選股模式">
+              <button class="segment is-active" data-universe="strong" type="button">強勢股</button>
+              <button class="segment" data-universe="weak" type="button">弱勢股</button>
+              <button class="segment" data-universe="intraday" type="button">盤中異動</button>
+              <button class="segment" data-universe="turnover" type="button">週轉率</button>
+            </div>
+            <div class="focus-switch" role="tablist" aria-label="資金模式">
+              <button class="is-active" data-focus="capital" type="button">資金關注焦點</button>
+              <button data-focus="danger" type="button">大量換手高危</button>
+            </div>
+            <nav class="strategy-strip" id="strategyStrip" aria-label="策略"></nav>
+            <div class="strategy-info" id="strategyInfo"></div>
+          </div>
+          <div class="quote-table">
+            <div class="table-scroller">
+              <div class="table-grid table-head">
+                <button data-sort="signal" type="button" title="依代號排序"><span>K棒</span><em>標的</em></button>
+                <button data-sort="price" type="button" title="依漲跌幅排序"><span>成交價</span><em>漲跌幅</em></button>
+                <button data-sort="stage" type="button" title="依最高價排序"><em>最高</em><span>最低</span></button>
+                <button class="is-sorted" data-sort="flow" type="button" title="依總量排序"><span>單量</span><em>總量</em></button>
+                <button data-sort="turnover" type="button" title="依週轉率排序"><em>週轉率</em><span>量比5</span></button>
+                <span>即時走勢</span>
+              </div>
+              <div id="screenerRows"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen strategy-screen" data-screen-panel="strategy">
+          <div class="screen-head compact">
+            <div class="strategy-controlbar">
+              <div class="segment-tabs" role="tablist" aria-label="策略場景">
+                <button class="segment is-active" data-swing-scenario="midBandDefense" type="button" title="波段型態（預期抱數天~數週）：股價回檔到布林中軌（月線附近）站穩、MACD 維持金叉的多頭，準備再攻。附完整進出場計畫。">中軌攻防</button>
+                <button class="segment" data-swing-scenario="strongContinuation" type="button" title="波段型態（預期抱數天~數週）：股價沿布林上軌強勢延伸（距中軌 1.3~3σ）、均線多頭、MACD 連續金叉。和觀察下一交易日的隔日沖『強勢續攻』不同。附完整進出場計畫。">上軌續攻</button>
+              </div>
+              <button class="strategy-legend-toggle" id="strategyLegendToggle" type="button" aria-expanded="false" aria-haspopup="dialog" aria-controls="strategyLegend">
+                <span class="legend-toggle-ic" aria-hidden="true">ⓘ</span>
+                <span class="legend-toggle-text">看懂每個數字</span>
+                <span class="legend-toggle-caret" aria-hidden="true">▾</span>
+              </button>
+            </div>
+            <div class="strategy-board-meta" id="strategyMeta"></div>
+          </div>
+          <div class="strategy-search">
+            <form id="strategyInspectForm" class="strategy-search-form" autocomplete="off">
+              <span class="strategy-search-ic" aria-hidden="true">🔍</span>
+              <input id="strategyInspectInput" type="search" inputmode="text" autocomplete="off" placeholder="輸入代碼或股名，健檢它的波段型態（例：2330 或 台積電）" aria-label="健檢個股波段型態" />
+              <button type="submit">健檢</button>
+            </form>
+          </div>
+          <div class="strategy-inspect" id="strategyInspectResult" hidden></div>
+          <section class="swing-verify" id="swingVerify" hidden></section>
+          <div class="strategy-board" id="strategyBoard"></div>
+        </section>
+
+        <section class="screen" data-screen-panel="watchlist">
+          <div class="watch-tabs">
+            <button class="is-active" data-watch-list="1" type="button">自選股清單 1</button>
+            <button data-watch-list="2" type="button">自選股清單 2</button>
+            <button data-watch-list="3" type="button">自選股清單 3</button>
+            <button data-watch-list="hold" type="button">庫存損益</button>
+            <button class="ghost-button" id="watchAdd" type="button">
+              <i data-lucide="plus"></i>
+              <span>加入</span>
+            </button>
+            <button class="ghost-button watch-edit-button" id="watchEdit" type="button" aria-pressed="false">
+              <i data-lucide="list-minus"></i>
+              <span>管理</span>
+            </button>
+          </div>
+          <div class="holdings-panel" id="holdingsPanel" hidden></div>
+          <div class="watch-brief" id="watchBrief"></div>
+          <div class="watch-manage-bar" id="watchManageBar" hidden>
+            <span id="watchManageSummary">選取要移除的股票</span>
+            <div class="watch-manage-actions">
+              <button class="watch-secondary-action" id="watchSelectVisible" type="button">全選目前</button>
+              <button class="watch-secondary-action" id="watchClearSelection" type="button">清除</button>
+              <button class="watch-remove-selected" id="watchRemoveSelected" type="button" disabled>
+                <i data-lucide="trash-2"></i>
+                <span>移除所選</span>
+              </button>
+            </div>
+          </div>
+          <div class="quote-table">
+            <div class="table-scroller">
+              <div class="table-grid table-head watch-table-head" id="watchTableHead">
+                <button data-sort="signal" type="button" title="依代號排序"><span>K棒</span><em>標的</em></button>
+                <button data-sort="price" type="button" title="依漲跌幅排序"><span>成交價</span><em>漲跌幅</em></button>
+                <button data-sort="stage" type="button" title="依最高價排序"><em>最高</em><span>最低</span></button>
+                <button class="is-sorted" data-sort="flow" type="button" title="依總量排序"><span>單量</span><em>總量</em></button>
+                <button data-sort="turnover" type="button" title="依週轉率排序"><em>週轉率</em><span>量比5</span></button>
+                <span>即時走勢</span>
+                <span class="watch-action-head">操作</span>
+              </div>
+              <div id="watchRows"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="screen technical-screen" data-screen-panel="technical">
+          <div class="technical-toolbar">
+            <form class="technical-search" id="technicalForm">
+              <label for="technicalCode">股票代號或名稱</label>
+              <div>
+                <input id="technicalCode" autocomplete="off" placeholder="例如 2330 或 台積電" />
+                <button class="primary-button" type="submit">分析</button>
+              </div>
+            </form>
+            <div class="technical-periods" role="group" aria-label="K 線週期">
+              <button class="is-active" data-analysis-period="day" type="button" aria-pressed="true">日K</button>
+              <button data-analysis-period="week" type="button" aria-pressed="false">週K</button>
+              <button data-analysis-period="month" type="button" aria-pressed="false">月K</button>
+            </div>
+          </div>
+          <div class="technical-status" id="technicalStatus">輸入股票代號後，系統會用官方歷史資料計算技術分析。</div>
+          <section class="technical-surveillance" id="technicalSurveillance" hidden></section>
+          <section class="company-profile" id="companyProfile" hidden></section>
+          <section class="fundamentals-panel" id="fundamentalsPanel" hidden></section>
+          <section class="technical-summary" id="technicalSummary"></section>
+          <section class="technical-chart-card">
+            <header>
+              <div>
+                <strong id="technicalTitle">技術分析</strong>
+                <span id="technicalSubtitle">MACD 8,17,9 / MA5 / MA20 / 自動趨勢線</span>
+              </div>
+              <div class="technical-head-actions">
+                <button class="technical-help-open" id="technicalHelpOpen" type="button" aria-label="K 線圖操作說明" aria-haspopup="dialog" aria-controls="zoomChartHelp" title="K 線圖怎麼看、怎麼畫">
+                  <i data-lucide="circle-help"></i>
+                </button>
+                <button class="technical-zoom-open" id="technicalZoomOpen" type="button" aria-haspopup="dialog" aria-controls="technicalZoomModal" title="放大：看每根 K 棒、縮放平移、畫趨勢線（內附操作說明）">
+                  <i data-lucide="maximize-2"></i>
+                  <span>放大</span>
+                </button>
+                <em id="technicalBadge">等待分析</em>
+              </div>
+            </header>
+            <div class="technical-chart-markers" id="technicalChartMarkers" hidden></div>
+            <canvas id="technicalChart" class="technical-price-canvas" width="980" height="560" role="button" tabindex="0" aria-label="放大技術分析 K 線圖" title="點一下放大，可拖曳查看每根 K 棒"></canvas>
+            <div class="technical-macd-panel">
+              <div class="technical-macd-head">
+                <strong>MACD</strong>
+                <span>DIF / DEA / OSC 8,17,9</span>
+              </div>
+              <canvas id="technicalMacdChart" class="technical-macd-canvas" width="980" height="220"></canvas>
+            </div>
+          </section>
+          <section class="technical-detail-grid" id="technicalDetailGrid"></section>
+        </section>
+
+        <section class="screen surveillance-screen" data-screen-panel="surveillance">
+          <div class="surv-head">
+            <div class="surv-tabs" id="survTabs" role="tablist" aria-label="處置看板分類">
+              <button class="is-active" data-surv-tab="aboutToDispose" type="button">即將處置<em></em></button>
+              <button data-surv-tab="inDisposition" type="button">處置中<em></em></button>
+              <button data-surv-tab="aboutToRelease" type="button">即將出關<em></em></button>
+              <button data-surv-tab="blockTrades" type="button">鉅額交易<em></em></button>
+              <button data-surv-tab="attention" type="button">注意股<em></em></button>
+              <button data-surv-tab="changedTrading" type="button">全額交割<em></em></button>
+            </div>
+          </div>
+          <div class="surv-meta">
+            <p class="surv-intro" id="survIntro"></p>
+            <span class="surv-legend" id="survLegend"></span>
+            <span class="surv-asof" id="survAsOf"></span>
+          </div>
+          <div class="surv-toolbar" id="survToolbar">
+            <label class="surv-search">
+              <i data-lucide="search"></i>
+              <input id="survSearch" type="search" placeholder="搜尋代號或名稱" autocomplete="off" aria-label="搜尋處置股代號或名稱" />
+            </label>
+            <select id="survSort" class="surv-select" aria-label="排序">
+              <option value="default">預設排序</option>
+              <option value="changeDesc">漲幅大→小</option>
+              <option value="changeAsc">跌幅大→小</option>
+              <option value="turnoverDesc">週轉率高→低</option>
+              <option value="code">代號</option>
+            </select>
+            <div class="surv-chipset" id="survMarketChips" role="group" aria-label="市場">
+              <button data-surv-market="all" type="button" aria-pressed="true">全部</button>
+              <button data-surv-market="TWSE" type="button" aria-pressed="false">上市</button>
+              <button data-surv-market="TPEx" type="button" aria-pressed="false">上櫃</button>
+            </div>
+            <div class="surv-chipset" id="survIntervalChips" role="group" aria-label="分盤">
+              <button data-surv-interval="all" type="button" aria-pressed="true">全部盤別</button>
+              <button data-surv-interval="5" type="button" aria-pressed="false">5分盤</button>
+              <button data-surv-interval="20" type="button" aria-pressed="false">20分盤</button>
+            </div>
+            <button class="surv-mine-toggle" id="survMineToggle" type="button" role="switch" aria-checked="false" title="只顯示你自選股裡上榜的個股">
+              <span class="surv-mine-star">★</span> 只看自選股
+            </button>
+            <button class="surv-help-btn" id="survHelpOpen" type="button" aria-haspopup="dialog" aria-controls="survHelp" title="處置／注意／全額交割／鉅額是什麼？">
+              <i data-lucide="circle-help"></i><span>說明</span>
+            </button>
+          </div>
+          <div class="surv-board" id="survBoard"></div>
+        </section>
+
+        <div class="modal-backdrop surv-help-backdrop" id="survHelp" hidden>
+          <section class="surv-help-card" role="dialog" aria-modal="true" aria-labelledby="survHelpTitle" tabindex="-1">
+            <header class="surv-help-head">
+              <strong id="survHelpTitle">處置看板怎麼看</strong>
+              <button class="icon-button" id="survHelpClose" type="button" aria-label="關閉說明"><i data-lucide="x"></i></button>
+            </header>
+            <div class="surv-help-body">
+              <p>交易所對價量或財務有疑慮的個股會分級列管。本看板把名單依嚴重度整理成分頁，<b>僅供風險提示與資訊參考，非買賣建議</b>。</p>
+              <dl>
+                <dt class="is-soon">即將處置 / 處置中 / 即將出關</dt>
+                <dd>處置＝價量連續異常被列管，採<b>分盤集合競價</b>（每 5 或 20 分鐘撮合一次）、<b>預收款券</b>，<b>多不可當沖</b>。三個分頁分別是「已公告未開始 / 期間內 / 今日或下一交易日為最後處置日」。公告迄日仍在處置中，若未延長才從下一交易日起解除。</dd>
+                <dt class="is-attn">注意</dt>
+                <dd>價量稍異常的<b>預警</b>，尚<b>無</b>交易限制。累計次數高、或連續多日（<span class="surv-tagbit is-hot">升溫</span>）較可能升級為處置；<span class="surv-tagbit is-days">連N天</span>＝連續被列為注意的天數。</dd>
+                <dt class="is-changed">全額交割（變更交易）</dt>
+                <dd>多因<b>財務或營運疑慮</b>，買賣須<b>預收全額款券</b>。</dd>
+                <dt class="is-block">鉅額交易</dt>
+                <dd>盤後整批撮合的<b>大單成交</b>，依代號彙整金額；屬資訊參考，<b>不是</b>處置或注意。</dd>
+              </dl>
+              <p class="surv-help-foot"><span class="surv-mine-star">★</span>／外框金邊＝你的自選股。<span class="surv-tagbit is-new">新</span>＝較畫面標示的比較日新增；只有相鄰交易日才稱今日新進。分盤＝每 5 或 20 分鐘才撮合一次、買賣需預收款券。資料來源：TWSE／TPEx 官方公告。</p>
+            </div>
+          </section>
+        </div>
+
+        <section class="screen more-screen" data-screen-panel="more">
+          <div class="settings-panel">
+            <button data-setting="source" type="button">
+              <i data-lucide="database"></i>
+              <span>資料源狀態</span>
+              <strong id="sourceState"></strong>
+            </button>
+            <button data-setting="brokerGuide" type="button">
+              <i data-lucide="key-round"></i>
+              <span>富邦 API 教學與設定</span>
+              <strong></strong>
+            </button>
+            <button data-setting="notesFeed" type="button">
+              <i data-lucide="message-square"></i>
+              <span>共享備註動態</span>
+              <strong></strong>
+            </button>
+            <button data-setting="system" type="button">
+              <i data-lucide="users"></i>
+              <span>帳號管理</span>
+              <strong></strong>
+            </button>
+            <button data-setting="risk" type="button">
+              <i data-lucide="shield-check"></i>
+              <span>風險規則</span>
+              <strong></strong>
+            </button>
+            <button data-setting="alerts" type="button">
+              <i data-lucide="bell"></i>
+              <span>訊號提醒</span>
+              <strong></strong>
+            </button>
+          </div>
+        </section>
+
+        <footer class="refresh-bar">
+          <span id="refreshStatus">資料來源：官方資料 / 等待更新</span>
+          <button id="refreshData" type="button">重新整理</button>
+        </footer>
+      </main>
+
+      <aside class="detail-panel" id="detailPanel" aria-label="個股明細">
+        <header class="detail-top">
+          <button class="icon-button detail-close" id="detailClose" type="button" aria-label="返回">
+            <i data-lucide="chevron-left"></i>
+          </button>
+          <div>
+            <h2 id="detailName">資料載入中</h2>
+            <p id="detailTags">正在抓官方報價</p>
+          </div>
+          <button class="icon-button" id="watchToggle" type="button" aria-label="加入自選">
+            <i data-lucide="bell-plus"></i>
+          </button>
+        </header>
+        <section class="price-hero">
+          <div>
+            <strong id="detailPrice">--</strong>
+            <span id="detailChange"></span>
+          </div>
+          <dl>
+            <div>
+              <dt>單量</dt>
+              <dd id="detailUnit">--</dd>
+            </div>
+            <div>
+              <dt>總量</dt>
+              <dd id="detailTotal">--</dd>
+            </div>
+          </dl>
+        </section>
+        <section class="price-alert-box" id="priceAlertBox" hidden></section>
+        <p class="detail-strategy-basis" id="detailStrategyBasis" hidden></p>
+        <div class="detail-tabs" role="tablist" aria-label="明細分類">
+          <button class="is-active" data-detail-tab="即時" type="button">即時</button>
+          <button data-detail-tab="均線" type="button">均線</button>
+          <button data-detail-tab="法人" type="button">法人</button>
+          <button data-detail-tab="基本面" type="button">基本面</button>
+        </div>
+        <section class="chart-box">
+          <div class="chart-metrics" id="chartMetrics"></div>
+          <div class="detail-chart-wrap">
+            <button class="detail-zoom-btn" id="detailZoomOpen" type="button" aria-haspopup="dialog" aria-controls="technicalZoomModal" title="放大：看每根 K 棒、縮放平移、畫趨勢線（內附操作說明）">
+              <i data-lucide="maximize-2"></i>
+              <span>放大</span>
+            </button>
+            <canvas id="priceChart" width="680" height="480" role="button" tabindex="0" aria-label="放大個股 K 線圖" title="點一下放大，可拖曳查看每根 K 棒"></canvas>
+          </div>
+        </section>
+        <section class="indicator-blocks" id="indicatorBlocks" aria-label="輔助指標"></section>
+        <section class="indicator-detail" id="indicatorDetail" aria-live="polite"></section>
+        <section class="stock-notes" id="stockNotes" aria-label="共享備註"></section>
+      </aside>
+
+      <nav class="bottom-nav" aria-label="主功能">
+        <button class="nav-action is-active" data-screen="overnight" type="button" aria-label="隔日沖">
+          <i data-lucide="candlestick-chart"></i>
+          <span class="nav-label-wide">隔日沖</span><span class="nav-label-narrow" aria-hidden="true">隔日</span>
+        </button>
+        <button class="nav-action" data-screen="screener" type="button" aria-label="盤中選股">
+          <i data-lucide="trending-up"></i>
+          <span class="nav-label-wide">盤中選股</span><span class="nav-label-narrow" aria-hidden="true">盤中</span>
+        </button>
+        <button class="nav-action" data-screen="strategy" type="button" aria-label="策略雷達">
+          <i data-lucide="radar"></i>
+          <span class="nav-label-wide">策略雷達</span><span class="nav-label-narrow" aria-hidden="true">雷達</span>
+        </button>
+        <button class="nav-action" data-screen="watchlist" type="button" aria-label="自選股">
+          <i data-lucide="list-checks"></i>
+          <span class="nav-label-wide">自選股</span><span class="nav-label-narrow" aria-hidden="true">自選</span>
+        </button>
+        <button class="nav-action" data-screen="technical" type="button" aria-label="技術分析">
+          <i data-lucide="chart-no-axes-combined"></i>
+          <span class="nav-label-wide">技術分析</span><span class="nav-label-narrow" aria-hidden="true">技術</span>
+        </button>
+        <button class="nav-action" data-screen="surveillance" type="button" aria-label="處置看板">
+          <i data-lucide="gavel"></i>
+          <span class="nav-label-wide">處置看板</span><span class="nav-label-narrow" aria-hidden="true">處置</span>
+        </button>
+        <button class="nav-action" data-screen="more" type="button" aria-label="更多">
+          <i data-lucide="more-horizontal"></i>
+          <span class="nav-label-wide">更多</span><span class="nav-label-narrow" aria-hidden="true">更多</span>
+        </button>
+      </nav>
+    </div>
+
+    <div class="modal-backdrop" id="searchModal" hidden>
+      <section class="search-modal" role="dialog" aria-modal="true" aria-label="搜尋股票" tabindex="-1">
+        <header>
+          <i data-lucide="search"></i>
+          <input id="searchInput" type="search" placeholder="輸入股票名稱或代號" autocomplete="off" aria-label="搜尋股票" />
+          <button class="icon-button" id="searchClose" type="button" aria-label="關閉">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div id="searchResults" class="search-results"></div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="glossaryModal" hidden>
+      <section class="glossary-modal" role="dialog" aria-modal="true" aria-label="名詞與觀念解釋" tabindex="-1">
+        <header>
+          <span class="glossary-ic" aria-hidden="true">📖</span>
+          <input id="glossarySearch" type="search" placeholder="搜尋名詞，例：量比、布林、盈虧比…" autocomplete="off" aria-label="搜尋名詞" />
+          <button class="icon-button" id="glossaryClose" type="button" aria-label="關閉">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div id="glossaryCats" class="glossary-cats"></div>
+        <div id="glossaryBody" class="glossary-body"></div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop chart-zoom-backdrop" id="technicalZoomModal" hidden>
+      <section class="chart-zoom-modal" role="dialog" aria-modal="true" aria-labelledby="zoomChartTitle" tabindex="-1">
+        <header class="chart-zoom-head">
+          <strong id="zoomChartTitle">技術分析</strong>
+          <div class="chart-zoom-periods" id="zoomChartPeriods" role="group" aria-label="K 線週期">
+            <button data-zoom-period="day" type="button" aria-pressed="true">日K</button>
+            <button data-zoom-period="week" type="button" aria-pressed="false">週K</button>
+            <button data-zoom-period="month" type="button" aria-pressed="false">月K</button>
+          </div>
+          <div class="chart-zoom-legend" aria-hidden="true">
+            <span class="zoom-legend-item is-ma5">MA5</span>
+            <span class="zoom-legend-item is-ma20">MA20</span>
+            <span class="zoom-legend-item is-res">壓力</span>
+            <span class="zoom-legend-item is-sup">支撐</span>
+          </div>
+          <span class="chart-zoom-hint" aria-hidden="true">滾輪／雙指縮放 · 拖曳平移 · 移動／單指看每根 · 點兩下鎖定</span>
+          <div class="chart-zoom-head-end">
+            <button class="icon-button" id="zoomChartHelpOpen" type="button" aria-label="操作說明" aria-haspopup="dialog" aria-controls="zoomChartHelp">
+              <i data-lucide="circle-help"></i>
+            </button>
+            <button class="icon-button" id="zoomChartClose" type="button" aria-label="關閉放大圖">
+              <i data-lucide="x"></i>
+            </button>
+          </div>
+        </header>
+        <div class="chart-zoom-stage" id="zoomChartStage">
+          <canvas id="zoomChartCanvas" class="chart-zoom-canvas"></canvas>
+          <canvas id="zoomCrosshairCanvas" class="chart-zoom-crosshair"></canvas>
+          <div class="chart-zoom-readout" id="zoomChartReadout" hidden></div>
+          <div class="chart-zoom-status" id="zoomChartStatus" hidden></div>
+          <div class="chart-zoom-tools" id="zoomChartTools" role="toolbar" aria-label="畫線工具">
+            <button data-draw-tool="cursor" class="is-active" type="button" title="游標（移動/縮放/平移）" aria-label="游標（移動、縮放或平移）" aria-pressed="true"><i data-lucide="mouse-pointer-2"></i></button>
+            <button data-draw-tool="trend" type="button" title="趨勢線（點兩點）" aria-label="趨勢線（點兩點）" aria-pressed="false"><i data-lucide="trending-up"></i></button>
+            <button data-draw-tool="horizontal" type="button" title="水平線（點一下）" aria-label="水平線（點一下）" aria-pressed="false"><i data-lucide="minus"></i></button>
+            <button data-draw-tool="erase" type="button" title="橡皮擦（點線刪除）" aria-label="橡皮擦（點線刪除）" aria-pressed="false"><i data-lucide="eraser"></i></button>
+            <span class="zoom-tools-colors" id="zoomChartColors" role="group" aria-label="畫線顏色"></span>
+            <span class="zoom-tools-sep" aria-hidden="true"></span>
+            <button data-draw-action="undo" type="button" title="復原一步" aria-label="復原一步"><i data-lucide="corner-up-left"></i></button>
+            <button data-draw-action="clear" type="button" title="清除全部畫線" aria-label="清除全部畫線"><i data-lucide="trash-2"></i></button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="chart-zoom-help" id="zoomChartHelp" hidden>
+      <div class="chart-zoom-help-card" role="dialog" aria-modal="true" aria-labelledby="zoomHelpTitle" tabindex="-1">
+        <header>
+          <span class="chart-zoom-help-ic" aria-hidden="true"><i data-lucide="circle-help"></i></span>
+          <strong id="zoomHelpTitle">K 線圖怎麼看、怎麼畫</strong>
+          <button class="icon-button" id="zoomChartHelpClose" type="button" aria-label="關閉說明"><i data-lucide="x"></i></button>
+        </header>
+        <div class="chart-zoom-help-body">
+          <p class="chart-zoom-help-lead"><i data-lucide="maximize-2" aria-hidden="true"></i>以下功能都在「放大」檢視裡 —— 點圖表、或右上角「放大」即可進入。</p>
+          <section>
+            <h4><i data-lucide="search" aria-hidden="true"></i>看每一根</h4>
+            <ul>
+              <li>滑鼠移動／<b>單指滑動</b>：看那根的開高低收、量、MA、MACD</li>
+              <li><b>點兩下</b>：鎖定這根，手指移開也能細看（再點兩下解除）</li>
+            </ul>
+          </section>
+          <section>
+            <h4><i data-lucide="zoom-in" aria-hidden="true"></i>縮放與平移</h4>
+            <ul>
+              <li>滾輪／<b>雙指</b>：放大、縮小</li>
+              <li><b>拖曳</b>：左右平移，看更早的走勢</li>
+              <li>鍵盤：<kbd>←</kbd> <kbd>→</kbd> 逐根 · <kbd>+</kbd> <kbd>−</kbd> 縮放 · <kbd>R</kbd> 回到全部</li>
+            </ul>
+          </section>
+          <section>
+            <h4><i data-lucide="calendar" aria-hidden="true"></i>切換週期</h4>
+            <ul>
+              <li>左上角 <b>日K ／ 週K ／ 月K</b> 一鍵切換</li>
+            </ul>
+          </section>
+          <section>
+            <h4><i data-lucide="pencil" aria-hidden="true"></i>畫線工具（放大圖上方工具列）</h4>
+            <ul>
+              <li><b>趨勢線</b>：點兩點，拉一條斜線</li>
+              <li><b>水平線</b>：點一下，標一個價位</li>
+              <li>選了畫線工具後，會跳出 <b>顏色</b> 可挑</li>
+              <li><b>橡皮擦</b>：點線刪除（或按 <kbd>Delete</kbd>）</li>
+              <li><b>復原</b> ／ <b>清除全部</b></li>
+              <li>畫的線<b>自動存起來</b>，下次打開、換週期都還在</li>
+            </ul>
+          </section>
+        </div>
+        <footer>
+          <button id="zoomChartHelpGot" type="button">知道了</button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="modal-backdrop legend-backdrop" id="strategyLegend" hidden>
+      <section class="legend-modal" role="dialog" aria-modal="true" aria-labelledby="strategyLegendTitle" tabindex="-1">
+        <header>
+          <span class="legend-modal-ic" aria-hidden="true">ⓘ</span>
+          <strong id="strategyLegendTitle">看懂每個數字</strong>
+          <button class="icon-button legend-modal-close" id="strategyLegendClose" type="button" aria-label="關閉說明">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="legend-modal-body">
+          <dl>
+            <div>
+              <dt>兩種波段型態</dt>
+              <dd>策略雷達掃的是<strong>波段</strong>（預期抱<strong>數天~數週</strong>），和「隔日沖」分頁（看訊號日夠不夠強、觀察<strong>下一交易日</strong>）是兩回事。<strong>中軌攻防</strong>＝回檔到布林中軌（月線附近）站穩、準備再攻；<strong>上軌續攻</strong>＝已經沿布林上軌強勢延伸的多頭。兩者都附進場／停損／目標／盈虧比。</dd>
+            </div>
+            <div>
+              <dt>命中／掃描範圍</dt>
+              <dd>例「命中 <strong>8</strong>／240」＝策略雷達為了速度與穩定，只掃流動性較好的前 240 檔，在其中找出 8 檔符合型態。低量與停牌／下市標的會排除；注意、處置、變更交易股則<strong>保留並醒目標示</strong>，可由風險開關隱藏。這 240 檔依當日成交量於每個交易日重新挑選，不是固定名單。</dd>
+            </div>
+            <div>
+              <dt>基準日／計算時間</dt>
+              <dd><strong>基準日</strong>是榜單依據的官方收盤日；<strong>計算時間</strong>則是系統實際算出排名的台北日期與時刻。兩者都顯示絕對日期，可能不同。同一基準日只算一次、結果凍結不跳動；要重新計算請按右下角「重新整理」。</dd>
+            </div>
+            <div>
+              <dt>RANK／評分</dt>
+              <dd>評分 0–100，綜合「趨勢、MACD 動能、是否貼近中軌、量能、流動性、盈虧比」算出，越高代表型態越好、且風險報酬越划算。盈虧比 &lt;1（風險大於報酬）的設定不會列入。RANK 就是把命中的股票依評分由高到低排名，RANK 1＝今天分數最高。</dd>
+            </div>
+            <div>
+              <dt>收盤 vs 進場</dt>
+              <dd>右上角是當日<strong>收盤價</strong>；下方「進場」是<strong>建議進場價</strong>，預設就等於收盤，所以這兩個數字會一樣。</dd>
+            </div>
+            <div>
+              <dt>卡片收盤 vs 右側即時</dt>
+              <dd>卡片用的是<strong>官方收盤價</strong>（當日算一次、整天凍結）；點開個股後右側面板是<strong>即時報價</strong>。<strong>盤中</strong>即時會隨價格跳動、或某檔官方收盤<strong>晚一個交易日</strong>（卡片會用橘色標出日期）時，兩個數字就會不同 —— 屬正常，不是錯誤。想看<strong>盤中即時</strong>強弱，請改看「盤中選股」。</dd>
+            </div>
+            <div>
+              <dt>建議停損／啟動移停</dt>
+              <dd>建議停損＝收盤 −5%，是進場後的初始停損；股價漲到啟動移停（收盤 +5%）之後，改用移動停利往上跟。</dd>
+            </div>
+            <div>
+              <dt>結構停損／目標</dt>
+              <dd>結構停損依下方支撐（擺動低點／布林下軌／月線）設，是比較大的防守價；目標取上方壓力或波段量測幅度推估。</dd>
+            </div>
+            <div>
+              <dt>盈虧比＋色條</dt>
+              <dd>盈虧比＝(目標−進場)÷(進場−結構停損)，越大越划算；已納入評分，且盈虧比 &lt;1 的設定直接過濾掉。底部色條：<em class="legend-loss">綠</em>是到停損的風險、<em class="legend-gain">紅</em>是到目標的空間，紅段越長越好。</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+    </div>
+
+    <div class="drawer-backdrop" id="filterDrawer" hidden>
+      <aside class="filter-drawer" role="dialog" aria-modal="true" aria-labelledby="filterDrawerTitle" tabindex="-1">
+        <header>
+          <h2 id="filterDrawerTitle">篩選</h2>
+          <button class="icon-button" id="filterClose" type="button" aria-label="關閉">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <label class="field">
+          <span>漲跌方向</span>
+          <select id="directionFilter">
+            <option value="all">全部</option>
+            <option value="up">紅盤</option>
+            <option value="down">綠盤</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>最低週轉率 <strong id="turnoverValue">0%</strong></span>
+          <input id="turnoverFilter" type="range" min="0" max="80" value="0" step="5" />
+        </label>
+        <label class="switch-field">
+          <input id="watchOnlyFilter" type="checkbox" />
+          <span>只看自選股</span>
+        </label>
+        <button class="primary-button" id="filterApply" type="button">套用</button>
+      </aside>
+    </div>
+    <div class="login-gate" id="loginGate" hidden>
+      <section class="login-card" role="dialog" aria-modal="true" aria-labelledby="loginTitle" tabindex="-1">
+        <button class="icon-button login-close" id="loginClose" type="button" aria-label="關閉登入"><i data-lucide="x"></i></button>
+        <div class="login-brand">
+          <span>PRIVATE MARKET VIEW</span>
+          <h2 id="loginTitle">台股看盤 Web App</h2>
+          <p>請先登入。行情資料、券商 API 設定與自選股都會依帳號分開保存。</p>
+        </div>
+        <form id="loginForm" class="login-form" autocomplete="on">
+          <label>
+            <span>帳號</span>
+            <input id="loginUsername" name="username" type="text" autocomplete="username" required />
+          </label>
+          <label>
+            <span>密碼</span>
+            <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button class="primary-button" id="loginSubmit" type="submit">登入</button>
+          <p id="loginMessage" class="login-message" role="status"></p>
+        </form>
+        <p class="login-note">第一次本機測試預設帳號是 admin。部署到雲端前請務必用環境變數設定新密碼。</p>
+      </section>
+    </div>
+    <div class="modal-backdrop personal-backup-backdrop" id="personalBackupModal" hidden>
+      <section class="personal-backup-modal" role="dialog" aria-modal="true" aria-labelledby="personalBackupTitle" aria-describedby="personalBackupDescription" tabindex="-1">
+        <header class="personal-backup-head">
+          <div>
+            <span>個人資料安全復原</span>
+            <h2 id="personalBackupTitle">復原個人資料</h2>
+          </div>
+          <button class="icon-button" data-action="close-personal-backup" type="button" aria-label="關閉個人資料復原">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <p id="personalBackupDescription" class="personal-backup-description">先在伺服器預覽變更；確認前不會寫入。復原會取代你的自選股、提醒與交易帳本，共享備註則安全合併。</p>
+        <label class="personal-backup-file" for="personalBackupFile">
+          <span><i data-lucide="file-json"></i>選擇 Stock1 備份檔</span>
+          <small>JSON，檔案上限 16 MB</small>
+          <input id="personalBackupFile" type="file" accept=".json,application/json" />
+        </label>
+        <p id="personalBackupStatus" class="personal-backup-status" role="status" aria-live="polite">尚未選擇備份檔。</p>
+        <section id="personalBackupPreview" class="personal-backup-preview" aria-live="polite">
+          <p>選檔後會先顯示自選股、到價提醒、交易與共享備註的變更摘要。</p>
+        </section>
+        <div class="personal-backup-confirmation">
+          <label class="personal-backup-check">
+            <input id="personalBackupConfirm" type="checkbox" />
+            <span>我已看過預覽，確認用這份備份取代目前的個人資料。</span>
+          </label>
+          <label class="personal-backup-password">
+            <span>目前密碼</span>
+            <input id="personalBackupPassword" type="password" autocomplete="current-password" placeholder="用目前密碼確認身分" />
+          </label>
+        </div>
+        <footer class="personal-backup-actions">
+          <button class="watch-secondary-action" data-action="close-personal-backup" type="button">取消</button>
+          <button class="more-primary" data-action="restore-personal-backup" type="button" disabled>確認復原</button>
+        </footer>
+      </section>
+    </div>
+    <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>
