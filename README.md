@@ -23,7 +23,7 @@
 ## 架構
 
 ```mermaid
-flowchart TD
+flowchart LR
   subgraph Client["瀏覽器（PWA）"]
     UI["app.js（vanilla JS 單頁）"]
     SW["sw.js（network-first 離線殼）"]
