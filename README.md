@@ -1,6 +1,78 @@
-# Stock1 台股看盤 Web App
+# stock-cockpit — 台股看盤終端 Web App
 
-私人使用的台股看盤 Web App。第一版支援官方資料、登入帳號、每人自選股、每人券商 API 設定，以及富邦行情 provider 架構。
+![tests](https://img.shields.io/badge/tests-544%20offline-brightgreen) ![node](https://img.shields.io/badge/node-%E2%89%A520.19-blue) ![deps](https://img.shields.io/badge/runtime%20deps-1-blueviolet) ![PWA](https://img.shields.io/badge/PWA-offline%20shell-orange) ![license](https://img.shields.io/badge/license-MIT-blue)
+
+自架的台股看盤工作台（內部代號 Stock1）：整合 TWSE／TPEx／期交所官方資料，提供隔日沖與波段兩套選股引擎（含每日自動前向驗證）、技術分析、注意／處置看板、自選股與到價提醒，以及費稅完整的交易帳本。**手寫、無前後端框架**——後端是單檔 Node 原生 `http`（`server.mjs`），前端是 vanilla JS 單頁（`app.js`），執行期依賴只有富邦行情 SDK 一個。
+
+> 個人研究工具，僅供行情觀察與策略研究，不提供下單功能，所有訊號與估算都不構成投資建議。
+
+## 畫面
+
+| 隔日沖訊號＋前向驗證成績單 | 策略雷達（波段選股） |
+|---|---|
+| ![隔日沖](docs/assets/screen-overnight.png) | ![策略雷達](docs/assets/screen-strategy.png) |
+
+| 技術分析 | 處置看板 |
+|---|---|
+| ![技術分析](docs/assets/screen-technical.png) | ![處置看板](docs/assets/screen-surveillance.png) |
+
+| 盤中選股 | 手機版（PWA） |
+|---|---|
+| ![盤中選股](docs/assets/screen-screener.png) | <img src="docs/assets/screen-mobile.png" width="290" alt="手機版"> |
+
+## 架構
+
+```mermaid
+flowchart LR
+  subgraph Client["瀏覽器（PWA）"]
+    UI["app.js（vanilla JS 單頁）"]
+    SW["sw.js（network-first 離線殼）"]
+  end
+  subgraph Server["server.mjs（Node 原生 http、ESM 單檔）"]
+    API["REST API"]
+    ENG["選股引擎：隔日沖／波段＋前向驗證"]
+    LEDGER["交易帳本 v2（有效日期稅則）"]
+    Q["copy-on-write transaction queue"]
+  end
+  subgraph Store[".data／JSON 持久化"]
+    DB[("stock1-db.json")]
+    SIDE[("last-good 快取 sidecars")]
+    BK[("每日備份 ×14")]
+  end
+  subgraph Upstream["官方資料源"]
+    TWSE["TWSE MIS／OpenAPI"]
+    TPEX["TPEx OpenAPI"]
+    TAIFEX["期交所 MIS"]
+  end
+  FUBON["富邦新一代 API（只讀行情 provider）"]
+  UI --> API
+  API --> ENG --> Q
+  API --> LEDGER --> Q
+  Q --> DB
+  Q --> BK
+  ENG --> SIDE
+  ENG --> TWSE
+  ENG --> TPEX
+  ENG --> TAIFEX
+  API -. 券商模式 .-> FUBON
+```
+
+## 工程重點
+
+- **選股不只給清單，還每天對答案**：隔日沖與波段訊號都有前向驗證成績單——只有官方收盤資料完整且日期對齊時才凍結正式快照，盤中結果標示暫定、不寫入長期統計。
+- **交易帳本 v2**：商品與交易型態拆開建模、依成交日套用有效日期化的證交稅規則（一般 3‰、確認當沖 1.5‰、ETF/ETN 1‰、債券 ETF 停徵需官方憑據），估算值與券商實際值分離、歷史損益凍結不被回改。
+- **持久化走 copy-on-write transaction queue**：隔離 draft → 原子落盤 → 才發布新快取；失敗回 `503 PERSISTENCE_FAILED`，不會出現「回成功但只存在記憶體」的狀態。多實例以 canonical path 的 writer lease 互斥，避免重疊寫入。
+- **資料品質誠實降級**：各官方來源維護 last-good 快取與半包防護，單一市場失敗回傳其餘資料並附 `warnings`／`dataQuality`；估算、待覆核、官方確認三種狀態在 UI 明確區分。
+- **544 項離線測試**（`node:test`＋jsdom，零網路 mock 上游）＋ opt-in live 上游形狀檢查；`.agents/AUDIT.md` 記錄完整稽核路線圖與覆蓋率基線。
+- **PWA**：自架字型與圖示、network-first Service Worker，離線可開完整介面但 `/api` 永不快取——不會把舊行情冒充即時資料。
+
+## AI 協作開發方式
+
+這個專案由我與 coding agent 協作開發，倉庫內保留了完整的協作基礎設施：
+
+- `.agents/skills/`（canonical）與 `.claude/skills/`（鏡像）：六份專案 skill——架構地圖、後端規範、前端規範、選股域規則、測試規範、上游資料源陷阱大全。agent 動手前必須先讀對應 skill，改了重大行為必須回寫文件。
+- `.agents/AUDIT.md`：living 稽核文件，記錄歷次全面稽核的發現、修復與驗證基線（測試數、覆蓋率、依賴漏洞）。
+- 開發鐵律包含「特徵化原則」：發現疑似 bug 先回報、不默默改行為；測試釘住現行行為。
 
 ## 本機啟動
 
@@ -25,6 +97,13 @@ http://127.0.0.1:5174/
 ```
 
 部署前一定要用環境變數改掉預設密碼。
+
+跑測試：
+
+```powershell
+npm test          # 544 項離線測試（不需網路）
+npm run test:live # opt-in：真實上游形狀檢查
+```
 
 ## 主要環境變數
 
@@ -65,7 +144,7 @@ DB_PATH=/var/app/data/stock1-db.json
 
 ## PWA 與離線行為
 
-Lucide 圖示已固定為 1.24.0 並隨專案自架；繁中字型使用 Windows／macOS／iOS／Android 的原生字型，不依賴第三方 CDN。Service Worker 採 network-first：伺服器可連線時一定拿新版，離線時可從 `stock1-shell-v3` 開啟完整介面（包含帶 query 的首頁與全部圖示）。`/api` 刻意永不快取，因此離線時只保留 app shell，不會把舊行情冒充即時資料；升版時也只清除 `stock1-shell-*` 自有快取，不會碰同網域其他應用的 cache。
+Lucide 圖示已固定為 1.24.0 並隨專案自架；繁中字型使用 Windows／macOS／iOS／Android 的原生字型，不依賴第三方 CDN。Service Worker 採 network-first：伺服器可連線時一定拿新版，離線時可從 shell 快取開啟完整介面（包含帶 query 的首頁與全部圖示）。`/api` 刻意永不快取，因此離線時只保留 app shell，不會把舊行情冒充即時資料；升版時也只清除 `stock1-shell-*` 自有快取，不會碰同網域其他應用的 cache。
 
 ## 私人雲端使用方式
 
@@ -199,3 +278,11 @@ Lucide 圖示已固定為 1.24.0 並隨專案自架；繁中字型使用 Windows
 - 不要把 `APP_SECRET`、富邦密碼、憑證密碼提交到 Git。
 - 不要把 `.data/` 資料庫資料夾交給朋友或上傳到公開 repo。
 - 券商 API 第一版只做看盤，正式加交易功能前需要重新設計權限、稽核與風控。
+
+## 免責聲明
+
+本專案為個人研究與學習用途的行情觀察工具。所有選股訊號、驗證統計、費稅與損益估算僅供參考，不構成任何投資建議或要約；實際費稅以券商對帳單與主管機關公告為準。使用官方公開資料時請遵守各資料源的使用條款。
+
+## 授權
+
+[MIT](LICENSE)。自架字型 IBM Plex Mono 依 [OFL 授權](fonts/LICENSE-IBM-PLEX.txt)；Lucide 圖示為 ISC 授權。
