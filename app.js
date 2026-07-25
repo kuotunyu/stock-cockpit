@@ -3028,6 +3028,7 @@ function renderHoldingsPanel() {
 
   let totalValue = 0;
   let totalUnrealized = 0;
+  let pricedCost = 0; // 報酬率的分母只能算「有報價、已計入市值與未實現」的那部分成本
   let unpriced = 0;
   const holdRows = holdings
     .map((h) => {
@@ -3040,6 +3041,7 @@ function renderHoldingsPanel() {
       if (hasPrice) {
         totalValue += value;
         totalUnrealized += unrealized;
+        pricedCost += h.cost;
       } else {
         unpriced += 1;
       }
@@ -3067,7 +3069,9 @@ function renderHoldingsPanel() {
     .join("");
 
   const totalCost = pf?.totals?.cost || 0;
-  const totalPct = totalCost > 0 ? (totalUnrealized / totalCost) * 100 : null;
+  // 分母必須與分子同口徑：totalUnrealized 只累加有報價的持股，若拿含未報價部位的 totalCost 當分母，
+  // 報酬率會被灌水稀釋（例：+10,000 / 有報價成本 100,000 = +10%，用全部成本 200,000 算變 +5%）。
+  const totalPct = pricedCost > 0 ? (totalUnrealized / pricedCost) * 100 : null;
   const upTone = totalUnrealized >= 0 ? "is-up" : "is-down";
   const realizedPnl = pf?.totals?.realizedPnl || 0;
   const dividendRecognizedGross = Number(pf?.totals?.dividendRecognizedGross ?? pf?.totals?.dividendIncome) || 0;
@@ -3182,7 +3186,7 @@ function renderHoldingsPanel() {
         <div data-dividend-summary="receivable"><span>待入帳</span><strong>${formatMoney(dividendReceivableGross)}</strong></div>
         <div data-dividend-summary="received"><span>已入帳淨額</span><strong>${formatMoney(dividendReceivedNet)}</strong></div>
       </div>` : ""}
-    ${unpriced ? `<p class="hold-hint">${unpriced} 檔暫無報價，未計入市值與未實現損益（開盤後會自動補上）。</p>` : ""}
+    ${unpriced ? `<p class="hold-hint">${unpriced} 檔暫無報價，未計入市值與未實現損益，報酬率分母也只算已報價部位（開盤後會自動補上）；「總成本」仍為全部持股。</p>` : ""}
     ${closedPositionDividendHtml}
     ${tradesState.quarantinedRecords.length ? `<div class="trade-review-banner" role="status"><strong>${tradesState.quarantinedRecords.length} 筆舊資料待整理</strong><span>原始內容已安全保留，未納入持股與損益；不會在升級時被靜默刪除。</span></div>` : ""}
     <div class="hold-list">

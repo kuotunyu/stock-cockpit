@@ -32,6 +32,10 @@ description: Stock1 的股票專業邏輯規格書——隔日沖與波段兩個
 ## 前向驗證（兩套，規則不同）
 
 - **隔日沖驗證**：觀察日必須是訊號日後第一個「實際交易日」，依序用 TWSE `FMTQIK`、官方開休市表與多檔官方歷史共識判定；每檔只接受日期完全相等的官方 OHLC，絕不滾到更晚交易日。觀察日盤中僅在 MIS 原始日期與 O/H/L 都齊全時顯示暫定結果；盤中、缺檔或 partial 都不算正式完成。長期成績只納入觀察日已收盤且全部訊號完成的日子；partial 可顯示但不污染分母。`/api/overnight/verify` 為單日，`/verify/history` 為逐日成績單（pending 60 秒、完整 10 分鐘快取）。
+- **除權息／減資的機械性跳空不得算成漲跌**（2026-07-26 修）。兩套驗證引擎都用未還原原始價，除息當天必然誤判：實測配息 5 元（參考價 95）、當天相對參考價小漲 0.5%，波段驗證仍記 loss −5%；隔日沖同理直接觸發 `brokeMinus2`。偏誤是**單向**的（只多記 loss、少記 win），且台股旺季集中 7~9 月。
+  - **波段側**：`replaySwingVerificationHistory` 推進每一天前，用「該根的交易所官方昨收 ÷ 前一根實際收盤」推比率（偏離 1 超過 0.2% 才算事件），把 `entry/stop/target` 一起乘上去，並記 `entry.corporateActions`。股利已內含在比率裡，之後的 `resultPct` 就是**含息總報酬**。驗證路徑刻意**不經過 `addPreviousClose`**，所以官方昨收還在——這是偵測公司行動最可靠的來源，且不依賴只涵蓋除權息的本機歸檔。
+  - **隔日沖側**：`observeSignalSnapshot` 換基準價**必須先由 `corporateActionHistoryForCode` 確認當日真有官方事件**。不可只比 `bar.previousClose` 與 `pick.price` 的大小——兩者來自不同來源／時點，正常差異就會誤觸發並靜靜改掉所有報酬數字（實作時差點放行，已由測試釘住）。
+  - **已知限制**：官方昨收缺值（`parseNumber` 對非數值字串回 null）時偵測不到，維持舊行為；本機歸檔不涵蓋減資／面額變更，隔日沖側因此只擋得住除權息。
 - **波段驗證**（swingVerification，留 90 天）：逐日用**真實高低價**推進；**同日雙觸（高過目標又低破停損）保守記 loss**；跳空用開盤價計滑價；15 個實際交易日未觸發以收盤 expired 結案。漏開 App 會依日期用官方日 K 補判；中間日期缺 K 就停在缺口前，不可跳日。**entry 一旦建立不可回溯刪除**——它是「當時真的出現過的建議」，公式改版用 formulaVersion 區分統計，不清歷史。半市場、資料日未對齊或歷史掃描覆蓋率低於 70% 時，看板可回 provisional 結果，但不得建立／推進波段驗證單。
 
 ## 交易帳本 v2 與持股損益（trades/portfolio）
@@ -39,6 +43,7 @@ description: Stock1 的股票專業邏輯規格書——隔日沖與波段兩個
 法規最後核對日：**2026-07-13**。正式估算走有效日稅則 `computeTradeTaxRule()`；舊 `computeTradeTax()`／`kind` 只為相容與舊測試保留，不得拿來新增產品邏輯。
 
 - 手續費 `computeTradeFee`＝`max(minFee 20 元, round(價金 × 0.1425% × 折數))`，折數預設 0.6。這只是**單一預設券商估算方案**，不是法定或全券商通則；實際費率、折讓與最低費用由券商約定。`feeSource`／`taxSource` 為 `estimated`、`broker`、`manual`、`legacy`：manual／broker 的明確實際金額（包括 0 元）優先；estimated／legacy 的金額與 rule id 由伺服器管理。既有紀錄經濟內容未變時凍結金額，改折數不追溯；價格、股數、成交日、商品或當沖內容變更時，estimated／legacy 必須由後端重算，不能接受客戶端自填值。
+- **舊版 `dayTrade` 但沒帶 tax 的紀錄不得繞過有效日期**（2026-07-26 修）。舊寫法直接呼叫無日期參數的 `computeTradeTax(..., "dayTrade")`，讓 2017-04-28 之前／2027-12-31 之後的成交日也享 1.5‰（稅短計一半），還與同筆的「未自動套用優惠稅率」warning 自相矛盾。此分支沒有任何金額可「凍結」，一律落到 `computeTradeTaxRule`：legacyDeclared 的 matchedShares 已歸零 → `tw-stock-general-0.003`，`taxSource` 仍為 legacy。
 - 一般股票賣出證交稅 3‰。符合資格的股票現股當沖，在 **2017-04-28～2027-12-31（含首尾日）**按已確認的 `matchedShares` 計 1.5‰，未配對股數仍按 3‰；只有 `brokerConfirmed`／`userConfirmed` 會套用配對股數，舊 `legacyDeclared` 不會自動享優惠。
 - ETF／ETN 一般賣出估算 1‰；符合停徵條件的被動式、非槓反債券指數 ETF 在 **2017-01-01～2026-12-31（含首尾日）**估算 0。主動式、槓桿／反向 ETF 仍按 1‰。尚未細分的舊 ETF 轉成 `unknownEtf` 並待覆核，不能擅自當作免稅債券 ETF。
 - 目前已有 TWSE 歷史 ETF／目前掛牌狀態與 TPEx 七類 ETF 官方商品主檔。只有正向命中且成交日不早於掛牌日才可寫 `instrumentSource="official"`；改成交日也必須重新核定。來源降級、查無或交易日不適用時維持 `needsReview`／`instrumentSource="user"`，負向查詢不能當成「一定不是 ETF」。使用者選「債券指數 ETF」但沒有官方分類或券商實際稅額時仍須保守按一般 ETF 估稅。提案或新聞所述的延長／擴大停徵若尚未生效，絕不可先寫進稅則。
@@ -54,6 +59,7 @@ description: Stock1 的股票專業邏輯規格書——隔日沖與波段兩個
 ## 還原權息（backAdjustForCorporateActions）
 
 - 優先使用本機持久化的 TWSE／TPEx 官方公司行動歸檔。參考價公式為 `(前收－現金股利＋認購價×現增比率) ÷ (1＋股票股利比率＋現增比率)`；舊價格乘參考價／前收，舊成交量再按股數因子反向調整，最新可交易價格不動。
+- **除權事件的兩個比率欄位都必須是明確數值**（2026-07-26 修）。`officialCorporateActionRatio` 舊寫法是 OR，只要現增比率回 0（合法值、不是 null），缺漏的 `stockRatio` 就被當成 0 → ratio 算出 **1**（一根價都不調）卻蓋上 `official` 章，不走 heuristic 也不標 unresolved，還原序列裡就留下一根真實的除權假崩盤。現改為 kind 含「權」時 `stockRatio` 與 `subscriptionRatio` 缺任一即回 null；除權算出 `ratio === 1` 也當可疑值攔下。
 - 同日已有官方事件但現金、股票、現增比率或認購價欄位不足時，該日標 `unresolved`。即使 >10.5% 跳空可暫時估算圖形，也**不得**提供單檔型態結論或讓標的進榜；掃描品質要記 `corporate-action-unresolved`，等公告修訂後再算。
 - 本機歸檔從部署後才累積且不涵蓋所有減資；「archive 沒有這天」不是官方確認無事件。缺漏區段仍可用開盤／收盤相對前收 >10.5% 的 heuristic 還原，但 UI 必須寫「疑似公司行動／估算還原」，不可宣稱一定是除息。完整官方、heuristic 同時出現時來源標 `mixed`。
 - 官方公告改期或撤回會保留稽核版本、把舊事件標 `withdrawn`；withdrawn 不得參與還原或未來除權息 UI。
@@ -70,6 +76,8 @@ description: Stock1 的股票專業邏輯規格書——隔日沖與波段兩個
 
 - 台股盤中 09:00–13:35（`isTaiwanMarketSession`，邊界含 13:30 收盤後的最後撮合回報）；期貨夜盤 15:00–次日 05:00（跨日、週一凌晨無夜盤）。時區一律 Intl Asia/Taipei，不信本機時鐘。
 - `priceStale=true`＝即時源無成交價退回官方收盤價：盤中顯示「暫無即時成交・顯示昨收」，收盤後顯示「MM/DD 收盤」；這是新鮮度標記，**若相對昨收有漲跌仍維持紅／綠，只有平盤才用中性灰**。MIS 提供的前一交易日最後成交仍是有效成交，標「最後成交 MM/DD」並依漲跌維持紅／綠。官方即時三層＝MIS 有效正價格 z/pz/oz → **僅接受交易日為台北今日的 Yahoo** → 官方昨收／收盤；MIS 的 `0.0000` 是無成交哨兵，不能當成 0 元。Yahoo 升格時必須改用自己的日期與同日 OHLC，不能把昨日官方欄位混進今日行情。
+- **Yahoo 升格時不可沿用不同交易日的昨收與量能**（2026-07-26 修）。MIS 這輪沒回這檔時 `base` 會退成整批收盤，而盤中 STOCK_DAY_ALL 可能還停在前一交易日——那份 `previousClose` 是「前前一個交易日」的收盤，配上今天的 Yahoo 價會把漲跌算成兩天份（實測 +1.52% vs 正確 +0.50%）。現在只有 `base` 的日期等於 Yahoo 日期才沿用，量能欄位（`volumeLots/transactions/unitLots/turnoverPct`）不同日一律清 null。
+- **`realtimeCount` 不含 `priceStale`**（2026-07-26 修）：退回昨收的檔位不是即時。舊寫法用 `realtimeQuotes.size` 會讓資料可信度顯示「即時 N 檔／收盤備援 0 檔」且判定良好，畫面上卻有數十檔掛著「收盤」。
 - 平盤（|change|<0.005）＝中性色，不是紅；列表、卡片、K 棒與走勢線已統一使用同一判定。
 - 股名帶 `*`＝官方「彈性面額股」標記（面額非 10 元），**不是**全額交割記號，保留並附 tooltip。
 - 台指期：期交所 MIS 即時（日盤＋夜盤同 URL），失敗退日報表＋staleReason；近月合約選成交量最大者。
