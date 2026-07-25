@@ -98,5 +98,8 @@ referenceMarketCache＋referenceCache（上市／上櫃各自 last-good，5 分�
 - 瀏覽器驗證用 preview `stock1-test`（5180）。**preview_screenshot 在此環境常逾時/縮小**——既定慣例改用 preview_eval 讀 getComputedStyle/getBoundingClientRect＋a11y snapshot 驗證；量桌機版面前先 preview_resize 到 ≥1280 寬（預設視窗太窄會誤判換行）。
 - 給使用者的總結：改了什麼、行為變更明列、server.mjs 有動就提醒重啟、純前端提醒 Ctrl+F5。
 - **Git 由使用者自己操作**——不要代跑 commit／push，給指令讓他貼。PowerShell 5.1 不支援 `&&`，一行一個指令。
+- **行尾一律 LF**（`.gitattributes` 是 `* text=auto eol=lf`，會在 `git add` 時正規化，所以 repo 內容不會被污染；但工作區行尾不一致會讓每次 `git add` 跳 CRLF warning）。改檔請用 Edit／Write 工具；**不要用 python 的 `io.open(path, "w")` 改 repo 檔案**——Windows 上它預設會把 `\n` 轉成 `\r\n`（2026-07-26 實際踩過）。非用 python 不可時加 `newline=""`。
+  - 修復方式：`git checkout -- <file>` 是 no-op（git 比對前會正規化，看到內容相同就不重寫），必須**先刪檔再 checkout** 才會刷新成 LF。
+  - 檢查全工作區行尾：用 Node 逐 byte 數 `\r\n`，不要用 `grep -cU $'\r'`（實測會誤報全部命中）。
 - **Commit 訊息一律正體中文（zh-tw）為主，專有名詞直接用原文**（函式名、API 名、`innerHTML`、`single-flight`、ETF 等術語不要硬翻）。沿用既有的 `fix:` / `docs:` / `chore:` 前綴。
   - **訊息寫成檔案再 `git commit -F <path>`**，不要把中文當參數傳給 `git.exe`：使用者在 Windows PowerShell 5.1 手動操作，直接傳參數有機率變亂碼。（已驗證 `-F` 的結果編碼正確。）
