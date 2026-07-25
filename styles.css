@@ -9368,3 +9368,14 @@ body.is-locked .app-shell {
   }
 }
 
+/* D-20：驗證／回測的淨報酬並陳。毛值維持原本視覺權重，淨值用較低調的樣式跟在後面，
+   讓使用者一眼看到「還有一個扣掉成本的數字」但不搶走原本的閱讀焦點。字級守 --fs-note 下限。 */
+.verify-net {
+  margin-left: 6px;
+  color: var(--muted-2);
+  font-family: var(--mono);
+  font-size: var(--fs-note);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

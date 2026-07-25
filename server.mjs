@@ -493,6 +493,22 @@ function capacityValidationError(message, details) {
 const TRADE_FEE_RATE = 0.001425; // 只作預設估算基準；實際費率、折讓與最低費用由券商自訂。
 // 舊版相容常數；v2 正式估算改走 effective-dated computeTradeTaxRule()。
 const TRADE_TAX_RATES = { stock: 0.003, etf: 0.001, dayTrade: 0.0015 };
+
+// ---- 前向驗證／回測的交易成本估算（D-20）----
+// 驗證單與回測樣本只有價格，沒有股數或部位金額，所以只能做**費率版**淨報酬：
+// 買進手續費＋賣出手續費（各 TRADE_FEE_RATE × 預設折數）＋賣出證交稅（一般股票 3‰）。
+// 因此它**套不上 computeTradeFee 的每筆最低 20 元**——成交金額低於約 23,400 元時實際費率更高，
+// 小額部位的真實成本會比這個數字大。也不等同交易帳本口徑，文案一律標「估算」。
+// 隔日沖是「今日收盤買、次日賣」，不是現股當沖，所以用全額 3‰ 而非減半的 1.5‰。
+const VERIFY_ROUND_TRIP_FEE_PCT = TRADE_FEE_RATE * 0.6 * 2 * 100;   // 0.171%
+const VERIFY_ROUND_TRIP_TAX_PCT = TRADE_TAX_RATES.stock * 100;       // 0.3%
+const VERIFY_ROUND_TRIP_COST_PCT = roundTo(VERIFY_ROUND_TRIP_FEE_PCT + VERIFY_ROUND_TRIP_TAX_PCT, 3); // 0.471%
+const VERIFY_COST_NOTE = `淨報酬為估算：已扣一買一賣的手續費與證交稅合計約 ${VERIFY_ROUND_TRIP_COST_PCT}%`
+  + "（以預設 0.6 折、一般股票 3‰ 計；未計每筆最低 20 元手續費與滑價，小額部位實際成本更高）。";
+// 毛報酬扣成本；null 進 null 出，不可讓缺值變成 -0.471。
+function netReturnPct(grossPct) {
+  return Number.isFinite(grossPct) ? roundTo(grossPct - VERIFY_ROUND_TRIP_COST_PCT) : null;
+}
 const TRADE_SCHEMA_VERSION = 2;
 const TRADE_INSTRUMENT_TYPES = new Set([
   "stock",
@@ -6634,6 +6650,7 @@ function summarizeRecentBacktest(history, group, days = 30) {
     avgOpenReturn: average(performances.map((item) => item.openReturn)),
     avgHighReturn: average(performances.map((item) => item.highReturn)),
     avgCloseReturn: average(performances.map((item) => item.closeReturn)),
+    avgCloseReturnNet: netReturnPct(average(performances.map((item) => item.closeReturn))),
     brokeMinus2Rate: performances.filter((item) => item.brokeMinus2).length / performances.length,
   };
 }
@@ -7343,6 +7360,7 @@ async function buildVerificationHistory() {
     notes: [
       "觀察日依證交所實際交易日／開休市表判定，且只接受日期完全相等的官方 OHLC。",
       "基準＝訊號日收盤；達 +2% 看觀察日最高，破 -2% 看觀察日最低。partial 不納入長期正式統計。",
+      `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
   const hasPending = records.some((record) => !record.complete);
@@ -7391,6 +7409,10 @@ async function buildSignalVerification() {
     brokeMinus2: items.filter((row) => row.brokeMinus2).length,
     avgCurrentReturn: average(items.map((row) => row.currentReturn)),
     avgHighReturn: average(items.map((row) => row.highReturn)),
+    // 毛報酬保留原值不動；並陳扣掉來回費稅的估算淨值（見 VERIFY_COST_NOTE）。
+    // 隔日沖平均報酬本來就在 ±0.5% 這個量級，0.471% 的成本足以讓正負號翻轉。
+    avgCurrentReturnNet: netReturnPct(average(items.map((row) => row.currentReturn))),
+    avgHighReturnNet: netReturnPct(average(items.map((row) => row.highReturn))),
   });
   // 三個分群是平行判定、沒有 else：strongContinuation 的條件是 pullbackReversal 的超集，
   // 所以溫和上漲的紅 K 必定同時進兩群，同一檔會出現兩筆、貢獻完全相同的漲跌結果。
@@ -7426,6 +7448,7 @@ async function buildSignalVerification() {
     notes: [
       "觀察日依證交所實際交易日／開休市表判定，且每檔行情日期必須完全等於該日；不會把重新開啟 App 的日期當成隔日。",
       "報酬以訊號日收盤價為基準；達 +2% 用觀察日最高價判定，破 -2% 用觀察日最低價判定。",
+      `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
 }
@@ -7489,6 +7512,10 @@ async function buildBacktestUncached({ days = 30 } = {}) {
       avgOpenReturn: average(perf.map((item) => item.openReturn)),
       avgHighReturn: average(perf.map((item) => item.highReturn)),
       avgCloseReturn: average(perf.map((item) => item.closeReturn)),
+      // 毛報酬保留原值；並陳扣掉來回費稅的估算淨值（見 VERIFY_COST_NOTE）。
+      avgOpenReturnNet: netReturnPct(average(perf.map((item) => item.openReturn))),
+      avgHighReturnNet: netReturnPct(average(perf.map((item) => item.highReturn))),
+      avgCloseReturnNet: netReturnPct(average(perf.map((item) => item.closeReturn))),
       hitPlus2Rate: perf.length ? perf.filter((item) => item.hitPlus2).length / perf.length : null,
       brokeMinus2Rate: perf.length ? perf.filter((item) => item.brokeMinus2).length / perf.length : null,
     };
@@ -7512,6 +7539,7 @@ async function buildBacktestUncached({ days = 30 } = {}) {
     notes: [
       "Backtest v1 runs on current signal candidates to keep official endpoint usage practical.",
       "Returns use signal-day close as the observation baseline and next trading day OHLC.",
+      `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
 }
@@ -8854,6 +8882,7 @@ async function buildSwingVerificationSummary() {
     pending: s.pending,
     winRate: s.resolved ? Math.round((s.wins / s.resolved) * 1000) / 10 : null,
     avgResultPct: s.resolved ? Math.round((s.sumResultPct / s.resolved) * 100) / 100 : null,
+    avgResultPctNet: s.resolved ? netReturnPct(s.sumResultPct / s.resolved) : null,
     avgDaysHeld: s.resolved ? Math.round((s.sumDaysHeld / s.resolved) * 10) / 10 : null,
   }));
   all.sort((a, b) => String(b.resolvedAt || b.day).localeCompare(String(a.resolvedAt || a.day)));
@@ -8869,6 +8898,7 @@ async function buildSwingVerificationSummary() {
     notes: [
       "驗證規則：進場＝訊號日收盤，之後每個交易日用官方日K高低價判定「先碰目標＝達標、先碰停損（結構停損）＝停損」；同一天兩邊都碰到，保守記停損。",
       `${SWING_VERIFY_MAX_DAYS} 個實際交易日內都沒碰到 → 以第 ${SWING_VERIFY_MAX_DAYS} 日收盤結案（超時）。漏開 App 會用官方日K依日期補判；若中間日K缺漏就停在缺口前並排除結案統計。`,
+      `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
   swingVerifySummaryCache = { expiresAt: Date.now() + 10 * 60 * 1000, value: body };
@@ -11072,6 +11102,7 @@ export {
   tradeMoneyEstimateFingerprint, canonicalizeTradeMoneyProvenance,
   // 處置／監視
   SURVEILLANCE_RANK, classifySurveillance, parseDispositionPeriod, parseDispositionInterval, latestUpstreamDate,
+  VERIFY_ROUND_TRIP_COST_PCT, VERIFY_COST_NOTE, netReturnPct,
   lookupStockSurveillance, survFetchRecords, getSurveillanceBoard, getRiskSets,
   // 技術分析數學
   emaSeries, movingAverageSeries, computeMacd, findSwingPoints, buildTrendLine,

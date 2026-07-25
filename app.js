@@ -1202,6 +1202,18 @@ function getDataTrustTone() {
   return "good";
 }
 
+// D-20：驗證與回測的百分比預設是「未扣費稅的毛報酬」。台股一買一賣約 0.471%，
+// 而隔日沖的平均報酬本來就在 ±0.5% 這個量級——毛值 +0.35% 扣完成本其實是 −0.12%，
+// 正負號會翻轉。這裡不動使用者熟悉的毛值，改成在旁邊並陳伺服器算好的淨值。
+function formatGrossWithNet(grossPct, netPct) {
+  const gross = formatSignedPercent(grossPct);
+  // 這裡不能用 Number.isFinite(Number(netPct))：Number(null)===0 是有限值，
+  // 缺值會被渲染成「淨 +0.00%」——正是全站一直在防的造假零。走既有的 finiteNumberOrNull。
+  const net = finiteNumberOrNull(netPct);
+  if (net === null) return gross;
+  return `${gross}<em class="verify-net" title="已扣一買一賣的手續費與證交稅估算（約 0.471%）">淨 ${formatSignedPercent(net)}</em>`;
+}
+
 function renderDataTrustCompact() {
   const tone = getDataTrustTone();
   const toneText = {
@@ -5134,7 +5146,7 @@ function renderSignalVerification() {
           ${coverageLabel ? `<span>${escapeHtml(coverageLabel)}</span>` : ""}
           <span class="${hitTone}">達+2%：${summary.hitPlus2 ?? 0}/${summary.total ?? 0}</span>
           <span class="negative">破-2%：${summary.brokeMinus2 ?? 0}/${summary.total ?? 0}</span>
-          <span>${isIntraday ? "平均現價" : "平均收盤"} ${formatSignedPercent(summary.avgCurrentReturn)}</span>
+          <span>${isIntraday ? "平均現價" : "平均收盤"} ${formatGrossWithNet(summary.avgCurrentReturn, summary.avgCurrentReturnNet)}</span>
         </div>
       </header>
       <div class="verify-rows">
@@ -5215,7 +5227,7 @@ function renderVerifyHistory() {
             <span>累計 ${totals.days} 天 / ${totals.signals} 檔</span>
             <span class="${totals.signals && totals.hitPlus2 / totals.signals >= 0.5 ? "positive" : ""}">達+2% ${rate(totals.hitPlus2, totals.signals)}</span>
             <span class="negative">破-2% ${rate(totals.brokeMinus2, totals.signals)}</span>
-            <span>平均隔日收 ${formatSignedPercent(totals.avgCloseReturn)}</span>
+            <span>平均隔日收 ${formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
           </div>
         ` : ""}
       </header>
@@ -5257,7 +5269,7 @@ function renderBacktestPerformance() {
           <div><dt>隔日破 -2%</dt><dd>${rate(item.brokeMinus2Rate)}</dd></div>
           <div><dt>平均開盤</dt><dd>${ret(item.avgOpenReturn)}</dd></div>
           <div><dt>平均最高</dt><dd>${ret(item.avgHighReturn)}</dd></div>
-          <div><dt>平均收盤</dt><dd>${ret(item.avgCloseReturn)}</dd></div>
+          <div><dt>平均收盤</dt><dd>${formatGrossWithNet(item.avgCloseReturn, item.avgCloseReturnNet)}</dd></div>
         </dl>
       </article>
     `)
@@ -5611,7 +5623,7 @@ function renderSwingVerifyPanel() {
             <strong>${escapeHtml(swingScenarioName(s.scenario))}</strong>
             <span class="sv-rate ${tone}"><small>勝率</small> ${rate}</span>
           </div>
-          <small>結案 ${resolved}（達標 ${s.wins}・停損 ${s.losses}・超時 ${s.expired}）・追蹤中 ${s.pending}${s.avgResultPct != null ? `・平均 ${s.avgResultPct >= 0 ? "+" : ""}${s.avgResultPct}%` : ""}${s.avgDaysHeld != null ? `・平均持有 ${s.avgDaysHeld} 天` : ""}</small>
+          <small>結案 ${resolved}（達標 ${s.wins}・停損 ${s.losses}・超時 ${s.expired}）・追蹤中 ${s.pending}${s.avgResultPct != null ? `・平均 ${s.avgResultPct >= 0 ? "+" : ""}${s.avgResultPct}%${s.avgResultPctNet != null ? `（淨 ${s.avgResultPctNet >= 0 ? "+" : ""}${s.avgResultPctNet}%）` : ""}` : ""}${s.avgDaysHeld != null ? `・平均持有 ${s.avgDaysHeld} 天` : ""}</small>
         </div>`;
     })
     .join("");
