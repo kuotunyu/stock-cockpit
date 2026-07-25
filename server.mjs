@@ -4955,10 +4955,22 @@ async function loadRiskSets(riskDate) {
       },
     },
     {
+      // 處置公告清單同時含「已結束」與「尚未開始」的列——看板自己就把它切成即將處置／
+      // 處置中／即將出關三桶，代表程式早就預期清單裡有非當期的列。這裡以前卻無條件全收，
+      // 已出關的股票今天仍被標「處置・分盤・預收」，開了隱藏開關還會誤刪正常交易的標的。
+      // 日期窗在消費端套用（見下方迴圈）而不是塞進 fetcher：riskSourceMemory 以 name 為鍵
+      // 並持久化，若把結果變成跟日期相關就必須把 riskDate 加進 name，last-good 會變成每日
+      // 獨立、上游失敗時反而沒有備援。改用既有的 `code|...` 字串慣例夾帶期間。
       name: "TWSE 處置股",
+      windowed: true,
       fetcher: async () => {
         const rows = await fetchJsonWithRetry("https://openapi.twse.com.tw/v1/announcement/punish");
-        return rows.map((r) => cleanCode(r.Code)).filter((code) => /^\d{4}$/.test(code));
+        return rows
+          .map((r) => {
+            const period = parseDispositionPeriod(r.DispositionPeriod);
+            return `${cleanCode(r.Code)}|${period.start}|${period.end}`;
+          })
+          .filter((entry) => /^\d{4}\|/.test(entry));
       },
     },
     {
@@ -4977,9 +4989,15 @@ async function loadRiskSets(riskDate) {
     },
     {
       name: "TPEx 處置股",
+      windowed: true,
       fetcher: async () => {
         const rows = await fetchJsonWithRetry("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information");
-        return rows.map((row) => cleanCode(row.SecuritiesCompanyCode)).filter((code) => /^\d{4}$/.test(code));
+        return rows
+          .map((row) => {
+            const period = parseDispositionPeriod(row.DispositionPeriod);
+            return `${cleanCode(row.SecuritiesCompanyCode)}|${period.start}|${period.end}`;
+          })
+          .filter((entry) => /^\d{4}\|/.test(entry));
       },
     },
     {
@@ -5051,10 +5069,17 @@ async function loadRiskSets(riskDate) {
   ];
 
   await Promise.all([
-    ...sources.map(async ({ name, fetcher }) => {
-      const codes = await resolveRiskSource(name, fetcher, warnings);
+    ...sources.map(async ({ name, fetcher, windowed = false }) => {
+      const entries = await resolveRiskSource(name, fetcher, warnings);
       const info = classifySurveillance(name);
-      for (const code of codes) {
+      for (const entry of entries) {
+        // 一般來源存純代號；windowed 來源存 `code|起日|迄日`（沿用停牌來源的 `|` 慣例）。
+        // 舊的 risk-cache.json 只有純代號，讀到時 start/end 為空 → 保留，向後相容。
+        const [code, start = "", end = ""] = String(entry).split("|");
+        if (!/^\d{4}$/.test(code)) continue;
+        // 期間可解析且不涵蓋基準日 → 已出關或尚未開始，今天不該掛處置標籤。
+        // 期間解析不出來時保守保留：對風險標籤而言，寧可多標也不要漏標。
+        if (windowed && start && end && !(start <= riskDate && riskDate <= end)) continue;
         const prev = surveillance.get(code);
         if (!prev || SURVEILLANCE_RANK[info.kind] > SURVEILLANCE_RANK[prev.kind]) {
           surveillance.set(code, info);
@@ -5110,6 +5135,19 @@ const openapiHeaders = {
 function parseDispositionPeriod(text) {
   const parts = String(text || "").split(/[~～至]/);
   return { start: toCompactDate(parts[0] || ""), end: toCompactDate(parts[1] || parts[0] || "") };
+}
+// TPEx 的鉅額與變更交易端點回的是「最近一個公布日」的整批資料，不是可以指定日期的查詢。
+// 以前硬比對日曆今天（toTaipeiCompactDate），於是週末、國定假日與盤中尚未公布的時段，
+// 這兩類就只剩上市股票、上櫃整批消失，counts 跟著少算，畫面卻仍標著今天的日期——
+// 看起來像「上櫃今天真的沒有全額交割股」。改成取 payload 內「不晚於查詢日的最新日期」。
+function latestUpstreamDate(rows, getDate, notAfter = "") {
+  let latest = "";
+  for (const row of rows || []) {
+    const date = toCompactDate(getDate(row));
+    if (!date || (notAfter && date > notAfter)) continue;
+    if (date > latest) latest = date;
+  }
+  return latest;
 }
 // 分盤間隔：處置內容含「每5/五分鐘」→5、「每20/二十分鐘」→20
 function parseDispositionInterval(text) {
@@ -5302,13 +5340,15 @@ async function getSurveillanceBoard(dateCompact) {
   });
   const blockTpex = await survFetchRecords("blockTpex", today, "TPEx 鉅額交易", warnings, async () => {
     const rows = await fetchJsonWithRetry("https://www.tpex.org.tw/openapi/v1/tpex_daily_qutoes_block");
+    // 取上游最近一個公布日（不晚於查詢日），而不是硬比對日曆今天——否則非交易日整批消失。
+    const sourceDate = latestUpstreamDate(rows, (r) => r.Date, today);
     const agg = new Map();
     for (const r of rows || []) {
       const code = cleanCode(r.Code);
       if (!/^\d{4}$/.test(code)) continue;
-      if (toCompactDate(r.Date) !== today) continue; // 只取當日（和 TWSE date=today 一致）
+      if (!sourceDate || toCompactDate(r.Date) !== sourceDate) continue;
       const value = Number(String(r.TradeValue || "").replace(/,/g, "")) || 0;
-      const o = agg.get(code) || { code, name: String(r.Name || "").trim(), count: 0, value: 0 };
+      const o = agg.get(code) || { code, name: String(r.Name || "").trim(), count: 0, value: 0, asOf: sourceDate };
       o.count += 1;
       o.value += value;
       agg.set(code, o);
@@ -5338,14 +5378,26 @@ async function getSurveillanceBoard(dateCompact) {
   });
   const changedTpex = await survFetchRecords("changedTpex", today, "TPEx 全額交割", warnings, async () => {
     const rows = await fetchJsonWithRetry("https://www.tpex.org.tw/openapi/v1/tpex_cmode");
+    const sourceDate = latestUpstreamDate(rows, (r) => r.Date, today); // 同上：不硬比對日曆今天
+    if (!sourceDate) return [];
     return (rows || [])
-      .filter((r) => ["Ｙ", "Y"].includes(String(r.AlteredTrading || "").trim()) && toCompactDate(r.Date) === today) // 變更交易方法＝全額交割
+      .filter((r) => ["Ｙ", "Y"].includes(String(r.AlteredTrading || "").trim()) && toCompactDate(r.Date) === sourceDate) // 變更交易方法＝全額交割
       .map((r) => {
         const code = cleanCode(r.SecuritiesCompanyCode);
         if (!/^\d{4}$/.test(code)) return null;
-        return { code, market: "TPEx", srcName: String(r.CompanyName || "").trim(), periodic: String(r.PeriodicTrading || "").trim() !== "" };
+        return { code, market: "TPEx", srcName: String(r.CompanyName || "").trim(), periodic: String(r.PeriodicTrading || "").trim() !== "", asOf: sourceDate };
       }).filter(Boolean);
   });
+  // 上櫃兩類的資料日若落後查詢日（非交易日、或當日尚未公布），必須明講——否則使用者會
+  // 以為「上櫃今天真的沒有鉅額／全額交割」。只在「確實有資料但日期較舊」時警告；
+  // 完全沒有列時無法分辨「當天真的沒有」與「上游還沒公布」，不編造結論。
+  for (const [label, records] of [["鉅額交易", blockTpex], ["全額交割", changedTpex]]) {
+    const sourceDate = records.find((record) => record.asOf)?.asOf || "";
+    if (sourceDate && sourceDate !== today) {
+      warnings.push(`上櫃${label}目前是 ${compactToSlashDate(sourceDate)} 的公布資料（查詢日 ${compactToSlashDate(today)}）。`);
+    }
+  }
+
   const changedMap = new Map();
   for (const rec of [...changedTwse, ...changedTpex]) if (!changedMap.has(rec.code)) changedMap.set(rec.code, rec);
   const changedTrading = [...changedMap.values()]
@@ -10969,7 +11021,7 @@ export {
   getProductDirectory, resolveOfficialInstruments, canonicalizeTradeInstrumentProvenance,
   tradeMoneyEstimateFingerprint, canonicalizeTradeMoneyProvenance,
   // 處置／監視
-  SURVEILLANCE_RANK, classifySurveillance, parseDispositionPeriod, parseDispositionInterval,
+  SURVEILLANCE_RANK, classifySurveillance, parseDispositionPeriod, parseDispositionInterval, latestUpstreamDate,
   lookupStockSurveillance, survFetchRecords, getSurveillanceBoard, getRiskSets,
   // 技術分析數學
   emaSeries, movingAverageSeries, computeMacd, findSwingPoints, buildTrendLine,
