@@ -2026,6 +2026,7 @@ function clearUserScopedState({ renderNow = true } = {}) {
   tradesState.records = [];
   tradesState.quarantinedRecords = [];
   tradesState.portfolio = null;
+  tradesState.missingCorporateActions = [];
   tradesState.loaded = false;
   tradesState.rev = 0;
   tradesState.mutating = false;
@@ -2748,6 +2749,11 @@ function applyTradesPayload(payload) {
   tradesState.records = Array.isArray(payload.records) ? payload.records : [];
   tradesState.quarantinedRecords = Array.isArray(payload.quarantinedRecords) ? payload.quarantinedRecords : [];
   tradesState.portfolio = payload.portfolio || null;
+  // 官方歸檔有、帳本沒登錄的除權／現增（伺服器比對後回傳）。漏記不只是顯示假虧損，
+  // 之後想賣掉含配股的股數還會被賣超檢查擋下，所以要主動提示補登。
+  tradesState.missingCorporateActions = Array.isArray(payload.missingCorporateActions)
+    ? payload.missingCorporateActions
+    : [];
   if (Number.isFinite(Number(payload.rev))) tradesState.rev = Number(payload.rev);
   tradesState.loaded = true;
 }
@@ -3021,6 +3027,38 @@ function formatMoney(value, { signed = false } = {}) {
 }
 
 // 自選股頁第 4 籤「庫存損益」：總覽＋持股（配即時價算未實現）＋記一筆＋交易紀錄。
+// D-22 補登：官方歸檔有、帳本沒登錄的除權／現增。快速鈕只在除權當天出現，
+// 錯過就沒有入口了——而漏記會讓之後賣出含配股的股數被賣超檢查擋下，所以要能事後補。
+// 比率一律用官方值，使用者不必自己查（手填最容易把「每仟股配股數」當成比率）。
+function renderMissingCorporateActions() {
+  const missing = tradesState.missingCorporateActions || [];
+  if (!missing.length) return "";
+  const rows = missing.map((item) => {
+    const parts = [];
+    if (item.bonusShares > 0) parts.push(`配股 +${Number(item.bonusShares).toLocaleString("zh-TW")} 股`);
+    if (item.subscribedShares > 0) {
+      parts.push(`現增 +${Number(item.subscribedShares).toLocaleString("zh-TW")} 股＠${formatNumber(item.subscriptionPrice)} 元`);
+    }
+    const exDate = String(item.exDate || "");
+    return `
+      <li>
+        <span><strong>${escapeHtml(item.code)}</strong> ${escapeHtml(`${exDate.slice(4, 6)}/${exDate.slice(6, 8)}`)} · ${escapeHtml(parts.join("、"))}</span>
+        <button class="hold-div-quick is-corporate" type="button" data-corporate-action-quick
+          data-code="${escapeHtml(item.code)}" data-ex-date="${escapeHtml(exDate)}"
+          data-stock-ratio="${Number(item.stockRatio) || 0}"
+          data-subscription-ratio="${Number(item.subscriptionRatio) || 0}"
+          data-subscription-price="${Number(item.subscriptionPrice) || 0}"
+          ${tradesState.mutating ? "disabled aria-busy=\"true\"" : ""}>補登</button>
+      </li>`;
+  }).join("");
+  return `
+    <div class="hold-missing-ca">
+      <strong>有 ${missing.length} 筆官方除權／現增尚未登錄</strong>
+      <small>漏記會讓持股股數停在配股前——除了未實現損益失真，之後賣出含配股的股數還會被當成賣超擋下。比率取自官方公告。</small>
+      <ul>${rows}</ul>
+    </div>`;
+}
+
 function renderHoldingsPanel() {
   const panel = el.holdingsPanel;
   if (!panel) return;
@@ -3274,6 +3312,7 @@ function renderHoldingsPanel() {
         <div data-dividend-summary="receivable"><span>待入帳</span><strong>${formatMoney(dividendReceivableGross)}</strong></div>
         <div data-dividend-summary="received"><span>已入帳淨額</span><strong>${formatMoney(dividendReceivedNet)}</strong></div>
       </div>` : ""}
+    ${renderMissingCorporateActions()}
     ${unpriced ? `<p class="hold-hint">${unpriced} 檔暫無報價，未計入市值與未實現損益，報酬率分母也只算已報價部位（開盤後會自動補上）；「總成本」仍為全部持股。</p>` : ""}
     ${closedPositionDividendHtml}
     ${tradesState.quarantinedRecords.length ? `<div class="trade-review-banner" role="status"><strong>${tradesState.quarantinedRecords.length} 筆舊資料待整理</strong><span>原始內容已安全保留，未納入持股與損益；不會在升級時被靜默刪除。</span></div>` : ""}
@@ -10465,9 +10504,9 @@ document.addEventListener("click", (event) => {
       side: "corporateAction",
       date: exDate,
       tradeDate: exDate,
-      stockRatio: Number(caQuick.dataset.stockRatio),
-      subscriptionRatio: 0,
-      subscriptionPrice: 0,
+      stockRatio: Number(caQuick.dataset.stockRatio) || 0,
+      subscriptionRatio: Number(caQuick.dataset.subscriptionRatio) || 0,
+      subscriptionPrice: Number(caQuick.dataset.subscriptionPrice) || 0,
       createdAt: new Date().toISOString(),
     });
     return;

@@ -9397,3 +9397,26 @@ body.is-locked .app-shell {
   color: var(--muted-2);
   font-size: var(--fs-note);
 }
+
+/* D-22 補登提示：官方有、帳本沒登錄的除權／現增。用琥珀警示色但不做成彈窗，
+   因為它不阻斷操作，只是需要使用者知道並補一下。 */
+.hold-missing-ca {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--orange-2);
+  border-radius: 8px;
+  background: #16130c;
+}
+.hold-missing-ca strong { color: var(--orange-2); font-size: var(--fs-body); }
+.hold-missing-ca small { color: var(--muted-2); font-size: var(--fs-note); line-height: 1.4; }
+.hold-missing-ca ul { display: grid; gap: 6px; margin: 2px 0 0; padding: 0; list-style: none; }
+.hold-missing-ca li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  font-size: var(--fs-body);
+}

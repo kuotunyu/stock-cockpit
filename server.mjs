@@ -1466,6 +1466,60 @@ function migrateTradesPayloadToV2(input, options = {}) {
 
 // 重放整份紀錄算持股與已實現損益。任何時點「賣出股數 > 當下庫存」→ ok:false（PUT 會被 400 擋下），
 // 這同時保護「刪掉舊買單導致後面的賣單變賣超」的情境。
+// D-22 補登入口：比對「官方公司行動歸檔」與「帳本已登錄的 corporateAction」，找出漏記的事件。
+// 為什麼需要這個：報價層的 quote.dividend 只帶最近一筆**未來**事件，除權日一過就滾出視窗，
+// 快速鈕因此只有一天的視窗期。漏記的後果不只是顯示假虧損，而是之後想賣掉含配股的股數會被
+// 賣超檢查擋下。所以改由伺服器用本機歸檔回溯比對，讓使用者事後也補得回來。
+// 只回報「使用者在該事件基準日之前確實持有」的檔位——沒持股就沒有配股可言。
+async function findMissingCorporateActions(payload) {
+  const records = Array.isArray(payload?.records) ? payload.records : [];
+  if (!records.length) return [];
+  await loadFundamentalsHistory();
+  const logged = new Set(records
+    .filter((record) => record.side === TRADE_CORPORATE_ACTION_SIDE)
+    .map((record) => `${record.code}|${toCompactDate(record.tradeDate || record.date)}`));
+  // 逐檔重放到每個事件基準日之前，算出當下持股（沿用「基準日當天買進不享有權利」的規則）。
+  const sharesBefore = (code, exDate) => {
+    let shares = 0;
+    for (const record of records) {
+      if (record.code !== code) continue;
+      const date = toCompactDate(record.tradeDate || record.date);
+      if (!date || date >= exDate) continue;
+      if (record.side === "buy") shares += Number(record.shares) || 0;
+      else if (record.side === "sell") shares -= Number(record.shares) || 0;
+      else if (record.side === TRADE_CORPORATE_ACTION_SIDE) {
+        shares += Math.floor(shares * (Number(record.stockRatio) || 0))
+          + Math.floor(shares * (Number(record.subscriptionRatio) || 0));
+      }
+    }
+    return shares;
+  };
+  const missing = [];
+  for (const code of new Set(records.map((record) => record.code))) {
+    for (const action of corporateActionHistoryForCode(code)) {
+      const exDate = toCompactDate(action.exDate);
+      if (!exDate || logged.has(`${code}|${exDate}`)) continue;
+      const stockRatio = Number(action.stockRatio) || 0;
+      const subscriptionRatio = Number(action.subscriptionRatio) || 0;
+      // 純現金股利不影響股數，不在這裡回報（它走既有的股利流程）。
+      if (stockRatio <= 0 && subscriptionRatio <= 0) continue;
+      const shares = sharesBefore(code, exDate);
+      if (shares <= 0) continue;
+      missing.push({
+        code,
+        exDate,
+        stockRatio,
+        subscriptionRatio,
+        subscriptionPrice: Number(action.subscriptionPrice) || 0,
+        sharesBefore: shares,
+        bonusShares: Math.floor(shares * stockRatio),
+        subscribedShares: Math.floor(shares * subscriptionRatio),
+      });
+    }
+  }
+  return missing.sort((a, b) => a.exDate.localeCompare(b.exDate)).slice(0, 20);
+}
+
 function buildPortfolio(payload) {
   const records = Array.isArray(payload?.records) ? payload.records : [];
   const positions = new Map(); // code → { shares, cost }
@@ -9924,6 +9978,8 @@ async function handleApi(request, requestUrl, response) {
         rev: getDataRev(db, auth.user.id, "trades"),
         ...payload,
         portfolio: buildPortfolio(payload),
+        // 官方歸檔裡有、但帳本沒登錄的除權／現增；前端據此提供事後補登。
+        missingCorporateActions: await findMissingCorporateActions(payload),
       });
       return true;
     }
@@ -11226,6 +11282,7 @@ export {
   // 處置／監視
   SURVEILLANCE_RANK, classifySurveillance, parseDispositionPeriod, parseDispositionInterval, latestUpstreamDate,
   VERIFY_ROUND_TRIP_COST_PCT, VERIFY_COST_NOTE, netReturnPct,
+  findMissingCorporateActions, corporateActionErrors, TRADE_CORPORATE_ACTION_SIDE,
   WIN_RATE_MIN_SAMPLES,
   lookupStockSurveillance, survFetchRecords, getSurveillanceBoard, getRiskSets,
   // 技術分析數學
