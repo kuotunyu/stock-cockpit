@@ -3051,6 +3051,34 @@ function renderHoldingsPanel() {
     .filter(Boolean);
   const quickDividendByCode = new Map(quickDividendCandidates.map((item) => [item.stock.code, item]));
 
+  // D-22：除權（無償配股）當日的快速登錄。帳本原本只認買賣與現金股利，配股後股數永遠停在
+  // 配股前——除了顯示假虧損，更嚴重的是之後想賣掉「含配股」的全部股數會被賣超檢查擋下。
+  // 沿用現金股利快速鈕的同一套模式：只在官方除權基準日當天、且尚未登錄過時出現。
+  const hasCorporateActionRecord = (code, exDate) => tradesState.records.some((record) => record.side === "corporateAction"
+    && record.code === code
+    && String(record.tradeDate || record.date || "") === String(exDate || "").replaceAll("-", ""));
+  const quickCorporateActionByCode = new Map(stocks
+    .map((stock) => {
+      const div = stock?.dividend;
+      const stockRatio = finiteNumberOrNull(div?.stockRatio);
+      if (!div?.isToday || stockRatio === null || stockRatio <= 0) return null;
+      const exDate = String(div.exDate || "").replaceAll("-", "");
+      if (!exDate || !holdingCodes.has(stock.code)) return null;
+      if (hasCorporateActionRecord(stock.code, exDate)) return null;
+      const holding = holdings.find((item) => item.code === stock.code);
+      const bonusShares = Math.floor(Number(holding?.shares || 0) * stockRatio);
+      if (bonusShares <= 0) return null;
+      return { stock, exDate, stockRatio, bonusShares };
+    })
+    .filter(Boolean)
+    .map((item) => [item.stock.code, item]));
+
+  const quickCorporateActionButton = (item) => `
+    <button class="hold-div-quick is-corporate" type="button" data-corporate-action-quick
+      data-code="${item.stock.code}" data-ex-date="${item.exDate}" data-stock-ratio="${item.stockRatio}"
+      title="依除權基準日當下持股計算；無償配股不增加成本，均價會自動稀釋"
+      ${tradesState.mutating ? "disabled aria-busy=\"true\"" : ""}>記除權配股 · +${item.bonusShares.toLocaleString("zh-TW")} 股</button>`;
+
   const quickDividendButton = (item) => `
     <button class="hold-div-quick" type="button" data-dividend-quick
       data-code="${item.stock.code}" data-cash="${item.div.cash}"
@@ -3086,6 +3114,9 @@ function renderHoldingsPanel() {
         ? `<span class="hold-exdiv ${div.isToday ? "is-today" : ""}">${div.isToday ? "今日" : `${div.exDate.slice(5).replace("-", "/")} `}${escapeHtml(div.kind || "除息")}${Number.isFinite(div.cash) && div.cash > 0 ? ` 每股 ${formatNumber(div.cash, 6)} 元` : ""}${hasDividendEventRecord(tradesState.records, stock) ? " · 已記" : ""}</span>`
         : "";
       const divQuick = quickDividendByCode.has(h.code) ? quickDividendButton(quickDividendByCode.get(h.code)) : "";
+      const caQuick = quickCorporateActionByCode.has(h.code)
+        ? quickCorporateActionButton(quickCorporateActionByCode.get(h.code))
+        : "";
       return `
         <div class="hold-row">
           <span class="hold-name"><strong>${escapeHtml(stock?.name || h.code)}</strong><span>${h.code}</span>${divChip}</span>
@@ -3097,6 +3128,7 @@ function renderHoldingsPanel() {
           ${h.dividends > 0 ? `<span class="hold-cell"><em>已入帳股利</em><b>${formatMoney(h.dividends)}</b></span>` : ""}
           <span class="hold-cell hold-pnl ${tone}"><em>未實現</em><b>${unrealized != null ? `${formatMoney(unrealized, { signed: true })}${pct != null ? `（${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%）` : ""}` : "--"}</b></span>
           ${divQuick}
+          ${caQuick}
         </div>`;
     })
     .join("");
@@ -3139,6 +3171,29 @@ function renderHoldingsPanel() {
     .reverse()
     .slice(0, tradesHistoryLimit)
     .map((t) => {
+      // 公司行動（除權／現增）是「事件」不是「成交」：沒有價金、股數與費稅，
+      // 底下整套買賣／股利的欄位讀取全都不適用（實測會在 shares.toLocaleString 直接丟例外）。
+      // 用獨立的精簡列呈現，說明它對持股做了什麼，讓帳本的變化可稽核。
+      if (t.side === "corporateAction") {
+        const caDate = tradeDateOf(t) || "";
+        const stockRatio = finiteNumberOrNull(t.stockRatio) || 0;
+        const subscriptionRatio = finiteNumberOrNull(t.subscriptionRatio) || 0;
+        const subscriptionPrice = finiteNumberOrNull(t.subscriptionPrice) || 0;
+        const parts = [];
+        if (stockRatio > 0) parts.push(`無償配股 ${(stockRatio * 100).toFixed(2).replace(/\.?0+$/, "")}%`);
+        if (subscriptionRatio > 0) {
+          parts.push(`現增 ${(subscriptionRatio * 100).toFixed(2).replace(/\.?0+$/, "")}%＠${formatNumber(subscriptionPrice)} 元`);
+        }
+        return `
+          <div class="trade-row is-corporate-action">
+            <span class="trade-side is-corporate">權</span>
+            <span class="trade-main">
+              <strong>${escapeHtml(t.code)}</strong>
+              <small>${escapeHtml(`${caDate.slice(4, 6)}/${caDate.slice(6, 8)}`)} · ${escapeHtml(parts.join("、") || "公司行動")}</small>
+            </span>
+            <span class="trade-note">依基準日持股調整股數；無償配股不增加成本</span>
+          </div>`;
+      }
       const r = realizedById.get(t.id);
       const isDiv = t.side === "dividend";
       const dividendStatus = isDiv && (t.status === "receivable" || t.status === "received")
@@ -10391,6 +10446,30 @@ document.addEventListener("click", (event) => {
   if (removeBtn) {
     removeBtn.blur();
     removeTradeRecord(removeBtn.dataset.tradeRemove);
+    return;
+  }
+  const caQuick = event.target.closest("[data-corporate-action-quick]");
+  if (caQuick) {
+    // 必須先 blur：renderHoldingsPanel 遇到 panel 內有 activeElement 就會 early-return，
+    // 沒 blur 的話畫面完全不動（「載入更多」踩過同一個坑）。
+    caQuick.blur();
+    if (!tradesState.mutating) {
+      caQuick.disabled = true;
+      caQuick.setAttribute("aria-busy", "true");
+      caQuick.textContent = "儲存除權配股中…";
+    }
+    const exDate = caQuick.dataset.exDate;
+    addTradeRecord({
+      id: `ca-${caQuick.dataset.code}-${exDate}`,
+      code: caQuick.dataset.code,
+      side: "corporateAction",
+      date: exDate,
+      tradeDate: exDate,
+      stockRatio: Number(caQuick.dataset.stockRatio),
+      subscriptionRatio: 0,
+      subscriptionPrice: 0,
+      createdAt: new Date().toISOString(),
+    });
     return;
   }
   const divQuick = event.target.closest("[data-dividend-quick]");

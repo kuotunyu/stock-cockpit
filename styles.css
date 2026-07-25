@@ -9379,3 +9379,21 @@ body.is-locked .app-shell {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+/* D-22：公司行動（除權／現增）在交易紀錄裡是「事件」不是成交，用獨立的精簡列呈現，
+   跟買賣／股利列明顯區隔，避免被誤讀成一筆交易。 */
+.trade-row.is-corporate-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-left: 3px solid var(--orange-2);
+}
+.trade-row.is-corporate-action .trade-side.is-corporate {
+  color: var(--orange-2);
+  font-weight: 700;
+}
+.trade-row.is-corporate-action .trade-note {
+  margin-left: auto;
+  color: var(--muted-2);
+  font-size: var(--fs-note);
+}

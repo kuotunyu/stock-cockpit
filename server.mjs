@@ -708,6 +708,53 @@ function computeTradeTaxRule({
   };
 }
 
+// ---- 公司行動紀錄（D-22）----
+// 帳本原本只認 buy/sell/dividend，而 dividend 只有「每股現金 × 股數」一種語意、不動持股與成本。
+// 於是無償配股與現增之後，帳本的股數永遠停在配股前：
+//   (a) 顯示面——1000 股均價 100 的持股配股 10% 後，實際是 1100 股均價 90.91、未實現 0，
+//       帳本卻仍是 1000 股成本 100,000 配上 90.91 的現價 → 顯示未實現 −9,090（−9.1%）的假虧損；
+//   (b) 功能面（更嚴重）——買 1000 股、配股後實際持有 1100 股，想賣 1100 股會被
+//       buildPortfolio 的賣超檢查擋下，錯誤訊息還叫使用者「檢查買賣紀錄」，但紀錄是對的。
+// 會計上其實很單純：無償配股＝以 0 元取得股票，現增＝以認購價取得股票，兩者都只是
+// 「加股數、加成本」，均價自然稀釋。所以這裡只新增一種紀錄型別，portfolio 的數學保持單純。
+// 比率欄位刻意與官方歸檔（corporateActionHistoryForCode）一致，之後才能由官方資料直接帶入。
+// **減資尚未支援**：本機官方歸檔不涵蓋減資（見 stock1-domain），使用者得手填；而且現金減資的
+// 成本處理（沖減成本 vs 認列已實現）是會計口徑選擇，需要使用者拍板，不在這批。
+const TRADE_CORPORATE_ACTION_SIDE = "corporateAction";
+const TRADE_SIDES = new Set(["buy", "sell", "dividend", TRADE_CORPORATE_ACTION_SIDE]);
+function readCorporateActionRatios(raw) {
+  const num = (value) => {
+    if (value === null || value === undefined || String(value).trim() === "") return 0;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : NaN;
+  };
+  return {
+    stockRatio: num(raw?.stockRatio),
+    subscriptionRatio: num(raw?.subscriptionRatio),
+    subscriptionPrice: num(raw?.subscriptionPrice),
+  };
+}
+// 回傳錯誤字串陣列；空陣列＝通過。驗證與正規化共用同一套規則，避免兩邊分岔。
+function corporateActionErrors(raw) {
+  const errors = [];
+  const { stockRatio, subscriptionRatio, subscriptionPrice } = readCorporateActionRatios(raw);
+  if (!Number.isFinite(stockRatio)) errors.push("無償配股率必須是 0 或正數");
+  if (!Number.isFinite(subscriptionRatio)) errors.push("現增配股率必須是 0 或正數");
+  if (!Number.isFinite(subscriptionPrice)) errors.push("現增認購價必須是 0 或正數");
+  if (Number.isFinite(stockRatio) && Number.isFinite(subscriptionRatio)
+    && stockRatio === 0 && subscriptionRatio === 0) {
+    errors.push("公司行動至少要有無償配股率或現增配股率其中一項大於 0");
+  }
+  // 單次無償配股率超過 1（每股配超過 1 股）極為罕見，多半是把「每仟股配股數」當成比率填進來。
+  if (Number.isFinite(stockRatio) && stockRatio > 1) errors.push("無償配股率大於 1，請確認不是每仟股配股數");
+  if (Number.isFinite(subscriptionRatio) && subscriptionRatio > 1) errors.push("現增配股率大於 1，請確認單位");
+  if (Number.isFinite(subscriptionRatio) && subscriptionRatio > 0
+    && (!Number.isFinite(subscriptionPrice) || subscriptionPrice <= 0)) {
+    errors.push("有現增配股率時必須提供大於 0 的認購價");
+  }
+  return errors;
+}
+
 function normalizeTradeSettings(input) {
   const src = input && typeof input === "object" ? input : {};
   const feeDiscount = Number(src.feeDiscount);
@@ -883,7 +930,25 @@ function validateTradesMutationInput(input, todayCompact = toTaipeiCompactDate()
     const dividendStatus = side === "dividend" ? effectiveDividendStatus(raw) : "";
 
     if (!SECURITY_CODE_PATTERN.test(code)) addError("code", "股票代號必須是 4～6 碼英數字", index);
-    if (!new Set(["buy", "sell", "dividend"]).has(side)) addError("side", "買賣類型只接受 buy、sell 或 dividend", index);
+    if (!TRADE_SIDES.has(side)) addError("side", "買賣類型只接受 buy、sell、dividend 或 corporateAction", index);
+    // 公司行動（除權／現增）沒有成交價與股數，走獨立規則；其餘欄位驗證一律跳過，
+    // 避免為了遷就它而放寬買賣紀錄的既有防線。
+    if (side === TRADE_CORPORATE_ACTION_SIDE) {
+      if (!date || !isValidCompactCalendarDate(date)) addError("tradeDate", "除權基準日不是有效日期", index);
+      else if (date > today) addError("tradeDate", "除權基準日位於未來", index);
+      for (const message of corporateActionErrors(raw)) addError("corporateAction", message, index);
+      // 沿用買賣紀錄同一套「同 id 內容衝突」規則：同一筆公司行動重送要冪等，內容不同才是錯誤。
+      if (id) {
+        const fingerprint = stableJson({
+          side, code, date,
+          ...readCorporateActionRatios(raw),
+        });
+        const previous = idFingerprints.get(id);
+        if (previous && previous !== fingerprint) addError("id", `重複 id「${id}」的公司行動內容互相衝突`, index);
+        else idFingerprints.set(id, fingerprint);
+      }
+      continue;
+    }
     if (raw.kind != null && raw.kind !== "" && !new Set(["stock", "etf", "dayTrade"]).has(kind)) {
       addError("kind", "舊版商品類型只接受 stock、etf 或 dayTrade", index);
     }
@@ -1099,7 +1164,17 @@ function tradeRecordCoreErrors(raw, today) {
   const errors = [];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return ["紀錄不是物件"];
   const code = cleanCode(raw.code);
-  const side = ["buy", "sell", "dividend"].includes(raw.side) ? raw.side : "";
+  const side = TRADE_SIDES.has(raw.side) ? raw.side : "";
+  if (side === TRADE_CORPORATE_ACTION_SIDE) {
+    // 公司行動沒有成交價、股數與商品類型；共用 corporateActionErrors 避免與 validator 分岔。
+    const actionErrors = [];
+    if (!SECURITY_CODE_PATTERN.test(cleanCode(raw.code))) actionErrors.push("代號不是 4～6 碼英數字");
+    const actionDate = toCompactDate(raw.tradeDate || raw.date);
+    if (!actionDate || !isValidCompactCalendarDate(actionDate)) actionErrors.push("除權基準日不是有效日期");
+    else if (actionDate > today) actionErrors.push("除權基準日位於未來");
+    actionErrors.push(...corporateActionErrors(raw));
+    return actionErrors;
+  }
   const hasExplicitInstrument = raw.instrumentType != null && raw.instrumentType !== "";
   const legacyKind = raw.kind == null || raw.kind === "" ? "stock" : raw.kind;
   const instrumentType = normalizeTradeInstrumentType(raw);
@@ -1121,6 +1196,25 @@ function tradeRecordCoreErrors(raw, today) {
 function normalizeTradeRecordV2(raw, { settings, today, index, payloadIsV2 }) {
   const code = cleanCode(raw.code);
   const side = raw.side;
+  if (side === TRADE_CORPORATE_ACTION_SIDE) {
+    // 公司行動是「事件」不是「成交」：沒有價金、沒有費稅、沒有商品分類與當沖。
+    // 只保留代號、基準日與三個比率；不塞 price/shares 假值，免得下游誤把它當成一筆買賣。
+    const ratios = readCorporateActionRatios(raw);
+    return {
+      id: String(raw.id || "").trim() || `ca-${code}-${toCompactDate(raw.tradeDate || raw.date)}`,
+      code,
+      side: TRADE_CORPORATE_ACTION_SIDE,
+      tradeDate: toCompactDate(raw.tradeDate || raw.date),
+      date: toCompactDate(raw.tradeDate || raw.date), // 舊 alias，排序與顯示共用
+      stockRatio: ratios.stockRatio,
+      subscriptionRatio: ratios.subscriptionRatio,
+      subscriptionPrice: ratios.subscriptionPrice,
+      source: TRADE_INSTRUMENT_SOURCES.has(raw.source) ? raw.source : "user",
+      note: String(raw.note || "").slice(0, 60),
+      createdAt: String(raw.createdAt || new Date().toISOString()),
+      __inputOrder: index,
+    };
+  }
   const priceValue = Number(raw.price);
   const price = side === "dividend"
     ? Math.round(priceValue * 1e6) / 1e6
@@ -1379,6 +1473,21 @@ function buildPortfolio(payload) {
   const realized = [];
   for (const t of records) {
     const pos = positions.get(t.code) || { shares: 0, cost: 0 };
+    if (t.side === TRADE_CORPORATE_ACTION_SIDE) {
+      // 會計上：無償配股＝以 0 元取得股票，現增＝以認購價取得股票。兩者都只是「加股數、加成本」，
+      // 均價自然稀釋，所以這裡不需要任何特殊公式。除息不走這裡（現金股利不動持股與成本）。
+      // 手上沒有部位就沒有配股可言（例如除權基準日之前就已賣光），直接跳過。
+      if (pos.shares > 0) {
+        // 台股配股與現增都是按「除權基準日當下持股」計算，不足一股的部分不會給零股，
+        // 而是折現金髮放；帳本只追蹤股數，所以無條件捨去，寧可少算不要多算。
+        const bonusShares = Math.floor(pos.shares * (Number(t.stockRatio) || 0));
+        const subscribedShares = Math.floor(pos.shares * (Number(t.subscriptionRatio) || 0));
+        pos.shares += bonusShares + subscribedShares;
+        pos.cost += subscribedShares * (Number(t.subscriptionPrice) || 0);
+        positions.set(t.code, pos);
+      }
+      continue;
+    }
     if (t.side === "dividend") {
       // 除息日先認列應收，實際匯入後才進 receivedNet；兩者都不動持股與成本。
       const dividend = dividendsByCode.get(t.code) || { recognizedGross: 0, receivableGross: 0, receivedNet: 0 };
