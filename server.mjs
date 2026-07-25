@@ -3882,7 +3882,23 @@ function canonicalizeTradeMoneyProvenance(input, existingPayload) {
   };
 
   for (const record of records) {
-    if (!record || typeof record !== "object" || Array.isArray(record) || record.side === "dividend") continue;
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    if (record.side === "dividend") {
+      // 股利只有匯費、沒有證交稅，而且前端固定送 `fee: null`＝「未知，交給後端決定」——
+      // normalizeTradeRecordV2 用 allowNull 特別尊重那個 null，把它 canonicalize 掉會讓
+      // 已入帳股利的匯費從 null 變成預設 10，直接改到 dividendReceivedNet。
+      // 所以這裡只堵真正的破口：client 宣稱 estimated／legacy（規格上由伺服器管理的來源）
+      // 卻自帶金額，那是偽造，必須清掉並交回後端重算。現行前端從不帶 feeSource，
+      // 因此這條規則對既有資料是 no-op。
+      const claimedSource = String(record.feeSource || "");
+      if (claimedSource === "estimated" || claimedSource === "legacy") {
+        delete record.feeAmountTwd;
+        delete record.fee;
+        delete record.feeSource;
+        delete record.feeRuleId;
+      }
+      continue;
+    }
     const existing = existingById.get(String(record.id || ""));
     const sameEconomics = Boolean(existing)
       && tradeMoneyEstimateFingerprint(existing) === tradeMoneyEstimateFingerprint(record);
@@ -7598,16 +7614,28 @@ function movingAverageSeries(rows, field, windowSize) {
   });
 }
 
+// emaSeries 直接把第一個值當 seed，沒有「期數未滿」保護，所以 MACD 從第 0 根就會吐數字，
+// 而那個數字被 seed 主導、不是真的動能。movingAverageSeries 本來就有這道保護（放大圖前幾根
+// MA 顯示 "--" 就是它），MACD 卻沒有。技術分析頁月 K 只抓 24 個月，seed 在第 24 根權重仍有
+// 6.66%——不是邊緣個股偶發，是月 K 常態；實測 18 根月 K、後 17 根零波動時 dif 仍高達 +6.05
+// （相當於股價 6% 的憑空動能），buildTechnicalSignals 會據此吐「MACD 負轉正」給使用者。
+// 遮罩規則：dif 要等慢線滿期（index >= slow-1）；dea 是 dif 再取一次 EMA，
+// 所以要再等 signal-1 根（index >= slow+signal-2）。兩個消費端都已用 Number.isFinite 守著，
+// 資料不足時訊號不觸發即可，不會讓整頁失敗。
 function computeMacd(rows, fast = 8, slow = 17, signal = 9) {
   const closes = rows.map((row) => row.close);
   const fastEma = emaSeries(closes, fast);
   const slowEma = emaSeries(closes, slow);
+  const difWarmupIndex = Math.max(fast, slow) - 1;
+  const deaWarmupIndex = difWarmupIndex + signal - 1;
   const dif = closes.map((_, index) => {
+    if (index < difWarmupIndex) return null;
     const fastValue = fastEma[index];
     const slowValue = slowEma[index];
     return Number.isFinite(fastValue) && Number.isFinite(slowValue) ? fastValue - slowValue : null;
   });
-  const dea = emaSeries(dif, signal);
+  const deaRaw = emaSeries(dif, signal);
+  const dea = deaRaw.map((value, index) => (index < deaWarmupIndex ? null : value));
   return rows.map((row, index) => ({
     date: row.date,
     dif: dif[index],
@@ -7948,6 +7976,14 @@ function averageTrueRange(rows, period = 14) {
 // 還原股價優先使用官方除權息公告；只有呼叫端沒有官方證據時，才以 >10.5% 異常跳空降級估算。
 // 大跌／大漲也可能形成跳空，因此 heuristic 只能標「疑似」，絕不能宣稱一定是除息。
 // 錨定最新棒（factor 從最後一根的 1 往回累乘）：最近的價格不動，只調整事件以前的歷史。
+// 10.5% 跳空 heuristic 的前提是「這兩根是相鄰交易日」。逐月歷史抓取失敗會被
+// `.catch(() => [])` 吞成空陣列，`flat().sort()` 直接把缺月前後接起來，於是跨月的正常漲跌
+// 會被誤判成公司行動：缺口以前所有價格被乘上假比率，MA60／布林／MACD 一起錯，
+// 前端還會顯示「近期疑似權息跳空(估算還原)」這個不存在的事件。而且誤觸發後 source 只會是
+// heuristic、不進 unresolvedIndices，scanSwingBoard 的攔截也擋不到。
+// 門檻取 14 天：一般週末是 3 天、農曆春節連假約 5～10 天，而缺一整月是 28～31 天，區隔充分。
+// 官方事件有明確 exDate 可比對，不受影響；只有 heuristic 需要這道相鄰性檢查。
+const HEURISTIC_MAX_GAP_DAYS = 14;
 function corporateActionGapRatio(row, previousClose, thresholdPct = 10.5) {
   if (!row || !Number.isFinite(previousClose) || previousClose <= 0) return null;
   const open = Number(row.open);
@@ -8009,15 +8045,21 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
   }
   const adjustments = new Map(); // row index → { ratio, source }
   const unresolvedIndices = [];
+  const historyGapIndices = [];
   for (let index = 1; index < rows.length; index += 1) {
     const rowDate = toCompactDate(rows[index]?.date);
+    const previousDate = toCompactDate(rows[index - 1]?.date);
+    const gapDays = rowDate && previousDate ? compactDaysDiff(previousDate, rowDate) : null;
+    const contiguous = gapDays !== null && gapDays >= 1 && gapDays <= HEURISTIC_MAX_GAP_DAYS;
+    if (!contiguous) historyGapIndices.push(index);
     const officialAction = rowDate ? actionsByDate.get(rowDate) : null;
     let ratio = officialAction ? officialCorporateActionRatio(officialAction, rows[index - 1]?.close) : null;
     // 同日既然已有官方公司行動，公式欄位不完整就不能用跳空猜測把它「洗白」成可交易資料。
     // heuristic 仍可暫時還原圖形，但 unresolved 必須一路傳到 scan／inspect，直到公告補齊後再重算。
     const officialUnresolved = Boolean(officialAction && ratio === null);
     let source = ratio !== null ? "official" : "";
-    if (ratio === null && (!officialAvailable || allowHeuristicFallback)) {
+    // 跨越資料缺口時不得套 heuristic：那個「跳空」是缺了幾週的正常漲跌，不是公司行動。
+    if (ratio === null && contiguous && (!officialAvailable || allowHeuristicFallback)) {
       ratio = corporateActionGapRatio(rows[index], rows[index - 1]?.close);
       source = ratio !== null ? (officialAction ? "heuristic-incomplete-official" : "heuristic") : "";
     }
@@ -8035,6 +8077,7 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
     }
   }
   adjustments.unresolvedIndices = unresolvedIndices;
+  adjustments.historyGapIndices = historyGapIndices;
   return adjustments;
 }
 
@@ -8173,6 +8216,11 @@ function computeSwingFeatures(rawRows, officialActions, options) {
     recentCorporateActionSource,
     corporateActionUnresolved: corporateActionUnresolvedIndices.length > 0,
     corporateActionUnresolvedDates: corporateActionUnresolvedIndices.map((index) => toCompactDate(rawRows[index]?.date)).filter(Boolean),
+    // 歷史序列有日期缺口（多半是逐檔月歷史被限流、失敗被吞成空陣列）：跳空不套 heuristic，
+    // 但均線／通道會跨越缺口計算，數值仍不完全可信，必須讓上層看得到。
+    historyGap: (adjustments.historyGapIndices || []).length > 0,
+    historyGapDates: (adjustments.historyGapIndices || [])
+      .map((index) => toCompactDate(rawRows[index]?.date)).filter(Boolean),
     atr: averageTrueRange(rows, 14),
     rows,
   };
@@ -8248,6 +8296,7 @@ const SWING_SCENARIOS = [
         ? "近期除權息(官方已還原)"
         : f.recentCorporateActionSource === "mixed" ? "近期權息含疑似跳空(官方＋估算還原)" : "近期疑似權息跳空(估算還原)");
       if (f.corporateActionUnresolved) warns.push("公司行為公式資料未完整");
+      if (f.historyGap) warns.push("官方歷史有日期缺口(均線可能失真)");
       return { checks, passed, warns, desc: `回檔中軌後站穩${f.daysAboveMid}天，MACD連續${f.goldenCrossDays}天維持金叉` };
     },
     detect(f) {
@@ -8287,6 +8336,7 @@ const SWING_SCENARIOS = [
         ? "近期除權息(官方已還原)"
         : f.recentCorporateActionSource === "mixed" ? "近期權息含疑似跳空(官方＋估算還原)" : "近期疑似權息跳空(估算還原)");
       if (f.corporateActionUnresolved) warns.push("公司行為公式資料未完整");
+      if (f.historyGap) warns.push("官方歷史有日期缺口(均線可能失真)");
       return { checks, passed, warns, desc: `沿上軌強勢，MACD連續${f.goldenCrossDays}天維持金叉${f.histRising ? "、柱狀放大" : ""}` };
     },
     detect(f) {

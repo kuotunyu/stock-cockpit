@@ -18,13 +18,13 @@
 | 層級 | 進度 | 說明 |
 |---|---|---|
 | 前置修復 | 6 條完成 | 2026-07-26 第一批 |
-| 第一層 D-01～D-12 | **7 完成 / 2 部分 / 3 待處理** | 明確錯誤，正確答案沒有爭議 |
+| 第一層 D-01～D-12 | **10 完成 / 2 延後** | 明確錯誤，正確答案沒有爭議 |
 | 第二層 D-20～D-33 | 0 / 14 | 真實缺陷，但修法牽涉口徑選擇 |
 | 第三層 D-40～D-45 | 0 / 6 | 需重查官方原文，或現有資料源做不到 |
 
-第一層進度：✅ D-05、D-06、D-07、D-08、D-10、D-12 完成；🟡 D-01 主體完成（剩兩個子項）；⬜ D-03、D-04、D-09 待處理；⏸ D-02、D-11 需升版本號、會改變選股結果，留待第二層口徑決定後一起做。
+第一層進度：**已全部處理完畢**。✅ D-03～D-10、D-12 完成；🟡 D-01 主體完成（剩兩個子項）；⏸ D-02、D-11 延後——這兩條需升 `OVERNIGHT_FORMULA_VERSION`／`SWING_FORMULA_VERSION`、會改變哪些股票入選並讓既有快照失效，屬選股決策而非單純錯誤修正，留待第二層口徑決定後一起做，避免統計基準短期內斷兩次。
 
-**下一步建議**：第一層剩 D-03（歷史缺月被誤判成公司行動）、D-04（月 K MACD 無 warm-up，需與抓取月數一起調）、D-09（股利 fee 未 canonicalize）。之後第二層先決定 **D-20（毛報酬揭露）**，因為它同時影響 D-25 的 RR 門檻要不要納入交易成本。
+**下一步建議**：進入第二層，先決定 **D-20（驗證績效要不要揭露／並陳淨報酬）**——它同時決定 D-25 的 RR 門檻要不要納入交易成本，也會影響 D-02／D-11 一起做時的版本號時機。
 
 ---
 
@@ -74,7 +74,10 @@
 **⚠ 屬選股行為變更，需升 `OVERNIGHT_FORMULA_VERSION`**（讓舊快照不混入分母）。
 **測試**：`overnight-engine.test.mjs`、`picks-swing.test.mjs` 的手算案例要重算。
 
-### D-03. 逐月歷史抓取失敗被靜默吞成空陣列，日期缺口被誤判成公司行動
+### ✅ D-03. 逐月歷史抓取失敗被靜默吞成空陣列，日期缺口被誤判成公司行動
+
+> **2026-07-26 完成**：10.5% heuristic 加上「相鄰交易日」前置條件（`HEURISTIC_MAX_GAP_DAYS = 14`——一般週末 3 天、農曆春節連假約 5~10 天，缺一整月是 28~31 天，區隔充分）。跨缺口不再套用 heuristic；缺口本身記進 `adjustments.historyGapIndices`，features 以 `historyGap` / `historyGapDates` 曝光，兩個場景的 warns 都會顯示「官方歷史有日期缺口(均線可能失真)」。測試：`domain-backlog-tier1.test.mjs`（3 案，含春節連假對照組），已突變抽查。
+> **刻意沒做**：偵測到缺口時**不自動排除該檔**。不捏造假還原是明確的錯誤修正；要不要因此把股票從榜上拿掉屬於選股決策，留給使用者。未做的另兩項（fetchStockHistoryMonth 失敗往上傳遞進 scanQuality、還原前用交易日表驗連續性）成本較高，缺口偵測已擋住主要危害。
 `getStockHistory`（4780）、`resolveCorporateActionAdjustments`（7918）
 證據強度：`已查證`
 
@@ -85,7 +88,11 @@
 **修法**：(1) `fetchStockHistoryMonth` 失敗往上傳遞並記進 `scanQuality.failureReasons`；(2) 還原之前用交易日表檢查日期連續性，有缺口標 unresolved；(3) `corporateActionGapRatio` 加上「前一筆必須是前一個交易日」前置條件。
 **測試**：`history-cache.test.mjs`、`corporate-actions-edge.test.mjs`。
 
-### D-04. `computeMacd` 無 warm-up 保護：月 K 幾乎每一檔都被 seed 污染
+### ✅ D-04. `computeMacd` 無 warm-up 保護：月 K 幾乎每一檔都被 seed 污染
+
+> **2026-07-26 完成**：`dif` 遮罩到 `slow-1`（業界慣例：慢線滿期），`dea`／`histogram` 遮罩到 `slow+signal-2`。實測 18 根月 K 後 17 根零波動時，`dea`／`histogram` 從 +8.25／−2.20 變成 null。測試：`domain-backlog-tier1.test.mjs`（3 案，含 40 根與 60 根的充足資料對照組），已突變抽查。
+> **為什麼不用調 minBars／抓取月數**：驅動使用者可見訊號的是 `histogram` 與 `dea`（`buildTechnicalSignals` 的「MACD 負轉正」「柱狀圖連續縮小」），兩者已擋住；兩個消費端本來就用 `Number.isFinite` 守著，資料不足時訊號不觸發即可，不會讓整頁變「資料不足」。提高 minBars 反而有整頁打掉的風險。
+> **殘留**：`dif` 在 warm-up 邊界（剛滿 slow-1）仍帶約 13% 的 seed 權重，這是 EMA 慣例的固有性質，圖上會畫出 dif 但沒有 dea 線——視覺上本身就傳達了「資料還不夠」。
 `emaSeries`（7496）、`computeMacd`（7518）、`buildTechnicalAnalysis`（7671）
 證據強度：`已查證`（審查員實跑）
 
@@ -155,7 +162,11 @@
 **⚠ 不要動注意股**：`announcement/notice` 只有 Code / NumberOfAnnouncement / TradingInfoForAttention，**沒有期間欄位**（見 D-44）。
 **測試**：`risk-lastgood.test.mjs`、`risk-halted.test.mjs`、`surveillance-classify.test.mjs`。
 
-### D-09. 股利紀錄被 canonicalize 跳過，`fee`/`feeSource` 完全由客戶端決定
+### ✅ D-09. 股利紀錄被 canonicalize 跳過，`fee`/`feeSource` 完全由客戶端決定
+
+> **2026-07-26 完成（收窄版）**：只堵真正的破口——client 宣稱 `estimated`／`legacy`（規格上由伺服器管理的來源）卻自帶金額時，清掉 fee 相關欄位交回後端重算。測試：`domain-backlog-tier1.test.mjs`，已突變抽查。
+> **為什麼不套用完整 canonicalizeAmount**：前端對股利固定送 `fee: null`＝「未知，交給後端決定」，而 `normalizeTradeRecordV2` 用 `allowNull: side === "dividend"` 特別尊重那個 null。完整 canonicalize 會刪掉整個 `fee` 鍵，已入帳股利的匯費就從 null 變成預設 10，**直接改到 `dividendReceivedNet`**。原提案沒注意到這個相依，照做會用一個 bug 換另一個。收窄版對既有資料是 no-op（現行前端從不帶 `feeSource`）。
+> **未做**：`tradeMoneyEstimateFingerprint` 補股利的 status／receivedDate／receivedAmount。收窄版不依賴 sameEconomics 判斷，暫時用不到。
 `canonicalizeTradeMoneyProvenance`（3830）
 證據強度：`已查證`（審查員實測）
 
