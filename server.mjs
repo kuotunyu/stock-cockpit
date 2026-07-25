@@ -8009,6 +8009,17 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
   // 用「今天」當歷史資料上限，而不是整批收盤參考資料的日期：
   // STOCK_DAY_ALL 更新比個股月歷史慢，照它過濾會把今天已公布的收盤 K 砍掉。
   const dateCompact = toTaipeiCompactDate();
+  // 本機公司行動歸檔（還原權息的依據）要先載入，否則第一次開技術頁會拿到空 archive。
+  await loadFundamentalsHistory();
+  // 跳空 heuristic 的前提是「台股有 ±10% 漲跌幅限制」，只對普通股成立。
+  // 技術頁跟波段健檢不同，它本來就接受 ETF／權證代號（00631L 這類槓反 ETF 無漲跌幅限制），
+  // 對它們套跳空猜測會把一天的真實大漲追認成除權息，事件前的歷史全被乘上假比率。
+  const allowHeuristicFallback = isOrdinaryStock(quote);
+  const prepareRows = (dailyHistory) => buildAdjustedPeriodRows(
+    dailyHistory,
+    corporateActionHistoryForCode(clean, dailyHistory[0]?.date, dailyHistory.at(-1)?.date),
+    { period: analysisPeriod, allowHeuristicFallback },
+  );
   let rawHistory = await getStockHistory(quote, dateCompact, 24, {
     allowExternalFallback: true,
     fallbackMinRows: 60,
@@ -8017,25 +8028,30 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
   let historySource = rawHistory.some((row) => row.source === "Yahoo Finance chart fallback")
     ? "Yahoo Finance chart fallback (official history unavailable)"
     : "TWSE/TPEx official history";
-  let aggregated = addPreviousClose(aggregateHistoryByPeriod(rawHistory, analysisPeriod))
-    .filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite));
-  let rows = aggregated.slice(-180);
+  let prepared = prepareRows(rawHistory);
+  let rows = prepared.rows;
   const minBars = analysisPeriod === "month" ? 18 : 30;
   if (rows.length < minBars && !rawHistory.some((row) => row.source === "Yahoo Finance chart fallback")) {
     try {
       const fallbackHistory = await fetchYahooHistory(quote, dateCompact, analysisPeriod === "month" ? "5y" : "2y");
-      const fallbackRows = addPreviousClose(aggregateHistoryByPeriod(fallbackHistory, analysisPeriod))
-        .filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite))
-        .slice(-180);
-      if (fallbackRows.length > rows.length) {
+      const fallbackPrepared = prepareRows(fallbackHistory);
+      if (fallbackPrepared.rows.length > rows.length) {
         rawHistory = fallbackHistory;
         historySource = "Yahoo Finance chart fallback (official history unavailable)";
-        aggregated = fallbackRows;
-        rows = fallbackRows;
+        prepared = fallbackPrepared;
+        rows = fallbackPrepared.rows;
       }
     } catch {
       // Keep the official rows and return the normal insufficient-data message below.
     }
+  }
+  const corporateActions = prepared.corporateActions;
+  // 「Yahoo 的原始 OHLC 是否已自行還原過配股」在這個專案裡從未實測（見 DOMAIN-BACKLOG D-42）。
+  // 掃描端早就對兩種來源一視同仁，技術頁跟進不是新的風險類別；但既然這頁現在顯示的是還原後的
+  // 價格，就得讓使用者知道這段數字疊了兩層未經核對的處理，不能默默端出去。
+  if (corporateActions.adjusted && historySource.startsWith("Yahoo")) {
+    corporateActions.notes.push("這段歷史來自 Yahoo 備援序列，其原始價是否已自行還原配股尚未實測，還原結果僅供參考。");
+    corporateActions.alert = true;
   }
   if (rows.length < minBars) {
     const periodLabel = analysisPeriod === "month" ? "月K" : analysisPeriod === "week" ? "週K" : "日K";
@@ -8053,6 +8069,7 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
       availableBars: rows.length,
       error: `官方${periodLabel}歷史資料不足：目前只抓到 ${rows.length} 根，至少需要 ${minBars} 根。${suggestion}`,
       candles: rows,
+      corporateActions,
       warnings: reference.warnings || [],
     };
   }
@@ -8062,7 +8079,31 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
   const swings = findSwingPoints(rows, 2);
   const supportLine = buildTrendLine(swings.lows, "support", rows.length - 1);
   const resistanceLine = buildTrendLine(swings.highs, "resistance", rows.length - 1);
-  const signals = buildTechnicalSignals(rows, macd, maShort, maMid, swings, supportLine, resistanceLine);
+  // 官方已公告當天有公司行動、但公式欄位還不齊 → 事件之前的 K 只能估算或根本沒還原。
+  // 依 stock1-domain：圖形可以先估算著看，但不得提供單檔型態結論。
+  // 這裡把突破／跌破／做多觀察整組停掉並標 suppressed，前端才不會把「沒評估」畫成「沒滿足條件」。
+  const conclusionsSuppressed = corporateActions.unresolvedDates.length > 0;
+  const signals = conclusionsSuppressed
+    ? {
+      breakout: false,
+      breakdown: false,
+      longWatch: false,
+      suppressed: "corporate-action-unresolved",
+      risks: [],
+      signals: [],
+      checks: {
+        closeAboveResistance: false,
+        macdOk: false,
+        volumeAbove20: false,
+        aboveMovingAverages: false,
+        histogramTurnPositive: false,
+        histogramExpanding: false,
+        histogramShrinking: false,
+        brokePreviousSwingLow: false,
+        longBlackVolume: false,
+      },
+    }
+    : buildTechnicalSignals(rows, macd, maShort, maMid, swings, supportLine, resistanceLine);
   const fibonacci = buildFibonacci(rows, swings, signals.breakout);
   const candles = rows.map((row, index) => ({
     date: row.date,
@@ -8114,6 +8155,9 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
       swingWindow: 2,
     },
     asOf: rows.at(-1).date,
+    // 還原權息揭露：技術頁與波段健檢從此跑在同一組還原後的價格上，
+    // 兩頁不會再對同一檔同一天給出相反的型態結論（除息造成的假跌破／假死叉）。
+    corporateActions,
     candles,
     swingHighs: swings.highs.slice(-12),
     swingLows: swings.lows.slice(-12),
@@ -8214,10 +8258,13 @@ function officialCorporateActionRatio(action, previousClose) {
   // 舊 archive 沒保存現增欄位；不論權或息都不能把「未知」擅自當 0。
   if (!hasSubscriptionSchema) return null;
   if (kind.includes("息") && cashRaw === null) return null;
-  // 除權必須兩個比率欄位都是明確數值才算公式齊備。舊寫法是 OR，只要現增比率回 0（合法值、
-  // 不是 null），缺漏的 stockRatio 就被當成 0 → ratio 算出 1，一根價都不調卻蓋上 official 章，
-  // 不走 heuristic 補救也不標 unresolved，還原序列裡就留下一根真實的除權假崩盤。
-  if (kind.includes("權") && (stockRaw === null || subscriptionRaw === null)) return null;
+  // 除權至少要有一個明確的比率欄位。這裡刻意是 AND 不是 OR——
+  // 官方對「沒有現增」的表達方式就是把現增欄位留空，而「配股但不配現增」是除權息的常態
+  // （2026-07 實測歸檔：59 筆除權事件裡有 31 筆是 stockRatio 有值、subscriptionRatio 為 null）。
+  // 要求兩欄都有值等於把過半配股公司判成「公式不齊」，波段健檢打不開、掃描也把它們剔除。
+  // 至於原本擔心的「缺漏欄位被當成 0 → ratio 算出 1，一根價都不調卻蓋上 official 章」，
+  // 由下方的「兩個比率都是 0 的除權在定義上不成立」防呆負責，這裡不需要重複把關。
+  if (kind.includes("權") && stockRaw === null && subscriptionRaw === null) return null;
   const cashDividend = cashRaw || 0;
   const stockRatio = stockRaw || 0;
   const subscriptionRatio = subscriptionRaw || 0;
@@ -8303,6 +8350,87 @@ function backAdjustForCorporateActions(rows, officialActions, options) {
     }
   }
   return adjusted;
+}
+
+// 還原權息必須在「日 K」層完成，再彙總成週／月，順序不可顛倒。
+// 先彙總再還原的話，除權息當天會先跟同週（同月）其他交易日混成一根，事件前後的價格被平均掉，
+// 還原因子就再也套不到正確的邊界上：那根週 K 會同時留著「還原前的開盤」與「還原後的收盤」，
+// 憑空長出一根假長黑，而且之後每一根的相對位置全歪。
+function buildAdjustedPeriodRows(dailyHistory, officialActions, {
+  period = "day",
+  allowHeuristicFallback = false,
+  maxBars = 180,
+} = {}) {
+  const complete = (row) => [row.open, row.high, row.low, row.close].every(Number.isFinite);
+  // 先在日線層濾掉半根 K：缺 close 會直接斷掉還原因子的推導鏈（前收拿不到就算不出比率），
+  // 留著只會讓某個事件被靜默跳過。
+  const dailyRows = (dailyHistory || []).filter(complete);
+  const options = { allowHeuristicFallback };
+  const adjustments = resolveCorporateActionAdjustments(dailyRows, officialActions, options);
+  const adjustedDaily = backAdjustForCorporateActions(dailyRows, officialActions, options);
+  const allPeriods = addPreviousClose(aggregateHistoryByPeriod(adjustedDaily, period)).filter(complete);
+  const rows = maxBars > 0 ? allPeriods.slice(-maxBars) : allPeriods;
+
+  // 只有落在可見區間內的事件會影響畫面：還原因子從最後一根往回累乘，一個事件只調整
+  // 「它之前」的 K。所以比第一根可見 K 更早的事件對這張圖毫無作用，列出來只會讓使用者
+  // 以為圖上有他看不到的調整。事件正好落在第一根可見 K 當天也一樣——被調整的全在畫面外。
+  const cut = allPeriods.length - rows.length;
+  const lastHiddenDate = cut > 0 ? toCompactDate(allPeriods[cut - 1]?.date) : "";
+  // 週／月 K 的 date 是該期間的最後一個交易日，所以可見起點要換算回「日」層再比。
+  const firstVisibleDate = dailyRows
+    .map((row) => toCompactDate(row.date))
+    .find((date) => date && (!lastHiddenDate || date > lastHiddenDate)) || "";
+  const dateAt = (index) => toCompactDate(dailyRows[index]?.date);
+  const inWindow = (index) => {
+    const date = dateAt(index);
+    return Boolean(date) && Boolean(firstVisibleDate) && date > firstVisibleDate;
+  };
+  const events = [...adjustments.entries()]
+    .filter(([index]) => inWindow(index))
+    .map(([index, adjustment]) => ({
+      date: dateAt(index),
+      source: adjustment.source,
+      ratio: roundTo(adjustment.ratio, 4),
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const unresolvedDates = (adjustments.unresolvedIndices || [])
+    .filter((index) => inWindow(index))
+    .map((index) => dateAt(index))
+    .filter(Boolean);
+
+  const hasOfficial = events.some((event) => event.source === "official");
+  const hasEstimated = events.some((event) => event.source !== "official");
+  const officialCount = events.filter((event) => event.source === "official").length;
+  const estimatedCount = events.length - officialCount;
+  // 用詞受 stock1-domain 約束：只有官方公告可以講「除權息」，跳空推測一律寫「疑似／估算還原」，
+  // 不能讓使用者以為那天一定發生過公司行動。
+  const notes = [];
+  if (officialCount > 0) {
+    notes.push(`圖上歷史價格已依官方除權息公告還原 ${officialCount} 次，與當時的實際成交價不同；最新一根維持實際價格。`);
+  }
+  if (estimatedCount > 0) {
+    notes.push(`另有 ${estimatedCount} 次為「疑似公司行動」的跳空估算還原（非官方確認），僅供圖形參考。`);
+  }
+  if (unresolvedDates.length > 0) {
+    notes.push(`${unresolvedDates.map(compactToSlashDate).join("、")} 官方公司行動的公式欄位尚未齊備，該日之前的價格未經正確還原，暫不提供型態結論。`);
+  }
+  if (!allowHeuristicFallback) {
+    notes.push("ETF／權證等商品沒有 ±10% 漲跌幅前提，不套用跳空估算還原，只在有官方公告時還原。");
+  }
+  return {
+    rows,
+    corporateActions: {
+      adjusted: events.length > 0,
+      source: hasOfficial && hasEstimated ? "mixed" : hasOfficial ? "official" : hasEstimated ? "heuristic" : "",
+      events,
+      unresolvedDates,
+      heuristicAllowed: Boolean(allowHeuristicFallback),
+      // 升級成醒目提示的條件：只要圖上有「非官方確認」的估算還原，或有算不出來的官方事件。
+      // 純官方還原是正常且精確的，天天都會發生（台股大多年年配息），不該長年掛著警示。
+      alert: unresolvedDates.length > 0 || hasEstimated,
+      notes,
+    },
+  };
 }
 
 function computeSwingFeatures(rawRows, officialActions, options) {
@@ -11314,6 +11442,7 @@ export {
   // 技術分析數學
   emaSeries, movingAverageSeries, computeMacd, findSwingPoints, buildTrendLine,
   buildFibonacci, buildTechnicalSignals, averageTrueRange, buildTechnicalAnalysis,
+  buildAdjustedPeriodRows, resolveCorporateActionAdjustments,
   // 隔日沖／波段評分
   buildPick, buildRiskTags, buildReasons, corporateActionGapRatio, officialCorporateActionRatio,
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,

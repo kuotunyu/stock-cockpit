@@ -7191,12 +7191,24 @@ function renderTechnicalAnalysis() {
   const macd = last?.macd || {};
   const signals = data.signals || {};
   const priceContext = getTechnicalPriceContext(data, last);
-  const trendState = signals.breakout ? "突破壓力線" : signals.breakdown ? "跌破支撐線" : "區間觀察";
-  const badge = signals.longWatch ? "做多觀察" : signals.risks?.length ? "風險提醒" : "技術觀察";
-  const badgeClass = signals.longWatch ? "is-positive" : signals.risks?.length ? "is-risk" : "is-neutral";
-  el.technicalStatus.hidden = true;
-  el.technicalStatus.className = "technical-status";
-  el.technicalStatus.textContent = "";
+  // 官方公司行動欄位不齊時後端會把型態結論整組停掉。這裡必須跟著改寫文案——
+  // 沿用「尚未同時滿足突破、量能、MACD 與均線條件」會把「沒評估」講成「評估過但沒過」。
+  const suppressed = Boolean(signals.suppressed);
+  const trendState = suppressed ? "暫不判讀" : signals.breakout ? "突破壓力線" : signals.breakdown ? "跌破支撐線" : "區間觀察";
+  const badge = suppressed ? "暫不判讀" : signals.longWatch ? "做多觀察" : signals.risks?.length ? "風險提醒" : "技術觀察";
+  const badgeClass = suppressed ? "is-neutral" : signals.longWatch ? "is-positive" : signals.risks?.length ? "is-risk" : "is-neutral";
+  // 還原權息提示：純官方還原只放進下方明細（台股年年配息，天天掛警示等於沒警示）；
+  // 只有估算還原或官方欄位不齊才升級成上方的醒目提示。
+  const caNotes = data.corporateActions?.notes || [];
+  if (data.corporateActions?.alert && caNotes.length) {
+    el.technicalStatus.hidden = false;
+    el.technicalStatus.className = "technical-status";
+    el.technicalStatus.textContent = caNotes.join(" ");
+  } else {
+    el.technicalStatus.hidden = true;
+    el.technicalStatus.className = "technical-status";
+    el.technicalStatus.textContent = "";
+  }
   el.technicalTitle.textContent = `${data.code} ${data.name} ${periodLabel}`;
   el.technicalSubtitle.textContent = `${priceContext.summaryLabel} ${formatTechnicalValue(last.close)} / MACD OSC ${formatTechnicalValue(macd.histogram, 4)} / ${trendState}`;
   el.technicalBadge.textContent = badge;
@@ -7205,12 +7217,12 @@ function renderTechnicalAnalysis() {
     <article class="technical-score-card ${badgeClass}">
       <span>目前狀態</span>
       <strong>${badge}</strong>
-      <p>${signals.longWatch ? "符合做多觀察條件，但不是買賣建議。" : signals.risks?.length ? "出現風險條件，先降低解讀強度。" : "尚未同時滿足突破、量能、MACD 與均線條件。"}</p>
+      <p>${suppressed ? "官方公司行動的公式欄位未齊備，這段歷史價格沒有正確還原，暫不提供型態結論。" : signals.longWatch ? "符合做多觀察條件，但不是買賣建議。" : signals.risks?.length ? "出現風險條件，先降低解讀強度。" : "尚未同時滿足突破、量能、MACD 與均線條件。"}</p>
     </article>
     <article>
       <span>趨勢線</span>
       <strong>${trendState}</strong>
-      <p>${signals.breakout ? "收盤價突破近期壓力線。" : signals.breakdown ? "收盤價跌破上升支撐線。" : "目前沒有明確突破或跌破。"}</p>
+      <p>${suppressed ? "還原基礎不完整，不判斷突破或跌破。" : signals.breakout ? "收盤價突破近期壓力線。" : signals.breakdown ? "收盤價跌破上升支撐線。" : "目前沒有明確突破或跌破。"}</p>
     </article>
     <article>
       <span>MACD</span>
@@ -7220,7 +7232,7 @@ function renderTechnicalAnalysis() {
     <article>
       <span>量能</span>
       <strong>${formatTechnicalValue(last.volumeLots, 0)} 張</strong>
-      <p>${signals.checks?.volumeAbove20 ? "大於近 20 根平均量。" : "尚未高於近 20 根平均量。"}</p>
+      <p>${suppressed ? "還原基礎不完整，暫不做量能判定。" : signals.checks?.volumeAbove20 ? "大於近 20 根平均量。" : "尚未高於近 20 根平均量。"}</p>
     </article>
   `;
   el.technicalDetailGrid.innerHTML = renderTechnicalDetails(data);
@@ -7313,31 +7325,64 @@ function renderTechnicalEmpty(title, text) {
   `;
 }
 
+// 還原權息明細：圖上的歷史價格已經不是當時的實際成交價，這件事一定要講。
+// 用詞受規格約束——只有官方公告可以講「除權息」，跳空推測一律是「疑似／估算」。
+function renderTechnicalCorporateActions(data) {
+  const info = data.corporateActions;
+  if (!info) return "";
+  const monthDay = (compact) => `${String(compact).slice(4, 6)}/${String(compact).slice(6, 8)}`;
+  const sourceLabel = (source) => (source === "official" ? "官方" : "估算");
+  const eventList = info.events?.length
+    ? info.events.map((event) => `<span>${escapeHtml(monthDay(event.date))}：×${escapeHtml(String(event.ratio ?? "--"))}（${escapeHtml(sourceLabel(event.source))}）</span>`).join("")
+    : "<span>這段區間沒有偵測到公司行動，圖上就是原始成交價。</span>";
+  const notes = (info.notes || []).map((note) => `<p>${escapeHtml(note)}</p>`).join("");
+  return `
+    <article>
+      <h3>還原權息</h3>
+      <div class="technical-level-list">${eventList}</div>
+      ${notes}
+    </article>
+  `;
+}
+
 function renderTechnicalDetails(data) {
   const signals = data.signals || {};
   const fib = data.fibonacci || {};
+  const suppressed = Boolean(signals.suppressed);
   const signalTags = signals.signals?.length ? signals.signals : ["尚未出現明確突破訊號"];
   const riskTags = signals.risks?.length ? signals.risks : ["目前沒有觸發風險條件"];
   const fibLevels = fib.active
     ? fib.levels.map((level) => `<span>${level.ratio}：${formatTechnicalValue(level.price)}${level.near ? " / 回測觀察區" : ""}</span>`).join("")
-    : "<span>尚未偵測到突破，暫不繪製費波回撤。</span>";
+    : `<span>${suppressed ? "還原基礎不完整，暫不繪製費波回撤。" : "尚未偵測到突破，暫不繪製費波回撤。"}</span>`;
   const support = data.trendLines?.support;
   const resistance = data.trendLines?.resistance;
-  return `
-    <article>
-      <h3>做多觀察條件</h3>
+  // 停判期間四個條件全是未評估，不能畫成「評估過但沒過」的灰勾。
+  const checksBlock = suppressed
+    ? `<p>官方公司行動的公式欄位未齊備，四項條件都沒有評估。</p>`
+    : `
       <div class="technical-checks">
         <span class="${signals.checks?.closeAboveResistance ? "is-pass" : ""}">突破壓力線</span>
         <span class="${signals.checks?.macdOk ? "is-pass" : ""}">MACD 轉強</span>
         <span class="${signals.checks?.volumeAbove20 ? "is-pass" : ""}">量大於 20 均量</span>
         <span class="${signals.checks?.aboveMovingAverages ? "is-pass" : ""}">站上 MA5 / MA20</span>
       </div>
+    `;
+  const signalBlock = suppressed
+    ? `<div class="technical-chip-list"><span>暫不判讀突破與風險</span></div>`
+    : `
+      <div class="technical-chip-list">${signalTags.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+      <div class="technical-chip-list is-risk">${riskTags.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+    `;
+  return `
+    <article>
+      <h3>做多觀察條件</h3>
+      ${checksBlock}
     </article>
     <article>
       <h3>突破與風險</h3>
-      <div class="technical-chip-list">${signalTags.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
-      <div class="technical-chip-list is-risk">${riskTags.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+      ${signalBlock}
     </article>
+    ${renderTechnicalCorporateActions(data)}
     <article>
       <h3>費波回撤</h3>
       <div class="technical-level-list">${fibLevels}</div>
