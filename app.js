@@ -829,7 +829,6 @@ const el = {
   watchSelectVisible: document.getElementById("watchSelectVisible"),
   watchClearSelection: document.getElementById("watchClearSelection"),
   detailPanel: document.getElementById("detailPanel"),
-  detailClose: document.getElementById("detailClose"),
   searchModal: document.getElementById("searchModal"),
   searchInput: document.getElementById("searchInput"),
   searchResults: document.getElementById("searchResults"),
@@ -885,7 +884,11 @@ function formatNumber(value, maxFractionDigits = 2) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   const digits = Math.max(0, Math.min(8, Math.round(Number(maxFractionDigits) || 0)));
-  return Number.isInteger(number) ? number.toString() : number.toFixed(digits).replace(/\.?0+$/, "");
+  if (Number.isInteger(number)) return number.toString();
+  // 只在有小數點時去尾零：digits=0 時 toFixed 會回整數字串（1049.6 → "1050"），
+  // 直接套 /\.?0+$/ 會把它砍成 "105"。與 formatTechnicalValue 用同一道防線。
+  const text = number.toFixed(digits);
+  return text.includes(".") ? text.replace(/\.?0+$/, "") : text;
 }
 
 // Number(null) 會變成 0；行情合併與顯示不能因此捏造「0 元／0 張」。
@@ -1264,7 +1267,7 @@ function renderTodayFocusPanel() {
           <span>自選股</span>
           <strong>${watchStats.upCount} 漲 / ${watchStats.downCount} 跌</strong>
           <p>平均 ${formatSignedPercent(watchStats.avgChange)}，強波動 ${watchStats.activeCount} 檔。</p>
-          <small class="${watchTone}">${strongestWatch ? `最新交易日最強：${strongestWatch.name} ${strongestWatch.changeText}` : "尚無自選股"}</small>
+          <small class="${watchTone}">${strongestWatch ? `最新交易日最強：${escapeHtml(strongestWatch.name)} ${escapeHtml(strongestWatch.changeText)}` : "尚無自選股"}</small>
         </article>
         ${renderDataTrustCompact()}
       </div>
@@ -2384,8 +2387,10 @@ function checkPriceAlerts(eligibleCodes = null, { renderNow = true } = {}) {
     // 行情 loader 會傳入「本輪確實取得即時價」的代號；API 漏回某檔時不可沿用全域舊價誤觸。
     if (eligible && !eligible.has(normalizeStockCodeInput(alert.code))) continue;
     const stock = byCode.get(alert.code);
-    const price = Number(stock?.price);
-    if (!stock || !Number.isFinite(price) || stock.priceStale) continue;
+    // 成交價要走 positivePriceOrNull：Number(null)===0 會讓「無報價」的檔位通過門檻，
+    // 於是任何跌破提醒都會用「現價 0」立刻誤觸發並自我標記已觸發，真正到價時反而不再提醒。
+    const price = positivePriceOrNull(stock?.price);
+    if (!stock || price === null || stock.priceStale) continue;
     const hit = alert.op === "<=" ? price <= alert.price : price >= alert.price;
     if (!hit) continue;
     alert.triggeredAt = new Date().toISOString();
@@ -3027,8 +3032,9 @@ function renderHoldingsPanel() {
   const holdRows = holdings
     .map((h) => {
       const stock = byCode.get(h.code);
-      const price = Number(stock?.price);
-      const hasPrice = Number.isFinite(price);
+      // 同上：Number(null)===0 會讓未報價的持股算出市值 0、未實現＝全額虧損，還會混進總計。
+      const price = positivePriceOrNull(stock?.price);
+      const hasPrice = price !== null;
       const value = hasPrice ? price * h.shares : null;
       const unrealized = hasPrice ? value - h.cost : null;
       if (hasPrice) {
@@ -3613,12 +3619,6 @@ function removeSelectedWatchStocks() {
   return selectedCodes.length;
 }
 
-function syncStockWatchFlags() {
-  stocks.forEach((stock) => {
-    stock.watch = watchLists[1].has(stock.code);
-  });
-}
-
 function mergeOfficialQuote(stock, quote) {
   if (!stock || !quote) return;
   const latestPrice = positivePriceOrNull(quote.price);
@@ -3743,7 +3743,6 @@ function upsertStockFromQuote(quote) {
       avgVol: 0,
       groups: ["watch"],
       strategies: ["官方查詢"],
-      watch: false,
       spark: seedSpark.length >= 2 ? seedSpark : price !== null ? [price, price] : [],
     };
     stocks.push(stock);
@@ -4671,7 +4670,7 @@ function eligibleAlertQuoteCodes(quotes) {
       const asOfDate = String(quote?.asOf || quote?.rawDate || "").slice(0, 10).replaceAll("/", "-");
       return ["realtime", "broker-realtime"].includes(quote?.sourceKind)
         && quote?.priceStale !== true
-        && Number.isFinite(Number(quote?.price))
+        && positivePriceOrNull(quote?.price) !== null
         && asOfDate === today;
     })
     .map((quote) => normalizeStockCodeInput(quote.code))
@@ -4847,7 +4846,6 @@ function upsertStockFromPick(pick) {
       avgVol: pick.metrics?.volumeRatio5 || 0,
       groups: ["overnight"],
       strategies: [pick.groupName],
-      watch: false,
       // 用「隱含昨收→訊號日收盤」兩點起步，之後官方報價會把真實價格接上去；
       // 不再用均線值假造價格路徑。
       spark: [
@@ -4892,7 +4890,7 @@ function renderOvernightGroups() {
     el.overnightGroups.innerHTML = `
       <div class="overnight-error">
         <strong>官方隔日沖清單產生失敗</strong>
-        <span>${overnightState.error}</span>
+        <span>${escapeHtml(overnightState.error)}</span>
         <small>請確認已用 npm start 啟動，並使用 http://127.0.0.1:5174/ 開啟。</small>
       </div>
     `;
@@ -5431,7 +5429,7 @@ function renderSwingCard(pick) {
     ? ' title="股名後的 * 是官方標記的「彈性面額股」：每股面額不是新台幣 10 元（可能 0.25／1／5 元…）。因此它的股價高低不能直接跟一般股票（面額 10 元）相比，看市值才準。這不是風險警示。"'
     : "";
   return `
-    <article class="swing-card" data-swing-code="${pick.code}" role="button" tabindex="0" aria-label="${pick.name} ${pick.code} 策略明細">
+    <article class="swing-card" data-swing-code="${pick.code}" role="button" tabindex="0" aria-label="${escapeHtml(pick.name)} ${pick.code} 策略明細">
       <div class="swing-rank-badge ${scoreTier}" style="--score:${Math.max(6, Math.min(100, score))}%" title="策略評分 0–100：趨勢＋MACD動能＋貼近中軌＋量能＋流動性＋盈虧比綜合計算，越高代表型態越好且越划算；盈虧比<1 的設定不列入。RANK 依評分由高到低排名。">
         <small>RANK</small>
         <strong>${pick.rank}</strong>
@@ -5441,9 +5439,9 @@ function renderSwingCard(pick) {
       <div class="swing-head">
         <div class="swing-headline">
           <div class="swing-identity">
-            <strong class="swing-nm"${nameTitle}>${pick.name}</strong>
+            <strong class="swing-nm"${nameTitle}>${escapeHtml(pick.name)}</strong>
             <span class="swing-code">${pick.code}</span>
-            <span class="swing-market">${pick.market || formatExchangeLabel(pick.exchange)}</span>
+            <span class="swing-market">${escapeHtml(pick.market || formatExchangeLabel(pick.exchange))}</span>
           </div>
           <span class="swing-quote-inline">
             <span class="${closeLabelClass}" title="${closeLabelTitle}">${closeLabel}</span>
@@ -5457,7 +5455,7 @@ function renderSwingCard(pick) {
           ${pick.surveillance ? `<span class="surv-line swing-surv">${renderSurveillanceBadge(pick.surveillance)}</span>` : ""}
           ${warns}
           </div>
-          <p class="swing-desc">${pick.scenario?.desc || ""}</p>
+          <p class="swing-desc">${escapeHtml(pick.scenario?.desc || "")}</p>
         </div>
         ${reasonHtml}
         <div class="swing-facts">${factsHtml}</div>
@@ -5686,7 +5684,7 @@ function renderStrategyBoard() {
     return;
   }
   if (strategyState.error) {
-    el.strategyBoard.innerHTML = `<div class="strategy-empty is-error">策略雷達計算失敗<small>${strategyState.error}</small></div>`;
+    el.strategyBoard.innerHTML = `<div class="strategy-empty is-error">策略雷達計算失敗<small>${escapeHtml(strategyState.error)}</small></div>`;
     return;
   }
   if (strategyState.loaded && !strategyState.picks.length) {
@@ -5747,11 +5745,11 @@ function renderStrategyInspect() {
   }
   host.hidden = false;
   if (st.loading) {
-    host.innerHTML = `<div class="strategy-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span><strong>健檢「${st.query}」的波段型態…</strong></div>`;
+    host.innerHTML = `<div class="strategy-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span><strong>健檢「${escapeHtml(st.query)}」的波段型態…</strong></div>`;
     return;
   }
   if (st.error) {
-    host.innerHTML = `<div class="inspect-card inspect-error"><button class="inspect-close" type="button" data-inspect-close aria-label="關閉">✕</button><strong>查不到「${st.query}」</strong><small>${st.error}</small></div>`;
+    host.innerHTML = `<div class="inspect-card inspect-error"><button class="inspect-close" type="button" data-inspect-close aria-label="關閉">✕</button><strong>查不到「${escapeHtml(st.query)}」</strong><small>${escapeHtml(st.error)}</small></div>`;
     return;
   }
   host.innerHTML = renderInspectCard(st.data);
@@ -5777,7 +5775,7 @@ function renderInspectCard(d) {
     const sIcon = s.passed ? "✅" : s.failCount <= 2 ? "⚠️" : "❌";
     const sStat = s.passed ? "符合" : `差 ${s.failCount} 項`;
     const items = (s.checks || []).map((c) =>
-      `<li class="${c.pass ? "ok" : "no"}"><span class="ic" aria-hidden="true">${c.pass ? "✓" : "✗"}</span><span class="lb">${c.label}</span><span class="dt">${c.detail || ""}</span></li>`
+      `<li class="${c.pass ? "ok" : "no"}"><span class="ic" aria-hidden="true">${c.pass ? "✓" : "✗"}</span><span class="lb">${escapeHtml(c.label)}</span><span class="dt">${escapeHtml(c.detail || "")}</span></li>`
     ).join("");
     return `<div class="inspect-scenario ${s.passed ? "is-pass" : ""}">
         <div class="inspect-scenario-head"><strong>${glossLink(s.name)}</strong><span class="inspect-scenario-stat ${s.passed ? "ok" : "no"}">${sIcon} ${sStat}</span></div>
@@ -5810,9 +5808,9 @@ function renderInspectCard(d) {
       </div>
       <div class="swing-head">
         <div class="swing-headline">
-          <strong class="swing-nm">${d.name}</strong>
+          <strong class="swing-nm">${escapeHtml(d.name)}</strong>
           <span class="swing-code">${d.code}</span>
-          <span class="swing-market">${d.market || ""}</span>
+          <span class="swing-market">${escapeHtml(d.market || "")}</span>
           <span class="swing-quote-inline">
             <span class="${labelClass}" title="${labelTitle}">${md} 收盤</span>
             <span class="swing-price">${formatNumber(d.price)}</span>
@@ -9248,7 +9246,8 @@ function renderDetail() {
       `;
     })
     .join("");
-  const indicatorDetail = buildIndicatorDetail(stock)[state.indicator] || buildIndicatorDetail(stock)[indicatorLabels[0]];
+  const indicatorDetails = buildIndicatorDetail(stock);
+  const indicatorDetail = indicatorDetails[state.indicator] || indicatorDetails[indicatorLabels[0]];
   document.getElementById("indicatorDetail").innerHTML = `
     <header class="is-${escapeHtml(indicatorDetail.statusTone || "neutral")}">
       <div>
@@ -9397,7 +9396,9 @@ function ensureFundamentals(code) {
     .finally(() => {
       next.loading = false;
       next.at = Date.now();
-      render();
+      // 這是背景載入的回呼，使用者可能正在「更多 → 帳號管理」打密碼或券商金鑰。
+      // 一般 render() 會重建 active screen 並清掉未送出草稿；背景重繪一律走受保護版本。
+      renderLiveDataUpdate();
     });
   return next;
 }
@@ -9848,8 +9849,8 @@ function renderWatchBrief() {
         </div>
         <div class="wb-stat">
           <span>最新最強</span>
-          <strong>${strongest ? strongest.name : "--"}</strong>
-          <em class="${strongestTone}">${strongest ? strongest.changeText : "尚無資料"}</em>
+          <strong>${strongest ? escapeHtml(strongest.name) : "--"}</strong>
+          <em class="${strongestTone}">${strongest ? escapeHtml(strongest.changeText) : "尚無資料"}</em>
         </div>
       </div>
     </div>
@@ -10067,7 +10068,6 @@ function render({ preserveLiveDrafts = false, restoreFocus = false } = {}) {
       // 無法寫入儲存空間時忽略，只是下次開啟不會記住。
     }
   }
-  syncStockWatchFlags();
   updateActiveNav();
   if (!preserveActiveScreen) renderActiveScreen();
   const filterButton = document.getElementById("filterOpen");
@@ -10334,6 +10334,10 @@ document.addEventListener("click", (event) => {
   }
   const loadMore = event.target.closest("[data-trade-load-more]");
   if (loadMore) {
+    // 必須先 blur：真實瀏覽器點擊會把焦點留在這顆 button 上，而 renderHoldingsPanel()
+    // 遇到 panel 內有 activeElement 就會 early-return（保護表單輸入），畫面因此完全不動。
+    // jsdom 的 .click() 不移動焦點，所以既有測試看不出來。其餘同層 handler 都已 blur。
+    loadMore.blur();
     tradesHistoryLimit = Math.min(tradesState.records.length, tradesHistoryLimit + 40);
     renderHoldingsPanel();
     return;

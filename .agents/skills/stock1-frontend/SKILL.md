@@ -11,12 +11,16 @@ description: Stock1 前端（app.js vanilla JS＋styles.css＋index.html）開�
 
 - **狀態**：每個功能一個模組級 `xxxState` 物件（authState/dataState/strategyState/surveillanceBoardState/personalBackupState…）＋全域 `state`（screen/sort/filter 等）。全域 `stocks` 陣列啟動時為空、由官方報價動態建立。
 - **渲染**：`renderXxx()` 函式以 template literal 組 HTML 塞 `innerHTML`。**任何使用者可控字串（備註、簡介、顯示名、id、股名）必過 `escapeHtml()`**——全站已零 XSS 破口，別打破。
+  - **2026-07-25 曾實測到真實回歸**：`renderStrategyInspect()` 把健檢輸入框原文直接塞 innerHTML，而後端 `/api/swing/inspect` 的錯誤訊息又會把 query 原樣回填（`找不到「${query}」`），jsdom 實測會生出帶 `onerror` 的 `<img>`。同批補上隔日沖／策略雷達錯誤字串與波段卡片股名／市場／場景描述。回歸由 `tests/frontend/render-escaping.test.mjs` 鎖住。
+  - **錯誤字串是最容易漏的一類**：`xxxState.error` 來自伺服器或上游文字，跟股名一樣要跳脫。全站 error 渲染點目前一律 `escapeHtml`。
+  - `glossMaybe()`／`glossLink()` **內部已跳脫**並回傳 HTML，外面再包 `escapeHtml` 反而會顯示成亂碼。
 - **事件**：集中在少數幾個 document 級委派 listener，用 `event.target.closest("[data-xxx]")` 分發。新互動元素加 `data-*` 屬性接進既有 listener，不要每個元素各掛 listener。
 - **API**：一律 `fetchApi(path, options)`（自帶全域載入條計數＋錯誤正規化）。401 錯誤在呼叫端用 `handleAuthRequired(error)` 判斷處理，別自己 parse 狀態碼。
 - **提示**：`showToast(message, duration?)`——時長自動隨訊息長度（85ms/字、上限 6.5 秒），重要通知（到價提醒）明確給 8000。頂部滑動進度條/`.mini-spinner` 載入樣式已有整套，沿用別重做。
 - **非同步競態**：會被快速切換的載入（如策略雷達切場景）用遞增序號模式——請求時捕捉 `seq`，回來時 `requestId !== currentSeq` 就整包丟棄（`strategyLoadSeq` 是範本）。
 - 10 秒輪詢 `refreshLiveData`：只在台股盤中／期貨夜盤打、夜盤只更新指數；`autoRefreshInFlight` 必須在第一個 await 前上鎖，回來後重驗可見性與資料源。市場／個股 loader 用 `renderNow: false` 抑制各自重畫，到價提醒合併進同一輪，最後只呼叫一次 `renderLiveDataUpdate()` 做受保護提交。
-- 背景行情提交必須保護尚未送出的 dirty form，並以穩定的 `id`／`data-*` 身分在 DOM 重建後還原鍵盤焦點；不可用一般 `render()` 清掉券商憑證、密碼、帳號或到價草稿。法人與融資券補充資料由 `refreshSupplementalMarketData({ liveUpdate: true })` 合併載入，兩個 loader 都 suppress render，完成後最多再做一次同樣的受保護提交。
+- 背景行情提交必須保護尚未送出的 dirty form，並以穩定的 `id`／`data-*` 身分在 DOM 重建後還原鍵盤焦點；不可用一般 `render()` 清掉券商憑證、密碼、帳號或到價草稿。**任何 `.then/.finally` 裡的背景重繪一律 `renderLiveDataUpdate()`**（2026-07-25 修掉 `ensureFundamentals()` 的裸 `render()`，失敗路徑每 60 秒重打一次、會清掉正在輸入的密碼／API 金鑰）。
+- **`renderHoldingsPanel()` 在 panel 內有 `activeElement` 時會 early-return**（保護表單輸入）。因此任何位於該 panel 內、按下後要重繪的按鈕**必須先 `.blur()`**——2026-07-25 的「載入更多」就是漏了這行，真實瀏覽器點下去畫面完全不動，而 jsdom 的 `.click()` 不移動焦點所以測試一直是綠的。同層 handler（修正／刪除）本來就都有 blur。法人與融資券補充資料由 `refreshSupplementalMarketData({ liveUpdate: true })` 合併載入，兩個 loader 都 suppress render，完成後最多再做一次同樣的受保護提交。
 - tabs 的 full render 與 partial render 都要呼叫 `syncTabListAccessibility()`，同步 class、role、`aria-selected` 與 roving `tabIndex`；不能只改視覺 active class，否則輪詢後讀屏狀態會漂移。
 
 ## 交易帳本 v2 前端慣例
@@ -49,6 +53,8 @@ description: Stock1 前端（app.js vanilla JS＋styles.css＋index.html）開�
 - **mono 數字字重上限 700**：自架 Plex 只有 500/600/700 三字重，寫 800/900 會合成粗體變醜；body 已設 `font-synthesis-weight: none` 防再犯。canvas 圖表的 `ctx.font` 一律 `'700 <size>px "Stock1 Plex Mono", IBM Plex Mono, …'`——"IBM Plex Mono" 系統沒裝，漏掉自架字型名會 fallback 到 Courier New。
 - 台股配色：紅漲綠跌；只有平盤或真正無法判定漲跌才用中性灰。**漲跌語意 token 分三層**：可讀文字用 `--up-text`(#ff6b66)/`--down-text`(#4ce08a)、底色用 `--up-surface`/`--down-surface`、K棒/bar 資料圖形用 `--red`/`--green`——不要再手寫紅綠 hex 碎片。`priceStale` 只表示目前顯示官方收盤／昨收，須以「收盤」文字揭露新鮮度，但**不得抹掉相對昨收的紅綠方向**；跨日 MIS 最後成交同理。判定類 UI（健檢 ✓/✗）用綠=通過/灰=未達成，不要用紅（紅=漲會誤讀）。
 - 行情 nullable 欄位不能直接 `Number(value)`：`Number(null) === 0` 會捏造 0 元、0 張或 0.00%。成交價先走 `positivePriceOrNull()`；其他可為負或合法為零的數值走 `finiteNumberOrNull()`；顯示缺值用 `--`。`mergeOfficialQuote()` 與 `upsertStockFromQuote()` 必須保留這道前端防線，即使後端已正規化也不能移除。
+  - **2026-07-25 補上三個漏網**（`tests/frontend/fabricated-zero-guards.test.mjs` 已鎖）：`checkPriceAlerts()`／`eligibleAlertQuoteCodes()` 用 `Number(stock.price)` 會讓無報價的檔位以「現價 0」立刻誤觸發所有跌破提醒，還把 alert 標成已觸發 → 真正到價時反而不再提醒；`renderHoldingsPanel()` 同一個陷阱會算出市值 0、未實現＝全額虧損並混進投組總計。
+  - `formatNumber(value, 0)` 舊寫法會把 `1049.6` 變成 `"105"`（`toFixed(0)` 回整數字串後又被去尾零 regex 砍一位）；已比照 `formatTechnicalValue` 加「只在有小數點時去尾零」的防線。
 
 ## UI 修版心法（「無效空白多、字又小」的既定解法）
 

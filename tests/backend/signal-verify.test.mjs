@@ -4,11 +4,11 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { importServer } from "../helpers/test-server.mjs";
-import { stockDayAllRow, compactToday, rocCompact } from "../helpers/fixtures.mjs";
+import { stockDayAllRow, compactToday, compactTradingDay, rocCompact } from "../helpers/fixtures.mjs";
 
 const iso = (compact) => `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
-const TODAY = compactToday(0);
-const YESTERDAY = compactToday(-1);
+const TODAY = compactTradingDay(0);
+const YESTERDAY = compactTradingDay(-1);
 
 // 觀察日行情（今天）：開 103 高 104 低 97 收 102 → 對 100 的訊號價：
 // open +3%、high +4%（達標）、low −3%（破線）、現價 +2%。
@@ -97,13 +97,13 @@ test("saveSignalSnapshot：同日快照——較短不覆蓋（半個市場）�
 
 test("saveSignalSnapshot：只保留最近 15 份（依訊號日排序砍最舊）", async () => {
   const seed = Array.from({ length: 15 }, (_, i) => ({
-    asOf: iso(compactToday(-(20 - i))), savedAt: "", picks: [pickOf()],
+    asOf: iso(compactTradingDay(-(20 - i))), savedAt: "", picks: [pickOf()],
   }));
   const db = await resetSnapshots(seed);
   await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { a: [pickOf()] } });
   assert.equal(db.signalSnapshots.length, 15);
   assert.ok(db.signalSnapshots.some((s) => s.asOf === iso(YESTERDAY)), "新的一份要在");
-  assert.ok(!db.signalSnapshots.some((s) => s.asOf === iso(compactToday(-20))), "最舊的要被砍");
+  assert.ok(!db.signalSnapshots.some((s) => s.asOf === iso(compactTradingDay(-20))), "最舊的要被砍");
 });
 
 test("saveSignalSnapshot：同日不同公式版本互不覆蓋，舊缺欄位明確視為 v1", async () => {
@@ -126,8 +126,10 @@ test("buildSignalVerification：完全沒有快照 → 開始記錄的說明", a
   assert.ok(body.message.includes("今天開始記錄"), body.message);
 });
 
+// 這個情境問的是「快照就是今天（真實日曆日）產生的」，buildSignalVerification 以
+// toTaipeiCompactDate() 的真實今天做 asOf < today 篩選 → 這裡必須用日曆今天，不是交易日。
 test("buildSignalVerification：只有今天的快照 → 等下一個交易日", async () => {
-  await resetSnapshots([{ asOf: iso(TODAY), savedAt: "", picks: [pickOf()] }]);
+  await resetSnapshots([{ asOf: iso(compactToday(0)), savedAt: "", picks: [pickOf()] }]);
   const body = await mod.buildSignalVerification();
   assert.equal(body.available, false);
   assert.ok(body.message.includes("下一個交易日"), body.message);
@@ -168,14 +170,14 @@ test("buildSignalVerification：個別股票行情未前進時不可混入驗證
 // 放最後：buildVerificationHistory 有 10 分鐘模組級快取，本行程只能算一次。
 test("buildVerificationHistory：已驗證日＋今日 pending、totals 用驗證檔數加權", async () => {
   const currentSnapshots = Array.from({ length: 15 }, (_, index) => {
-    const day = compactToday(index - 14);
+    const day = compactTradingDay(index - 14);
     return {
       asOf: iso(day), savedAt: "", formulaVersion: mod.OVERNIGHT_FORMULA_VERSION,
       picks: [pickOf(day === TODAY ? 102 : 100)],
     };
   });
   await resetSnapshots([
-    { asOf: iso(compactToday(-15)), savedAt: "", formulaVersion: "overnight-v0-test", picks: [pickOf(50)] },
+    { asOf: iso(compactTradingDay(-15)), savedAt: "", formulaVersion: "overnight-v0-test", picks: [pickOf(50)] },
     ...currentSnapshots,
   ]);
   const body = await mod.buildVerificationHistory();

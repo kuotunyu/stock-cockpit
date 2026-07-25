@@ -731,14 +731,6 @@ function effectiveTradeFee(raw, side, price, shares, settings, dividendStatus = 
   return computeTradeFee(price, shares, settings);
 }
 
-function effectiveTradeTax(raw, side, kind, price, shares) {
-  if (side !== "sell") return 0;
-  const supplied = Number(raw?.tax);
-  return Number.isFinite(supplied) && supplied >= 0
-    ? Math.round(supplied)
-    : computeTradeTax(price, shares, kind);
-}
-
 function tradeEconomicFingerprint(raw, settings) {
   const side = raw.side;
   const kind = raw.kind == null || raw.kind === "" ? "stock" : raw.kind;
@@ -874,7 +866,7 @@ function validateTradesMutationInput(input, todayCompact = toTaipeiCompactDate()
     const eventId = String(raw.eventId || "").trim();
     const dividendStatus = side === "dividend" ? effectiveDividendStatus(raw) : "";
 
-    if (!/^[0-9A-Z]{4,6}$/.test(code)) addError("code", "股票代號必須是 4～6 碼英數字", index);
+    if (!SECURITY_CODE_PATTERN.test(code)) addError("code", "股票代號必須是 4～6 碼英數字", index);
     if (!new Set(["buy", "sell", "dividend"]).has(side)) addError("side", "買賣類型只接受 buy、sell 或 dividend", index);
     if (raw.kind != null && raw.kind !== "" && !new Set(["stock", "etf", "dayTrade"]).has(kind)) {
       addError("kind", "舊版商品類型只接受 stock、etf 或 dayTrade", index);
@@ -1044,91 +1036,6 @@ function validateTradesMutationInput(input, todayCompact = toTaipeiCompactDate()
   return { ok: errors.length === 0, errors };
 }
 
-function normalizeTradesPayloadLegacy(input) {
-  const src = input && typeof input === "object" ? input : {};
-  const settings = normalizeTradeSettings(src.settings);
-  const seen = new Set();
-  const seenDividendEvents = new Set();
-  const records = [];
-  const list = Array.isArray(src.records) ? src.records : [];
-  const today = toTaipeiCompactDate();
-  for (const raw of list) {
-    if (!raw || typeof raw !== "object") continue;
-    const code = cleanCode(raw.code);
-    const side = ["buy", "sell", "dividend"].includes(raw.side) ? raw.side : "";
-    const kind = raw.kind == null || raw.kind === ""
-      ? "stock"
-      : ["stock", "etf", "dayTrade"].includes(raw.kind) ? raw.kind : "";
-    const price = Number(raw.price); // dividend 時 = 每股現金股利
-    const shares = Number(raw.shares);
-    const date = toCompactDate(raw.date);
-    if (
-      !/^[0-9A-Z]{4,6}$/.test(code)
-      || !side
-      || !kind
-      || !Number.isFinite(price)
-      || price <= 0
-      || !Number.isInteger(shares)
-      || shares <= 0
-      || !date
-      || !isValidCompactCalendarDate(date)
-      || date > today
-    ) continue;
-    const id = String(raw.id || `${code}-${date}-${records.length}`).slice(0, 48);
-    if (seen.has(id)) continue;
-    const eventId = side === "dividend" ? String(raw.eventId || "").trim().slice(0, 64) : "";
-    if (eventId && seenDividendEvents.has(eventId)) continue;
-    seen.add(id);
-    if (eventId) seenDividendEvents.add(eventId);
-    const dividendStatus = side === "dividend" ? effectiveDividendStatus(raw) : "";
-    const fee = effectiveTradeFee(raw, side, price, shares, settings, dividendStatus);
-    const tax = side === "sell"
-      ? (Number.isFinite(Number(raw.tax)) && Number(raw.tax) >= 0 ? Math.round(Number(raw.tax)) : computeTradeTax(price, shares, kind))
-      : 0;
-    const receivedDateRaw = raw.receivedDate ? toCompactDate(raw.receivedDate) : "";
-    const receivedDate = side === "dividend" && dividendStatus === "received"
-      ? (receivedDateRaw && isValidCompactCalendarDate(receivedDateRaw) && receivedDateRaw <= today ? receivedDateRaw : date)
-      : null;
-    const suppliedReceivedAmount = Number(raw.receivedAmount);
-    const receivedAmount = side === "dividend" && dividendStatus === "received"
-      ? (Number.isFinite(suppliedReceivedAmount) && suppliedReceivedAmount >= 0
-          ? Math.round(suppliedReceivedAmount * 100) / 100
-          : Math.max(0, Math.round((price * shares - (fee || 0)) * 100) / 100))
-      : null;
-    const normalizedRecord = {
-      id,
-      code,
-      side,
-      kind,
-      date,
-      // 股票成交價依台股申報檔位最多到小數第 2 位；現金股利公告則可能有更細的小數。
-      price: side === "dividend" ? Math.round(price * 1e6) / 1e6 : Math.round(price * 100) / 100,
-      shares,
-      fee,
-      tax,
-      note: String(raw.note || "").trim().slice(0, 60),
-      createdAt: String(raw.createdAt || "").slice(0, 40),
-    };
-    if (side === "dividend") {
-      normalizedRecord.status = dividendStatus;
-      normalizedRecord.receivedDate = receivedDate;
-      normalizedRecord.receivedAmount = receivedAmount;
-      normalizedRecord.entitledShares = shares;
-      if (eventId) {
-        normalizedRecord.eventId = eventId;
-        normalizedRecord.exDate = toCompactDate(raw.exDate) || date;
-        normalizedRecord.source = String(raw.source || "official-event").slice(0, 32);
-      } else if (raw.source) {
-        normalizedRecord.source = String(raw.source).slice(0, 32);
-      }
-    }
-    records.push(normalizedRecord);
-  }
-  // 依日期（同日依建立時間）排序，讓重放順序穩定。
-  records.sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt).localeCompare(String(b.createdAt)));
-  return { settings, records };
-}
-
 function readSuppliedTradeMoney(raw, canonicalField, legacyField, { allowNull = false } = {}) {
   for (const field of [canonicalField, legacyField]) {
     if (!Object.prototype.hasOwnProperty.call(raw, field)) continue;
@@ -1183,7 +1090,7 @@ function tradeRecordCoreErrors(raw, today) {
   const price = Number(raw.price);
   const shares = Number(raw.shares);
   const date = toCompactDate(raw.tradeDate || raw.date);
-  if (!/^[0-9A-Z]{4,6}$/.test(code)) errors.push("代號不是 4～6 碼英數字");
+  if (!SECURITY_CODE_PATTERN.test(code)) errors.push("代號不是 4～6 碼英數字");
   if (!side) errors.push("買賣別無法辨識");
   if (hasExplicitInstrument && !TRADE_INSTRUMENT_TYPES.has(String(raw.instrumentType))) errors.push("商品類型無法辨識");
   if (!hasExplicitInstrument && !["stock", "etf", "dayTrade"].includes(legacyKind)) errors.push("舊商品類型無法辨識");
@@ -2685,7 +2592,7 @@ function parseRequestedCodes(value, fallback = defaultCodes, maxCodes = MAX_REQU
     throw new Error(`股票代號一次最多 ${maxCodes} 檔`);
   }
   const normalized = raw.map((item) => String(item || "").trim().toUpperCase());
-  if (normalized.some((code) => !/^[0-9A-Z]{4,6}$/.test(code))) {
+  if (normalized.some((code) => !SECURITY_CODE_PATTERN.test(code))) {
     throw new Error("股票代號格式不正確（限 4–6 碼英數字）");
   }
   const codes = [...new Set(normalized)];
@@ -3342,9 +3249,11 @@ function parseCompanyDirectorySnapshot(marketKey, rows, previous) {
   };
 }
 
-async function loadCompanyDirectoryMarket(marketKey) {
-  const state = companyDirectoryMarketCache[marketKey];
-  const source = COMPANY_DIRECTORY_SOURCES[marketKey];
+// 官方主檔類載入器共用的「TTL 新鮮 → single-flight → 退避期內回 last-good → 失敗保留舊值」骨架。
+// 原本 reference／公司主檔／商品主檔／交易日曆四支各自抄了一份同樣的 25 行；抄漏一行
+// （例如忘了在 finally 清 inFlight）就會把永不 resolve 的 promise 存進快取，整個面板卡死。
+// state 沿用 { value, expiresAt, retryAt, lastError, inFlight } 形狀；load(previousValue) 回新值或 throw。
+async function loadWithLastGood(state, { ttlMs, retryMs, load }) {
   const now = Date.now();
   if (state.value && state.expiresAt > now) return { status: "fresh", value: state.value, error: "" };
   if (state.inFlight) return state.inFlight;
@@ -3353,22 +3262,30 @@ async function loadCompanyDirectoryMarket(marketKey) {
   }
   state.inFlight = (async () => {
     try {
-      const rows = await fetchJson(source.url);
-      const value = parseCompanyDirectorySnapshot(marketKey, rows, state.value);
+      const value = await load(state.value);
       state.value = value;
-      state.expiresAt = Date.now() + COMPANY_DIRECTORY_TTL_MS;
+      state.expiresAt = Date.now() + ttlMs;
       state.retryAt = 0;
       state.lastError = "";
       return { status: "fresh", value, error: "" };
     } catch (error) {
       state.lastError = String(error?.message || error || "未知錯誤");
-      state.retryAt = Date.now() + COMPANY_DIRECTORY_RETRY_MS;
+      state.retryAt = Date.now() + retryMs;
       return { status: state.value ? "stale" : "unavailable", value: state.value, error: state.lastError };
     }
   })().finally(() => {
     state.inFlight = null;
   });
   return state.inFlight;
+}
+
+async function loadCompanyDirectoryMarket(marketKey) {
+  const source = COMPANY_DIRECTORY_SOURCES[marketKey];
+  return loadWithLastGood(companyDirectoryMarketCache[marketKey], {
+    ttlMs: COMPANY_DIRECTORY_TTL_MS,
+    retryMs: COMPANY_DIRECTORY_RETRY_MS,
+    load: async (previous) => parseCompanyDirectorySnapshot(marketKey, await fetchJson(source.url), previous),
+  });
 }
 
 // 公司主檔只抓一次，同時產生「發行股數」與「產業／簡稱」兩種視圖；
@@ -3489,7 +3406,7 @@ function parseTwseEtfDirectorySnapshot(rows, previous = null) {
       if (typeof row[field] !== "string" || !row[field].trim()) throw new Error(`上市 ETF 官方主檔缺少必要欄位：${field}`);
     }
     const rawCode = String(row["基金代號"] || "").trim().toUpperCase();
-    if (!/^[0-9A-Z]{4,6}$/.test(rawCode)) throw new Error(`上市 ETF 官方主檔含無效代號：${rawCode || "空白"}`);
+    if (!SECURITY_CODE_PATTERN.test(rawCode)) throw new Error(`上市 ETF 官方主檔含無效代號：${rawCode || "空白"}`);
     const asOf = toCompactDate(row["出表日期"]);
     const listingDate = toCompactDate(row["上市日期"]);
     const inceptionDate = toCompactDate(row["成立日期"]);
@@ -3551,7 +3468,7 @@ function parseTpexEtfCategory(category, payload) {
   for (const row of data) {
     if (!Array.isArray(row)) continue;
     const code = String(row[0] || "").trim().toUpperCase();
-    if (!/^[0-9A-Z]{4,6}$/.test(code)) continue;
+    if (!SECURITY_CODE_PATTERN.test(code)) continue;
     if (seenCodes.has(code)) throw new Error(`上櫃 ETF ${category} 代號重複：${code}`);
     seenCodes.add(code);
     const listingDate = toCompactDate(row[2]);
@@ -3622,32 +3539,13 @@ async function fetchTpexEtfDirectoryPayloads() {
 }
 
 async function loadProductDirectoryMarket(marketKey) {
-  const state = productDirectoryMarketCache[marketKey];
-  const now = Date.now();
-  if (state.value && state.expiresAt > now) return { status: "fresh", value: state.value, error: "" };
-  if (state.inFlight) return state.inFlight;
-  if (state.retryAt > now) {
-    return { status: state.value ? "stale" : "unavailable", value: state.value, error: state.lastError };
-  }
-  state.inFlight = (async () => {
-    try {
-      const value = marketKey === "twse"
-        ? parseTwseEtfDirectorySnapshot(await fetchJson(TWSE_ETF_DIRECTORY_URL), state.value)
-        : parseTpexEtfDirectorySnapshot(await fetchTpexEtfDirectoryPayloads(), state.value);
-      state.value = value;
-      state.expiresAt = Date.now() + PRODUCT_DIRECTORY_TTL_MS;
-      state.retryAt = 0;
-      state.lastError = "";
-      return { status: "fresh", value, error: "" };
-    } catch (error) {
-      state.lastError = String(error?.message || error || "未知錯誤");
-      state.retryAt = Date.now() + PRODUCT_DIRECTORY_RETRY_MS;
-      return { status: state.value ? "stale" : "unavailable", value: state.value, error: state.lastError };
-    }
-  })().finally(() => {
-    state.inFlight = null;
+  return loadWithLastGood(productDirectoryMarketCache[marketKey], {
+    ttlMs: PRODUCT_DIRECTORY_TTL_MS,
+    retryMs: PRODUCT_DIRECTORY_RETRY_MS,
+    load: async (previous) => (marketKey === "twse"
+      ? parseTwseEtfDirectorySnapshot(await fetchJson(TWSE_ETF_DIRECTORY_URL), previous)
+      : parseTpexEtfDirectorySnapshot(await fetchTpexEtfDirectoryPayloads(), previous)),
   });
-  return state.inFlight;
 }
 
 async function getProductDirectory() {
@@ -3747,7 +3645,7 @@ function officialProfileForEtn(code, reference) {
 async function resolveOfficialInstruments(codes) {
   const requested = unique((Array.isArray(codes) ? codes : [codes])
     .map((code) => cleanCode(code))
-    .filter((code) => /^[0-9A-Z]{4,6}$/.test(code)));
+    .filter((code) => SECURITY_CODE_PATTERN.test(code)));
   const [productResult, companyResult, referenceResult] = await Promise.allSettled([
     getProductDirectory(),
     getCompanyDirectory(),
@@ -4569,32 +4467,12 @@ function parseReferenceSnapshot(marketKey, rows, previous) {
 }
 
 async function loadReferenceMarket(marketKey) {
-  const state = referenceMarketCache[marketKey];
   const source = REFERENCE_SOURCES[marketKey];
-  const now = Date.now();
-  if (state.value && state.expiresAt > now) return { status: "fresh", value: state.value, error: "" };
-  if (state.inFlight) return state.inFlight;
-  if (state.retryAt > now) {
-    return { status: state.value ? "stale" : "unavailable", value: state.value, error: state.lastError };
-  }
-  state.inFlight = (async () => {
-    try {
-      const rows = await fetchJson(source.url);
-      const value = parseReferenceSnapshot(marketKey, rows, state.value);
-      state.value = value;
-      state.expiresAt = Date.now() + REFERENCE_TTL_MS;
-      state.retryAt = 0;
-      state.lastError = "";
-      return { status: "fresh", value, error: "" };
-    } catch (error) {
-      state.lastError = String(error?.message || error || "未知錯誤");
-      state.retryAt = Date.now() + REFERENCE_RETRY_MS;
-      return { status: state.value ? "stale" : "unavailable", value: state.value, error: state.lastError };
-    }
-  })().finally(() => {
-    state.inFlight = null;
+  return loadWithLastGood(referenceMarketCache[marketKey], {
+    ttlMs: REFERENCE_TTL_MS,
+    retryMs: REFERENCE_RETRY_MS,
+    load: async (previous) => parseReferenceSnapshot(marketKey, await fetchJson(source.url), previous),
   });
-  return state.inFlight;
 }
 
 // 上市／上櫃各自 single-flight＋last-good。單一市場失敗時回部分成功與明確 warning；
@@ -5736,7 +5614,10 @@ async function getQuotes(codes) {
       const y = await fetchYahooQuote(code, ref?.exchange);
       if (!y || !Number.isFinite(y.price) || y.rawDate !== toTaipeiCompactDate()) return;
       const base = realtimeQuotes.get(code) || ref || {};
-      const previousClose = Number.isFinite(Number(base.previousClose)) ? Number(base.previousClose) : y.previousClose;
+      // previousClose 是價格欄位，必須走 parsePositivePrice：base.previousClose 合法為 null
+      //（官方整批列的 Change 是 "--"、或 MIS 沒有 y 值時），Number(null)===0 是有限值，
+      // 舊寫法會挑到 0 而讓 change 變成「整個股價」，changePct 又因為 0 falsy 靜靜變 null。
+      const previousClose = parsePositivePrice(base.previousClose) ?? y.previousClose ?? null;
       const change = previousClose != null ? roundTo(y.price - previousClose) : null;
       const sameDayIntraday = Boolean(base.officialIntraday)
         && toCompactDate(base.officialIntraday.date) === y.rawDate;
@@ -6940,29 +6821,12 @@ function parseTradingCalendarSource(key, rows) {
 }
 
 async function loadTradingCalendarSource(key) {
-  const state = tradingCalendarSourceCache[key];
   const source = TRADING_CALENDAR_SOURCES[key];
-  const now = Date.now();
-  if (state.value && state.expiresAt > now) return { status: "fresh", value: state.value, error: "" };
-  if (state.inFlight) return state.inFlight;
-  if (state.retryAt > now) return { status: state.value ? "stale" : "unavailable", value: state.value, error: state.lastError };
-  state.inFlight = (async () => {
-    try {
-      const value = parseTradingCalendarSource(key, await fetchJson(source.url));
-      state.value = value;
-      state.expiresAt = Date.now() + source.ttlMs;
-      state.retryAt = 0;
-      state.lastError = "";
-      return { status: "fresh", value, error: "" };
-    } catch (error) {
-      state.lastError = String(error?.message || error || "未知錯誤");
-      state.retryAt = Date.now() + source.retryMs;
-      return { status: state.value ? "stale" : "unavailable", value: state.value, error: state.lastError };
-    }
-  })().finally(() => {
-    state.inFlight = null;
+  return loadWithLastGood(tradingCalendarSourceCache[key], {
+    ttlMs: source.ttlMs,
+    retryMs: source.retryMs,
+    load: async () => parseTradingCalendarSource(key, await fetchJson(source.url)),
   });
-  return state.inFlight;
 }
 
 async function getTradingCalendarEvidence() {
@@ -7766,7 +7630,9 @@ function buildTechnicalSignals(rows, macd, maShort, maMid, swings, supportLine, 
 
 async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
   const clean = cleanCode(code);
-  if (!/^\d{4,6}$/.test(clean)) {
+  // 用全站共用的 4～6 碼英數規則：純數字 regex 會把 00631L／00632R 這類槓反 ETF 擋在門外，
+  // 但前端 isValidSecurityCode、/api/symbols 與自選股都認得它們，使用者會看到「請輸入有效的台股代號」。
+  if (!SECURITY_CODE_PATTERN.test(clean)) {
     return { ok: false, generatedAt: new Date().toISOString(), error: "請輸入有效的台股代號" };
   }
   const analysisPeriod = normalizeAnalysisPeriod(period);
@@ -9649,7 +9515,7 @@ async function handleApi(request, requestUrl, response) {
       return true;
     }
     const rawCode = String(requestUrl.searchParams.get("code") || "").trim().toUpperCase();
-    if (!/^[0-9A-Z]{4,6}$/.test(rawCode)) {
+    if (!SECURITY_CODE_PATTERN.test(rawCode)) {
       jsonResponse(response, 400, { ok: false, error: "證券代號必須是 4～6 碼英數字" });
       return true;
     }
@@ -10974,7 +10840,7 @@ export {
   // 持股損益
   TRADE_SCHEMA_VERSION, MAX_TRADE_RECORDS, isValidCompactCalendarDate, validateTradesMutationInput,
   computeTradeFee, computeTradeTax, computeTradeTaxRule,
-  normalizeTradesPayloadLegacy, normalizeTradesPayload, migrateTradesPayloadToV2, buildPortfolio,
+  normalizeTradesPayload, migrateTradesPayloadToV2, buildPortfolio,
   // 官方商品主檔／交易商品 provenance
   PRODUCT_DIRECTORY_RULE_VERSION, classifyOfficialEtf,
   parseTwseEtfDirectorySnapshot, parseTpexEtfCategory, parseTpexEtfDirectorySnapshot,

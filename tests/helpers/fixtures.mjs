@@ -11,6 +11,23 @@ export function compactToday(offsetDays = 0) {
   const d = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + offsetDays));
   return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
 }
+// 交易日位移（週末感知）。compactToday 是純日曆位移，對「備份檔名用今天」「不可填未來成交日」
+// 這類測試才正確；但**前向驗證類**測試的前提是「今天是交易日、昨天是上一個交易日」，
+// 用日曆位移在週六日會產生無效前提（引擎正確地回 pending，測試卻期待 win）→ 每個週末整套轉紅。
+// 這裡只跳過週六日：offset 0 = 最近一個平日（週末往回退到週五），負數往前數 N 個平日。
+// 國定假日仍由各測試自行 mock holidaySchedule 決定，不在這裡猜。
+export function compactTradingDay(offsetTradingDays = 0) {
+  const parts = Object.fromEntries(taipeiDateFormatter.formatToParts(new Date()).map((part) => [part.type, part.value]));
+  const d = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)));
+  const isWeekend = (date) => date.getUTCDay() === 0 || date.getUTCDay() === 6;
+  while (isWeekend(d)) d.setUTCDate(d.getUTCDate() - 1);
+  const step = offsetTradingDays >= 0 ? 1 : -1;
+  for (let moved = 0; moved < Math.abs(offsetTradingDays); moved += 1) {
+    do { d.setUTCDate(d.getUTCDate() + step); } while (isWeekend(d));
+  }
+  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
 // "20260702" → "115/07/02"（TWSE 處置期間格式）
 export function rocSlash(compact) {
   return `${Number(compact.slice(0, 4)) - 1911}/${compact.slice(4, 6)}/${compact.slice(6, 8)}`;

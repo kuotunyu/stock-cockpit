@@ -3,20 +3,16 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { importServer } from "../helpers/test-server.mjs";
-import { compactToday, rocCompact, stockDayAllRow, tpexDailyCloseRow, misQuoteRow } from "../helpers/fixtures.mjs";
+import { compactToday, compactTradingDay, rocCompact, stockDayAllRow, tpexDailyCloseRow, misQuoteRow } from "../helpers/fixtures.mjs";
 
 const toIso = (day) => `${day.slice(0, 4)}-${day.slice(4, 6)}-${day.slice(6, 8)}`;
-const previousWeekday = (before) => {
-  const date = new Date(Number(before.slice(0, 4)), Number(before.slice(4, 6)) - 1, Number(before.slice(6, 8)));
-  for (;;) {
-    date.setDate(date.getDate() - 1);
-    if (date.getDay() !== 0 && date.getDay() !== 6) {
-      return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
-    }
-  }
-};
+// 觀察日必須是「真實今天」——盤中 provisional 的前提就是今天還在交易。
+// 訊號日是今天的前一個交易日（原本這裡自備了一份 previousWeekday，已收斂到 fixtures）。
 const TODAY = compactToday(0);
-const SIGNAL = previousWeekday(TODAY);
+const SIGNAL = compactTradingDay(-1);
+// 週末／非交易日沒有「盤中」可言：引擎會正確地把前一個交易日判成 final，
+// 這個情境本身不成立。與其偽造前提讓測試假通過，不如明確跳過並說明原因。
+const NON_TRADING_TODAY = compactTradingDay(0) !== TODAY;
 const referenceTwse = [
   { ...stockDayAllRow({ code: "2330", name: "台積電", close: 100 }), Date: rocCompact(SIGNAL) },
   { ...stockDayAllRow({ code: "1101", name: "台泥", close: 40 }), Date: rocCompact(SIGNAL) },
@@ -49,7 +45,9 @@ after(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-test("盤中精確日 MIS 可 provisional 驗證，缺原始 O/H/L 的檔位維持 pending", async () => {
+test("盤中精確日 MIS 可 provisional 驗證，缺原始 O/H/L 的檔位維持 pending", {
+  skip: NON_TRADING_TODAY ? "今天不是交易日，沒有盤中觀察情境可測" : false,
+}, async () => {
   const db = await mod.loadDb();
   db.signalSnapshots = [{
     asOf: toIso(SIGNAL), savedAt: "", coverage: { complete: true },

@@ -3,7 +3,7 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { importServer } from "../helpers/test-server.mjs";
-import { compactToday } from "../helpers/fixtures.mjs";
+import { compactTradingDay } from "../helpers/fixtures.mjs";
 
 let mod;
 before(async () => {
@@ -26,11 +26,11 @@ function makeEntry(overrides = {}) {
     resolvedAt: null,
     resultPct: null,
     daysHeld: 0,
-    lastChecked: compactToday(-1),
+    lastChecked: compactTradingDay(-1),
     ...overrides,
   };
 }
-const dayQuote = (over = {}) => ({ rawDate: compactToday(0), open: 102, high: 105, low: 99, price: 103, ...over });
+const dayQuote = (over = {}) => ({ rawDate: compactTradingDay(0), open: 102, high: 105, low: 99, price: 103, ...over });
 const quoteAt = (rawDate, over = {}) => ({ rawDate, open: 100, high: 105, low: 96, price: 101, ...over });
 
 test("推進：碰到目標＝達標（出場價＝目標；跳空開高用開盤價）", () => {
@@ -38,7 +38,7 @@ test("推進：碰到目標＝達標（出場價＝目標；跳空開高用開�
   assert.equal(mod.advanceSwingVerificationEntry(hit, dayQuote({ high: 111 })), true);
   assert.equal(hit.status, "win");
   assert.equal(hit.resultPct, 10, "(110−100)/100");
-  assert.equal(hit.resolvedAt, compactToday(0));
+  assert.equal(hit.resolvedAt, compactTradingDay(0));
   assert.equal(hit.daysHeld, 1);
 
   const gapUp = makeEntry();
@@ -76,12 +76,12 @@ test("推進：15 個交易日沒碰到 → 以收盤結案（超時）；期間
 });
 
 test("推進：日期沒前進不動（同日重跑、上市/上櫃收盤檔落後）；壞報價不動", () => {
-  const same = makeEntry({ lastChecked: compactToday(0) });
+  const same = makeEntry({ lastChecked: compactTradingDay(0) });
   assert.equal(mod.advanceSwingVerificationEntry(same, dayQuote()), false, "同日不重複計");
   assert.equal(same.daysHeld, 0);
 
-  const lagging = makeEntry({ lastChecked: compactToday(0) });
-  assert.equal(mod.advanceSwingVerificationEntry(lagging, dayQuote({ rawDate: compactToday(-1) })), false, "落後市場的舊報價不推進");
+  const lagging = makeEntry({ lastChecked: compactTradingDay(0) });
+  assert.equal(mod.advanceSwingVerificationEntry(lagging, dayQuote({ rawDate: compactTradingDay(-1) })), false, "落後市場的舊報價不推進");
 
   const badQuote = makeEntry();
   assert.equal(mod.advanceSwingVerificationEntry(badQuote, dayQuote({ high: null })), false, "缺高低價不動");
@@ -151,7 +151,7 @@ test("recordSwingVerification：建單、同日去重、缺 plan 欄位跳過、
     code, name: `測${code}`, scenario: { key: scenario, name: scenario }, score: 70, plan,
   });
   const body = {
-    asOf: compactToday(0),
+    asOf: compactTradingDay(0),
     formulaVersion: mod.SWING_FORMULA_VERSION,
     picks: [
       pick("2330"),
@@ -160,26 +160,26 @@ test("recordSwingVerification：建單、同日去重、缺 plan 欄位跳過、
     ],
   };
   mod.recordSwingVerification(db, body);
-  const list = db.swingVerification[compactToday(0)];
+  const list = db.swingVerification[compactTradingDay(0)];
   assert.equal(list.length, 2, "缺欄位的要跳過");
   assert.equal(list[0].stop, 95, "停損用結構停損");
-  assert.equal(list[0].lastChecked, compactToday(0), "建單日不能當天就被推進");
+  assert.equal(list[0].lastChecked, compactTradingDay(0), "建單日不能當天就被推進");
   // 同日重錄（快照補齊情境）→ 不重複
   mod.recordSwingVerification(db, body);
-  assert.equal(db.swingVerification[compactToday(0)].length, 2, "同日同檔同場景去重");
+  assert.equal(db.swingVerification[compactTradingDay(0)].length, 2, "同日同檔同場景去重");
   // 每場景上限 40
   const manyBody = {
-    asOf: compactToday(0),
+    asOf: compactTradingDay(0),
     formulaVersion: mod.SWING_FORMULA_VERSION,
     picks: Array.from({ length: 60 }, (_, i) => pick(String(3000 + i))),
   };
   mod.recordSwingVerification(db, manyBody);
-  const sameScenario = db.swingVerification[compactToday(0)].filter((e) => e.scenario === "midBandDefense");
+  const sameScenario = db.swingVerification[compactTradingDay(0)].filter((e) => e.scenario === "midBandDefense");
   assert.equal(sameScenario.length, 40, "含既有 2 檔在內，同場景最多 40");
 });
 
 test("recordSwingVerification：同日同檔不同公式版本分開保留", () => {
-  const day = compactToday(0);
+  const day = compactTradingDay(0);
   const db = { swingVerification: {} };
   const pick = {
     code: "2330", name: "台積電", scenario: { key: "midBandDefense" }, score: 70,
@@ -194,7 +194,7 @@ test("recordSwingVerification：同日同檔不同公式版本分開保留", () 
 test("recordSwingVerification：provisional 掃描不可建立不可回溯的驗證單", () => {
   const db = { swingVerification: {} };
   mod.recordSwingVerification(db, {
-    asOf: compactToday(0),
+    asOf: compactTradingDay(0),
     provisional: true,
     coverage: { complete: false },
     formulaVersion: "v1",
@@ -208,12 +208,12 @@ test("recordSwingVerification：provisional 掃描不可建立不可回溯的驗
 
 test("pruneSwingVerification：只留最近 90 天", () => {
   const store = {
-    [compactToday(-100)]: [makeEntry()],
-    [compactToday(-5)]: [makeEntry()],
+    [compactTradingDay(-100)]: [makeEntry()],
+    [compactTradingDay(-5)]: [makeEntry()],
   };
   mod.pruneSwingVerification(store, 90);
-  assert.equal(store[compactToday(-100)], undefined, "超過 90 天的要刪");
-  assert.ok(store[compactToday(-5)], "近期的要留");
+  assert.equal(store[compactTradingDay(-100)], undefined, "超過 90 天的要刪");
+  assert.ok(store[compactTradingDay(-5)], "近期的要留");
 });
 
 test("recordSwingVerification：新增樣本後立即清摘要快取", async () => {
@@ -222,7 +222,7 @@ test("recordSwingVerification：新增樣本後立即清摘要快取", async () 
   const before = await mod.buildSwingVerificationSummary();
   assert.equal(before.scenarios.length, 0);
   mod.recordSwingVerification(db, {
-    asOf: compactToday(0), formulaVersion: mod.SWING_FORMULA_VERSION,
+    asOf: compactTradingDay(0), formulaVersion: mod.SWING_FORMULA_VERSION,
     picks: [{
       code: "2330", name: "台積電", scenario: { key: "midBandDefense" }, score: 80,
       plan: { entry: 100, structuralStop: 95, target: 110, rr: 2 },
@@ -235,34 +235,34 @@ test("recordSwingVerification：新增樣本後立即清摘要快取", async () 
 test("批次推進：reference 覆蓋不完整時不鎖日也不推進", async () => {
   const db = await mod.loadDb();
   db.swingVerification = {
-    [compactToday(-4)]: [makeEntry({ lastChecked: compactToday(-1) })],
+    [compactTradingDay(-4)]: [makeEntry({ lastChecked: compactTradingDay(-1) })],
   };
   await mod.advanceSwingVerification({
     coverageComplete: false,
     byCode: new Map([["2330", dayQuote()]]),
-  }, compactToday(0));
-  assert.equal(db.swingVerification[compactToday(-4)][0].daysHeld, 0);
-  assert.equal(db.swingVerification[compactToday(-4)][0].status, "pending");
+  }, compactTradingDay(0));
+  assert.equal(db.swingVerification[compactTradingDay(-4)][0].daysHeld, 0);
+  assert.equal(db.swingVerification[compactTradingDay(-4)][0].status, "pending");
 });
 
 test("批次推進＋場景統計：相鄰交易日用整批收盤，缺個股報價保留 dataGap", async () => {
   const db = await mod.loadDb();
   db.swingVerification = {
-    [compactToday(-3)]: [
+    [compactTradingDay(-3)]: [
       makeEntry(),                                                        // 2330 → 今天 high 111 → win
       makeEntry({ code: "1101", entry: 40, stop: 38, target: 44 }),       // 1101 → 今天 low 37.5 → loss
       makeEntry({ code: "5555", entry: 50, stop: 47, target: 55 }),       // 不在 reference → 不動
-      makeEntry({ code: "9998", formulaVersion: "old-v1", status: "win", resultPct: 10, daysHeld: 2, resolvedAt: compactToday(-1) }),
+      makeEntry({ code: "9998", formulaVersion: "old-v1", status: "win", resultPct: 10, daysHeld: 2, resolvedAt: compactTradingDay(-1) }),
     ],
   };
   const reference = {
     byCode: new Map([
-      ["2330", { code: "2330", rawDate: compactToday(0), open: 104, high: 111, low: 101, price: 108 }],
-      ["1101", { code: "1101", rawDate: compactToday(0), open: 39, high: 40, low: 37.5, price: 38.5 }],
+      ["2330", { code: "2330", rawDate: compactTradingDay(0), open: 104, high: 111, low: 101, price: 108 }],
+      ["1101", { code: "1101", rawDate: compactTradingDay(0), open: 39, high: 40, low: 37.5, price: 38.5 }],
     ]),
   };
-  await mod.advanceSwingVerification(reference, compactToday(0));
-  const entries = db.swingVerification[compactToday(-3)];
+  await mod.advanceSwingVerification(reference, compactTradingDay(0));
+  const entries = db.swingVerification[compactTradingDay(-3)];
   assert.equal(entries.find((e) => e.code === "2330").status, "win");
   assert.equal(entries.find((e) => e.code === "1101").status, "loss");
   assert.equal(entries.find((e) => e.code === "5555").status, "pending", "查無報價 → 維持等待");

@@ -7,9 +7,22 @@ description: Stock1 測試套件的撰寫與執行規範——node:test＋jsdom 
 
 **tests/README.md 是第一手慣例文件，改測試前先讀它**。這份 skill 補充 README 沒寫的深層陷阱與工作流。
 
-## 現況（2026-07-15）
+## 現況（2026-07-25）
 
-最新離線測試 543/543（backend 339＋frontend 204），後續通過數仍**以 npm test 最新 TAP 為準**；另有 opt-in live 形狀檢查（`npm run test:live`，網路失敗 skip 不 fail）。最新 `server.mjs` 覆蓋率為行 89.29%／分支 77.30%／函式 89.53%；app.js 因 script 注入拿不到歸屬，品質看測試清單不看百分比。
+最新離線測試 555（554 pass／0 fail／1 skip），後續通過數仍**以 npm test 最新 TAP 為準**；另有 opt-in live 形狀檢查（`npm run test:live`，網路失敗 skip 不 fail）。app.js 因 script 注入拿不到覆蓋率歸屬，品質看測試清單不看百分比。
+
+### 週末安全（2026-07-25 修）
+
+`compactToday()` 是**純日曆位移**，只適用於「備份檔名用今天」「不可填未來成交日」這類真的要日曆今天的情境。
+前向驗證類測試的前提是「今天是交易日、昨天是上一個交易日」，週六日用日曆位移會產生無效前提
+（引擎正確回 pending，測試卻期待 win）→ 整套每逢週末必紅 6 項。fixtures 另備 **`compactTradingDay(offset)`**（跳過週六日，offset 以交易日計）：
+
+- `signal-verify`、`swing-verify`、`signal-intraday-observation` 的訊號／觀察日一律用 `compactTradingDay`。
+- 但「只有今天的快照 → 等下一個交易日」必須留 `compactToday(0)`——`buildSignalVerification` 用 `toTaipeiCompactDate()` 的真實今天做 `asOf < today` 篩選。
+- `signal-intraday-observation` 的盤中情境在非交易日 **明確 skip**（非交易日沒有盤中，不偽造前提）。
+- `api-data` 的處置看板歷史改成分兩條路徑驗：非交易日本來就不寫每日快照（順便把這條也釘住了）。
+
+國定假日仍由各測試自行 mock `holidaySchedule`，`compactTradingDay` 不猜假日。
 
 框架＝Node 內建 `node --test`＋jsdom（唯一 devDependency）。**不要引入任何測試框架**。
 
@@ -26,7 +39,8 @@ description: Stock1 測試套件的撰寫與執行規範——node:test＋jsdom 
 1. **絕不綁 5174**：整合測試用 `bootServer()`（臨時埠 0），spawn 真入口的 `boot-preserved` 全案例也必須明確設 `PORT=0`；`node --test` 參數**必須用 glob**（`tests/backend/*.test.mjs`）——Windows 上傳目錄會被當模組執行而 MODULE_NOT_FOUND。
 2. **完全離線**：fetch-mock 未匹配的外部 URL 直接 throw。漏接路由會大聲失敗——這是 feature。
 3. **特徵化原則**：測試釘「現行行為」；揭露疑似 bug → 先回報使用者，註解標「疑似 bug 已回報」，不默默改產品碼。已知刻意特徵：`formatNumber(null)="0"`、`addMonthsCompact` 回目標月 1 號、enrich 查不到 reference 時 price=undefined、`decryptJson` 竄改密文會 throw。
-4. fixtures **日期全用相對今天位移**（fixtures.mjs 的日期工廠），絕不寫死絕對日期。
+4. fixtures **日期全用相對今天位移**（fixtures.mjs 的日期工廠），絕不寫死絕對日期。需要「交易日」語意時用 `compactTradingDay`，不要用 `compactToday`（見上方「週末安全」）。
+4b. **突變抽查是驗收條件，不是選配**：新測試寫完要暫時把產品碼改回舊行為，確認測試轉紅再改回。2026-07-25 新增的四支測試都做過。
 5. fixture 欄位名 **1:1 抄 server.mjs 消費端**（含官方拼錯字），懷疑漂移跑 test:live。
 6. runtime DB mutation 測試不能只看 response：持久化失敗時要同時驗 `503 PERSISTENCE_FAILED`、pending／失敗 draft 從未發布、API 與 `loadDb()` 始終只看到上一個已提交 RAM／rev、失敗 save 仍讓 `dbMutationEpoch` 遞增一次，以及下一筆成功寫入不夾帶失敗資料。`skipDbMutation()` 搭配 dirty draft 必須回 `DB_MUTATION_SKIP_DIRTY`，且 RAM／磁碟／epoch 不變。queue tail 必須永遠 settled：business 4xx／安全丟棄的 503 只拒絕當次 caller，不污染下一筆或 shutdown，也不需要成功 mutation 清洗 queue。
 7. 所有需登入的 runtime mutation 都要測提交時 auth：請求在讀 body／查上游／等 queue 期間可能 session 過期、被重設、帳號消失或角色降級；進 queue 後必須重驗最新 session/current user/角色，restore 另對最新 `passwordHash` 重驗目前密碼。DB mutation epoch 只 guard preview 生成與還原點 snapshot 穩定；已發 token 主要綁 session／個人 rev／共享備註 rev。
@@ -61,7 +75,9 @@ description: Stock1 測試套件的撰寫與執行規範——node:test＋jsdom 
 
 - `tests/backend/`：純函式（quote-normalizers/overnight-engine/history-aggregate…）、離線端對端（surveillance-board；另以 `surveillance-quote-alignment.test.mjs` 鎖卡片與詳情的 MIS 報價對齊）、HTTP 整合（api-auth/api-data/api-admin）、韌性（reference/company last-good＋single-flight、fallback quote immutability、atomic-write temp link 防護、db-recovery×3／db-read-error／db-backup／fetch-timeout）、交易日與 exact-next-day／盤中觀察驗證、boot-preserved（全案例 `PORT=0` 的真入口＋production／對外綁定安全門檻）。交易帳本 v2 另由 `trades-v2.test.mjs`、`trades-migration-load.test.mjs`、`trades-v2-api.test.mjs` 覆蓋；`personal-data-portability.test.mjs` 鎖備份隔離、checksum、兩階段 token、最新密碼重驗、共享合併／全域 note id、16 MiB bundle 與 wrapper 邊界及還原點，`auth-delayed-body-race.test.mjs` 鎖 body 延遲期間 session 失效的 TOCTOU，`lifecycle.test.mjs` 鎖 health、啟停競態與 persistence drain，`api-persistence-rollback.test.mjs` 鎖 copy-on-write transaction 的 503／draft 不發布／失敗資料不外洩，`transaction-queue-tail.test.mjs` 鎖 dirty skip、business 4xx／安全 503 後的下一筆與 shutdown，`instance-lock.test.mjs` 以 10 cases 鎖統一 writer-resource namespace、DATA_DIR parent guard、fixed／backup entry 型別與接手。
 - `tests/frontend/`：jsdom 渲染與領域邏輯（filter-sort/market-clock/quote-merge/holdings-render/swing-verify-render/overnight-verify-render…）；`watchlist-layout-typography.test.mjs` 鎖自選股字級、欄寬與成交價／漲跌幅置中分列；`overnight-layout-typography.test.mjs` 鎖隔日沖摘要、驗證與清單字級，以及資料可信度滿寬狀態列；`screener-layout-typography.test.mjs` 鎖盤中選股自架字型、數字角色、欄寬與可讀下限；`strategy-layout-typography.test.mjs` 鎖策略雷達資訊分組、完整寬度、字級與桌機／手機欄數；交易 v2 表單、來源 badge、隔離提示、載入更多與一般交易修正集中在 `trade-v2-form.test.mjs`；`account-backup.test.mjs` 鎖更多頁 tile、下載安全、檔案預檢、preview／commit、帳號切換競態與 modal a11y。
-- `tests/helpers/`：fetch-mock、fixtures（日期工廠＋官方欄位工廠）、test-server（importServer/bootServer/pollUntil）、dom-harness。
+- `tests/frontend/render-escaping.test.mjs`：策略健檢／策略雷達／隔日沖錯誤字串與波段卡片股名的跳脫回歸（含 `aria-label` 屬性上下文）。
+- `tests/frontend/fabricated-zero-guards.test.mjs`：`Number(null)===0` 的前端防線（到價提醒誤觸發、庫存假市值）＋「載入更多」的**焦點**回歸——測互動按鈕時要先 `.focus()` 再 `.click()`，jsdom 的 `.click()` 不移動焦點，只 click 會漏掉「render 因 activeElement 在 panel 內而 early-return」這類真實破口。
+- `tests/helpers/`：fetch-mock、fixtures（日期工廠＋交易日工廠＋官方欄位工廠）、test-server（importServer/bootServer/pollUntil）、dom-harness。
 - `tests/live/`：upstream-shape（opt-in）。
 
 ## 交易帳本 v2 的最低回歸矩陣

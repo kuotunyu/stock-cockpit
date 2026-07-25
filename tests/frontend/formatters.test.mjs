@@ -28,6 +28,10 @@ test("formatNumber：整數原樣、小數去尾零、無效 → --", () => {
   assert.equal(app.evalIn("formatNumber(undefined)"), "--");
   assert.equal(app.evalIn("formatNumber('abc')"), "--");
   assert.equal(app.evalIn("formatNumber(0)"), "0");
+  // digits=0 時 toFixed 回整數字串，去尾零的 regex 不可再砍一位（1049.6 → "1050"，不是 "105"）。
+  assert.equal(app.evalIn("formatNumber(1049.6, 0)"), "1050");
+  assert.equal(app.evalIn("formatNumber(1000.4, 0)"), "1000");
+  assert.equal(app.evalIn("formatOptionalNumber(1049.6, 0)"), "1050");
 });
 
 test("formatSignedPercent：▲▼與平盤", () => {

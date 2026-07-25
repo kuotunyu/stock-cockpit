@@ -4,6 +4,26 @@
 
 這是 living document。修復後應在對應項目補上測試與完成日期，而不是刪除歷史。
 
+## 2026-07-25 進度更新（程式碼層稽核）
+
+**P1-01 曾經回歸，已重修。** 下方 2026-07-13 的紀錄把 P1-01（策略健檢 query 直接進 innerHTML）列為已修，但 2026-07-25 以 jsdom 實測，`renderStrategyInspect()` 仍會把健檢輸入框原文塞進 `innerHTML`，而後端 `/api/swing/inspect` 的錯誤訊息又把 query 原樣回填（`找不到「${query}」`）——`<img src=x onerror=…>` 確實會生成帶事件屬性的元素。已修並新增 `tests/frontend/render-escaping.test.mjs`（含屬性上下文的 `aria-label`），且做過突變抽查。教訓：**「已修」若沒有對應的回歸測試就不算修完**，這次一併補上測試而不只是補程式。
+
+同批修復（皆有測試鎖定、突變抽查驗證有效）：
+
+| 項目 | 影響 |
+|---|---|
+| `checkPriceAlerts`／`eligibleAlertQuoteCodes` 的 `Number(null)===0` | 無報價檔位以「現價 0」誤觸發所有跌破提醒並自我標記已觸發，真正到價時不再提醒 |
+| `renderHoldingsPanel` 同一陷阱 | 未報價持股算成市值 0、未實現＝全額虧損，並混進投組總計 |
+| `getQuotes` Yahoo 升格的 `previousClose` | 官方 `Change:"--"` 時 previousClose 變 0、change 變成整個股價、changePct 靜靜變 null |
+| 「載入更多」缺 `.blur()` | 真實瀏覽器點下去畫面完全不動（jsdom `.click()` 不移動焦點，舊測試看不出來） |
+| `buildTechnicalAnalysis` 用 `/^\d{4,6}$/` | `00631L`／`00632R` 等槓反 ETF 回「請輸入有效的台股代號」，但前端與 `/api/symbols` 都認得 |
+| `ensureFundamentals` 背景裸 `render()` | 會清掉正在輸入的密碼／券商金鑰，失敗路徑每 60 秒重來一次 |
+| `formatNumber(x, 0)` | `1049.6` 被去尾零 regex 砍成 `"105"`（目前無呼叫端傳 0，屬潛伏） |
+
+品質面：抽出 `loadWithLastGood()` 收斂四份逐字重複的快取骨架、8 處手寫代號 regex 收斂回 `SECURITY_CODE_PATTERN`、刪除 93 行零呼叫死碼（`normalizeTradesPayloadLegacy`／`effectiveTradeTax`，兩者各自藏著一份過時的費稅規則）、`scripts/test-coverage.mjs` 加上檔名守衛（原本改名會讓它退化成無參數 `node --test`，把 `tests/live/` 的真實網路測試一起跑掉）。
+
+測試套件：修掉「每逢週末必紅 6 項」——fixtures 新增 `compactTradingDay()`，前向驗證類測試改用交易日語意。基線 555（554 pass／0 fail／1 skip，該 skip 是非交易日沒有盤中情境）。
+
 ## 2026-07-13 進度更新
 
 下方 P1／P2 內容保留 2026-07-12 的原始蒐證與行號，供追溯使用，**不代表目前仍未修復**。目前基線為：離線測試 **476／476**（後端 303、前端 173；coverage 編排為 7 項特殊契約＋其餘 469 項）、`server.mjs` 覆蓋率 **line 89.24%／branch 78.31%／function 89.28%**，lockfile 稽核 0 vulnerabilities。Node 支援範圍已以 `engines` 鎖定為 20.19+、22.13+ 或 24+。

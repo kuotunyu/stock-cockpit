@@ -34,9 +34,16 @@ const measurable = [
   ...frontend,
 ].map(({ path }) => path);
 
+// 檔名對不上就必須立刻停：cacheBust 若變成空陣列，下面會退化成沒有檔案參數的
+// `node --test`，Node 會自動探索整個專案並把 tests/live/ 的真實網路測試一起跑掉。
+if (cacheBust.length !== cacheBustNames.size) {
+  const missing = [...cacheBustNames].filter((name) => !backend.some((file) => file.name === name));
+  throw new Error(`cacheBustNames 與 tests/backend 實際檔名不符，找不到：${missing.join("、")}`);
+}
+
 runNode(
   ["--test", ...cacheBust],
-  "先驗證 7 項 cache-bust 韌性契約（不納入原生 coverage 合併）",
+  `先驗證 ${cacheBust.length} 個 cache-bust 韌性測試檔（不納入原生 coverage 合併）`,
 );
 runNode(
   [
@@ -46,5 +53,5 @@ runNode(
     "--test-coverage-exclude=tests/**",
     ...measurable,
   ],
-  "其餘測試序列執行並合併可信覆蓋率",
+  `其餘 ${measurable.length} 個測試檔序列執行並合併可信覆蓋率`,
 );

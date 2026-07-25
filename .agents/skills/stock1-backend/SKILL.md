@@ -29,10 +29,13 @@ description: Stock1 後端（server.mjs 單檔 Node ESM）開發規範——新�
 - `fetchJsonWithRetry(url, options, retries)`：限流敏感的逐檔歷史抓取用它（900ms 間隔重試一次）。
 - TWSE MIS 需要 `referer` header；各端點的欄位陷阱見 `stock1-upstream` skill。
 - 行情正規化的**價格欄位**（成交／昨收／開高低／Yahoo meta）必須經 `parsePositivePrice()`，只接受有限且 `>0` 的數；`0`／`0.0000` 可能是上游無成交哨兵。成交量、總量與費稅等合法為零的欄位仍用 `parseNumber()`，不可把兩種驗證混在一起。
+  - **正規化之後的合併路徑同樣算價格欄位**：2026-07-25 修掉 `getQuotes()` Yahoo 升格處的 `Number.isFinite(Number(base.previousClose))`——`base.previousClose` 合法為 null（官方整批列 `Change:"--"`、或 MIS 沒有 `y`），`Number(null)===0` 是有限值，於是 previousClose 變 0、change 變成「整個股價」、changePct 又因 0 falsy 靜靜變 null。回歸在 `tests/backend/yahoo-quote-freshness.test.mjs`。
+- 代號格式一律用模組頂端的 `SECURITY_CODE_PATTERN`（4～6 碼英數），不要再手寫 `/^[0-9A-Z]{4,6}$/`（2026-07-25 收斂了 8 處）。**特別注意不要退回 `/^\d{4,6}$/`**——`buildTechnicalAnalysis` 曾因此把 `00631L`／`00632R` 這類槓反 ETF 回成「請輸入有效的台股代號」，但前端與 `/api/symbols` 都認得它們。
 
 ## 快取模式（五種，選對的用）
 
 1. **TTL 物件**：`{ value, expiresAt }`，如 marketCache（15 秒）。到期重抓、失敗沿用舊值＋warning（last-good 模式）；整組 riskSets 先正規化日期 key 並共用 single-flight，處置看板也有今日 single-flight。
+   - **官方主檔類（reference／公司主檔／商品主檔／交易日曆）一律走 `loadWithLastGood(state, { ttlMs, retryMs, load })`**（2026-07-25 從四份逐字重複的 25 行收斂而來）。state 沿用 `{ value, expiresAt, retryAt, lastError, inFlight }`，`load(previousValue)` 回新值或 throw。新增同型載入器請直接用它，不要再抄一份——抄漏 `finally` 清 `inFlight` 就會把永不 resolve 的 promise 存進快取。`loadDividendMarket` 刻意不套（沒有 retryAt 退避、失敗回 `new Map()`）。
 2. **以請求參數為 key 的 Map**：institutionalCache/marginCache（key=請求日期，最多 16 筆，過期/LRU 淘汰；同日期共用 single-flight）。
 3. **每日凍結快照**：swingSnapshots（`YYYYMMDD:all`）——同一交易日只算一次、整天回同一份；登入後 `?refresh=1` 才能重算且有 5 分鐘冷卻，同日/同候選數的掃描共用 single-flight；「新結果更完整才覆蓋」，引擎改版靠 `SWING_FORMULA_VERSION` 讓舊快照失效。
 4. **逐檔月 K**：historyCache 以 `exchange:code:month` 為 key，per-key single-flight；過期先清、LRU 上限 4096，避免全市場掃描跑久後只增不減。

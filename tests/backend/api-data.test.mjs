@@ -525,8 +525,17 @@ test("surveillance-board：只允許今日、併發共用 single-flight，任意
     assert.equal(invalid.status, 400, invalidDate);
     await invalid.json();
   }
-  const history = JSON.parse(await (await import("node:fs/promises")).readFile(`${srv.dataDir}/surveillance-history.json`, "utf8"));
-  assert.deepEqual(Object.keys(history), [today], "惡意日期不得寫入或淘汰今日快照");
+  // 非交易日（週末／假日）跑測試時，getSurveillanceBoard 的規格就是「只顯示公告、不寫每日快照」，
+  // 歷史檔本來就不會存在。分開驗兩條路徑，順便把非交易日這條也釘住，
+  // 避免整套離線測試每逢週末就轉紅（2026-07-25 週六實測）。
+  const historyRaw = await (await import("node:fs/promises"))
+    .readFile(`${srv.dataDir}/surveillance-history.json`, "utf8").catch(() => null);
+  const nonTradingDay = (body.warnings || []).some((warning) => String(warning).includes("今天不是排定交易日"));
+  if (nonTradingDay) {
+    assert.equal(historyRaw, null, "非交易日不得新增每日快照");
+  } else {
+    assert.deepEqual(Object.keys(JSON.parse(historyRaw)), [today], "惡意日期不得寫入或淘汰今日快照");
+  }
 });
 
 test("technical-analysis：官方月 K 齊全 → ok:true、≥30 根", async () => {
@@ -544,6 +553,19 @@ test("technical-analysis：無效代號 → ok:false", async () => {
   const body = await res.json();
   assert.equal(body.ok, false);
   assert.ok(body.error.includes("有效的台股代號"));
+});
+
+// 舊的 /^\d{4,6}$/ 會把 00631L／00632R 這類槓反 ETF 當成格式錯誤擋掉，
+// 但前端 isValidSecurityCode、/api/symbols 與自選股都認得它們 → 使用者點自己的自選股會看到「請輸入有效的台股代號」。
+test("technical-analysis：帶英文字尾的 ETF 代號不得被當成格式錯誤", async () => {
+  for (const code of ["00631L", "00632R", "00675L"]) {
+    const res = await srv.api(`/api/technical-analysis?code=${code}`);
+    const body = await res.json();
+    assert.ok(
+      !String(body.error || "").includes("有效的台股代號"),
+      `${code} 不該回格式錯誤，實際 error=${body.error}`,
+    );
+  }
 });
 
 test("technical-analysis：官方無資料＋Yahoo 也空 → ok:false 且確實嘗試過 Yahoo", async () => {
