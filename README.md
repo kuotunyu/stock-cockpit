@@ -1,8 +1,8 @@
 # stock-cockpit — 台股看盤終端 Web App
 
-![tests](https://img.shields.io/badge/tests-544%20offline-brightgreen) ![node](https://img.shields.io/badge/node-%E2%89%A520.19-blue) ![deps](https://img.shields.io/badge/runtime%20deps-1-blueviolet) ![PWA](https://img.shields.io/badge/PWA-offline%20shell-orange) ![license](https://img.shields.io/badge/license-MIT-blue)
+![tests](https://img.shields.io/badge/tests-offline-brightgreen) ![node](https://img.shields.io/badge/node-%E2%89%A520.19-blue) ![deps](https://img.shields.io/badge/runtime%20deps-1-blueviolet) ![PWA](https://img.shields.io/badge/PWA-offline%20shell-orange) ![license](https://img.shields.io/badge/license-MIT-blue)
 
-自架的台股看盤工作台（內部代號 Stock1）：整合 TWSE／TPEx／期交所官方資料，提供隔日沖與波段兩套選股引擎（含每日前向驗證）、技術分析、注意／處置看板、自選股與到價提醒，以及費稅完整的交易帳本。**手寫、無框架**——後端是單檔 Node 原生 `http`（`server.mjs`），前端是 vanilla JS 單頁（`app.js`），執行期依賴只有富邦行情 SDK 一個。
+自架的台股看盤工作台（內部代號 Stock1）：整合 TWSE／TPEx／期交所官方資料，提供隔日沖與波段兩套選股引擎（含每日前向驗證）、技術分析、注意／處置看板、自選股與到價提醒，以及費稅完整的交易帳本。**無框架**——後端是單檔 Node 原生 `http`（`server.mjs`），前端是 vanilla JS 單頁（`app.js`），執行期依賴只有富邦行情 SDK 一個。
 
 > 個人研究工具，僅供行情觀察與策略研究，不提供下單功能，所有訊號與估算都不構成投資建議。
 
@@ -63,11 +63,15 @@ flowchart LR
 - **交易帳本 v2**：商品與交易型態分開建模，依成交日套用有效日期化證交稅規則，估算值與券商實際值分離，歷史損益一旦凍結不被回改。
 - **持久化走 copy-on-write transaction queue**：draft 隔離、原子落盤後才發布新快取；失敗回 `503`，不會出現「回成功但只存在記憶體」的狀態；多實例以 writer lease 互斥。
 - **資料品質誠實降級**：各官方來源維護 last-good 快取，單一市場失敗仍回傳其餘資料並附 `warnings`／`dataQuality`；估算、待覆核、官方確認三種狀態在 UI 明確區分。
-- **544 項離線測試**（`node:test`＋jsdom，零網路 mock 上游）＋ PWA network-first 離線殼，`/api` 永不快取，不會把舊行情冒充即時資料。
+- **全離線測試套件**（`node:test`＋jsdom，零網路 mock 上游）＋ PWA network-first 離線殼，`/api` 永不快取，不會把舊行情冒充即時資料。
 
 ## AI 協作開發方式
 
-專案由我與 coding agent 協作開發：`.agents/skills/`（`.claude/skills/` 為鏡像）收錄六份專案 skill——架構地圖、後端規範、前端規範、選股域規則、測試規範、上游資料源陷阱大全，agent 動手前需先讀對應 skill；`.agents/AUDIT.md` 記錄歷次稽核的發現與驗證基線；開發鐵律強調「疑似 bug 先回報、不默默改行為，測試釘住現行行為」。
+專案由我與 coding agent 協作完成，過程中使用過的模型包含 **Claude Fable 5、Claude Opus 5、GPT-5.5、GPT-5.6**。
+
+協作規範以一組專案 skill 文件維護（架構地圖、後端與前端規範、選股域規則、測試規範、上游資料源陷阱），agent 動手前需先讀對應的那一份；另有稽核文件記錄歷次發現、修復與驗證基線。這些文件保留在本機、不隨 repo 發佈。
+
+開發鐵律：**疑似 bug 先回報、不默默改行為**；**測試釘住現行行為**，任何程式改動都要附離線測試，並以「突變抽查」（暫時把產品碼改回舊行為、確認測試真的轉紅）驗證測試有效；**行為變更必須在交付說明中明列**，改變選股結果這類決策一律先確認再動手。
 
 ## 本機啟動
 
@@ -81,7 +85,7 @@ npm start
 開啟 `http://127.0.0.1:5174/`，第一次啟動會自動建立管理者帳號 `admin` / `admin1234`（**部署前務必用環境變數改掉**）。
 
 ```powershell
-npm test          # 544 項離線測試（不需網路）
+npm test          # 離線測試套件（不需網路）
 npm run test:live # opt-in：真實上游形狀檢查
 ```
 
@@ -115,7 +119,7 @@ DB_PATH=/var/app/data/stock1-db.json   # 可省略，預設 DATA_DIR/stock1-db.j
 | 處置看板 | `/api/surveillance-board` |
 | 個人資料（需登入） | `/api/watchlists`、`/api/alerts`、`/api/trades`、`/api/personal-data/*`、`/api/broker/*` |
 
-交易帳本採 `schemaVersion: 2`，`rev` 樂觀鎖防多分頁蓋寫；個人資料可從「更多 → 個人資料備份」匯出 JSON 備份，並透過兩階段預覽式流程復原。完整端點行為與費稅規則見 [server.mjs](server.mjs) 與 `.agents/skills/`。
+交易帳本採 `schemaVersion: 2`，`rev` 樂觀鎖防多分頁蓋寫；個人資料可從「更多 → 個人資料備份」匯出 JSON 備份，並透過兩階段預覽式流程復原。完整端點行為與費稅規則見 [server.mjs](server.mjs)。
 
 ## 資料來源
 
