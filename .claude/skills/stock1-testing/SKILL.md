@@ -9,7 +9,7 @@ description: Stock1 測試套件的撰寫與執行規範——node:test＋jsdom 
 
 ## 現況（2026-07-25）
 
-最新離線測試 592（591 pass／0 fail／1 skip），後續通過數仍**以 npm test 最新 TAP 為準**；另有 opt-in live 形狀檢查（`npm run test:live`，網路失敗 skip 不 fail）。app.js 因 script 注入拿不到覆蓋率歸屬，品質看測試清單不看百分比。
+最新離線測試 599（598 pass／0 fail／1 skip），後續通過數仍**以 npm test 最新 TAP 為準**；另有 opt-in live 形狀檢查（`npm run test:live`，網路失敗 skip 不 fail）。app.js 因 script 注入拿不到覆蓋率歸屬，品質看測試清單不看百分比。
 
 ### 週末安全（2026-07-25 修）
 

@@ -273,7 +273,12 @@ test("批次推進＋場景統計：相鄰交易日用整批收盤，缺個股�
   assert.equal(s.wins, 1);
   assert.equal(s.losses, 1);
   assert.equal(s.pending, 1);
-  assert.equal(s.winRate, 50, "結案 2 筆中 1 勝");
+  // D-27（2026-07-26）：勝率需累積 WIN_RATE_MIN_SAMPLES 筆結案才顯示。
+  // 這裡只有 2 筆結案 → winRate 為 null（不是「沒資料」，是「還不足以當結論」）。
+  // 計數本身仍要正確，所以改驗 resolved 與各分類數。
+  assert.equal(s.resolved, 2, "結案數＝達標＋停損＋超時");
+  assert.equal(s.winRate, null, `結案 2 筆低於門檻 ${mod.WIN_RATE_MIN_SAMPLES}，不得給百分比`);
+  assert.equal(s.winRateMinSamples, mod.WIN_RATE_MIN_SAMPLES, "前端要靠這個顯示累積進度");
   assert.equal(summary.pendingCount, 1);
   assert.equal(summary.dataGapCount, 1, "5555 缺官方 K 棒要標缺口，不能跳過");
   assert.equal(summary.recent.length, 2, "只列已結案");

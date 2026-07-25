@@ -7,7 +7,7 @@ description: Stock1 台股看盤 App 的架構總覽與專案地圖——檔案�
 
 私人台股看盤 Web App：使用者＋2 位朋友各自在自己電腦 `npm start` 跑 localhost，觀察用、不下單。繁體中文介面，回覆使用者一律用繁體中文。**目錄不是 git repo**（使用者更新方式＝整包複製 code 給朋友）。
 
-最後校準：2026-07-26（金融領域稽核第二批：DOMAIN-BACKLOG 第一層全數處理完畢（D-02／D-11 因需升版本號、會改變選股結果而延後）；第一批：修掉兩套前向驗證的除權息盲點、舊版當沖稅繞過有效日期、除權 ratio=1 假 official、Yahoo 升格沿用他日昨收、realtimeCount 含 stale、未報價持股灌水報酬率分母）；前次 2026-07-25（程式碼層稽核：修掉策略健檢的真實 DOM XSS、`Number(null)===0` 造假價格三處、「載入更多」焦點失效、技術分析擋掉英文字尾 ETF、背景 render 清草稿；後端去重 `loadWithLastGood`／`SECURITY_CODE_PATTERN`、刪 93 行死碼；測試套件補上週末安全）；最新離線測試 592（591 pass／0 fail／1 skip），後續通過狀態仍**以 npm test 最新 TAP 為準**。**改了重大行為請順手更新對應 skill——這些文件同時是使用者的回顧文件。`.agents/skills` 是 canonical；完成後同步鏡像到 `.claude/skills`，避免兩套代理讀到不同規格。**
+最後校準：2026-07-26（金融領域稽核第二批：DOMAIN-BACKLOG 第一層全數處理完畢（D-02／D-11 因需升版本號、會改變選股結果而延後）；第一批：修掉兩套前向驗證的除權息盲點、舊版當沖稅繞過有效日期、除權 ratio=1 假 official、Yahoo 升格沿用他日昨收、realtimeCount 含 stale、未報價持股灌水報酬率分母）；前次 2026-07-25（程式碼層稽核：修掉策略健檢的真實 DOM XSS、`Number(null)===0` 造假價格三處、「載入更多」焦點失效、技術分析擋掉英文字尾 ETF、背景 render 清草稿；後端去重 `loadWithLastGood`／`SECURITY_CODE_PATTERN`、刪 93 行死碼；測試套件補上週末安全）；最新離線測試 599（598 pass／0 fail／1 skip），後續通過狀態仍**以 npm test 最新 TAP 為準**。**改了重大行為請順手更新對應 skill——這些文件同時是使用者的回顧文件。`.agents/skills` 是 canonical；完成後同步鏡像到 `.claude/skills`，避免兩套代理讀到不同規格。**
 
 ## 鐵律（違反會直接惹惱使用者）
 

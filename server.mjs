@@ -8642,6 +8642,16 @@ function recordSwingVerification(db, body) {
 // 規則：日期沒前進不動（防同日重跑、天然擋上市/上櫃收盤檔時間差）；
 // 同日雙觸（低點破停損且高點過目標）保守記停損——日 K 沒有盤中序列，統計寧可偏保守；
 // 跳空直接越過停損/目標時用開盤價計實際出場（更誠實的滑價）；15 個交易日沒碰到＝以收盤結案。
+// ---- 勝率的最小樣本門檻（D-27）----
+// 舊行為：只要有 1 筆結案就給百分比，前端還依 >=50% 染成紅／綠。問題有三層：
+// (1) 樣本數 1 的「勝率 100%」沒有任何統計意義，但視覺上跟累積數十筆的綠字長得一樣；
+// (2) winRate 的分母只算已結案，而 win/loss 一碰價就結案（常 1~3 天）、expired 一定要等第 15 個
+//     交易日——累積初期分母裡幾乎只有快速觸價的極端樣本，勝率會先高後低，看起來像策略壞掉，
+//     其實只是分母組成在變；
+// (3) 同一天選出的 20~40 檔高度共享大盤 beta，當成獨立樣本會嚴重高估精度。
+// 門檻取 20：低於它一律回 null，讓前端顯示「樣本累積中 n/20」且不染色。
+// 這只影響「要不要把百分比當結論呈現」，不改變任何選股結果。
+const WIN_RATE_MIN_SAMPLES = 20;
 const SWING_VERIFY_MAX_DAYS = 15;
 function advanceSwingVerificationEntry(entry, dayQuote) {
   if (!entry || entry.status !== "pending" || !dayQuote) return false;
@@ -8880,7 +8890,10 @@ async function buildSwingVerificationSummary() {
     losses: s.losses,
     expired: s.expired,
     pending: s.pending,
-    winRate: s.resolved ? Math.round((s.wins / s.resolved) * 1000) / 10 : null,
+    resolved: s.resolved,
+    // 低於最小樣本時回 null——不是「沒有資料」，而是「還不足以當成結論」。
+    winRate: s.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((s.wins / s.resolved) * 1000) / 10 : null,
+    winRateMinSamples: WIN_RATE_MIN_SAMPLES,
     avgResultPct: s.resolved ? Math.round((s.sumResultPct / s.resolved) * 100) / 100 : null,
     avgResultPctNet: s.resolved ? netReturnPct(s.sumResultPct / s.resolved) : null,
     avgDaysHeld: s.resolved ? Math.round((s.sumDaysHeld / s.resolved) * 10) / 10 : null,
@@ -8898,6 +8911,7 @@ async function buildSwingVerificationSummary() {
     notes: [
       "驗證規則：進場＝訊號日收盤，之後每個交易日用官方日K高低價判定「先碰目標＝達標、先碰停損（結構停損）＝停損」；同一天兩邊都碰到，保守記停損。",
       `${SWING_VERIFY_MAX_DAYS} 個實際交易日內都沒碰到 → 以第 ${SWING_VERIFY_MAX_DAYS} 日收盤結案（超時）。漏開 App 會用官方日K依日期補判；若中間日K缺漏就停在缺口前並排除結案統計。`,
+      `勝率需累積 ${WIN_RATE_MIN_SAMPLES} 筆結案才顯示：分母只含已結案，而達標／停損常 1~3 天就結案、超時要等第 ${SWING_VERIFY_MAX_DAYS} 個交易日，初期分母偏向快速觸價的極端樣本。同一天選出的標的也高度共享大盤走勢，有效樣本數遠小於檔數。`,
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
@@ -11103,6 +11117,7 @@ export {
   // 處置／監視
   SURVEILLANCE_RANK, classifySurveillance, parseDispositionPeriod, parseDispositionInterval, latestUpstreamDate,
   VERIFY_ROUND_TRIP_COST_PCT, VERIFY_COST_NOTE, netReturnPct,
+  WIN_RATE_MIN_SAMPLES,
   lookupStockSurveillance, survFetchRecords, getSurveillanceBoard, getRiskSets,
   // 技術分析數學
   emaSeries, movingAverageSeries, computeMacd, findSwingPoints, buildTrendLine,

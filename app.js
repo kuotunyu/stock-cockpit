@@ -1125,9 +1125,16 @@ function renderBacktestChips(backtest) {
       </span>
     `;
   }
-  const hitRate = backtest?.hitPlus2Rate === null || backtest?.hitPlus2Rate === undefined
-    ? "資料不足"
-    : formatOptionalPercent(backtest.hitPlus2Rate * 100);
+  // 個股回測的樣本是「這檔在回測窗內觸發訊號的次數」，常常只有一兩次。
+  // 1 次觸發算出的「+2 達成率 100%」沒有統計意義，卻跟累積多次的數字長得一樣。
+  // 這裡的門檻用 5（比場景勝率的 20 寬鬆）——它是個股層級的參考提示，不是策略結論；
+  // 次數本身照樣顯示，讓使用者自己看得到樣本有多小。
+  const RATE_MIN_SAMPLES = 5;
+  const hitRate = sample < RATE_MIN_SAMPLES
+    ? "樣本不足"
+    : backtest?.hitPlus2Rate === null || backtest?.hitPlus2Rate === undefined
+      ? "資料不足"
+      : formatOptionalPercent(backtest.hitPlus2Rate * 100);
   const avgClose = backtest?.avgCloseReturn === null || backtest?.avgCloseReturn === undefined
     ? "資料不足"
     : formatOptionalPercent(backtest.avgCloseReturn);
@@ -5615,7 +5622,11 @@ function renderSwingVerifyPanel() {
   const chips = scenarios
     .map((s) => {
       const resolved = s.wins + s.losses + s.expired;
-      const rate = s.winRate != null ? `${s.winRate}%` : "--";
+      // 樣本不足時不顯示百分比、也不染色——1 筆結案的「100%」在視覺上會跟累積數十筆的
+      // 綠字長得一樣，那是誤導。改成把累積進度講出來，讓使用者知道還要等多久。
+      const minSamples = Number(s.winRateMinSamples) || 20;
+      const belowMinSamples = s.winRate == null && resolved > 0;
+      const rate = s.winRate != null ? `${s.winRate}%` : belowMinSamples ? `累積中 ${resolved}/${minSamples}` : "--";
       const tone = s.winRate == null ? "" : s.winRate >= 50 ? "is-up" : "is-down";
       return `
         <div class="sv-chip">
