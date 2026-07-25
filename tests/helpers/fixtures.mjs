@@ -322,10 +322,13 @@ export const taifexDailyRow = ({ last = 22800, change = -50, pct = "-0.22%", dat
 // ---- 三大法人買賣超（陣列列；索引 1:1 對齊 normalizeTwse/TpexInstitutionalRow）----
 // TWSE T86：19 欄（0 代號、1 名稱、2-4 外資買/賣/淨、5-7 外資自營、8-10 投信、11 自營淨、
 // 12-14 自營自行、15-17 自營避險、18 合計）。數字帶千分位（官方格式）。
-export const t86Row = ({ code, name, foreignNet = 1000000, trustNet = 500000, dealerNet = -200000, totalNet = 1300000 } = {}) => [
+// 官方 T86：row[4] 外陸資（**不含**外資自營商）、row[7] 外資自營商、row[10] 投信、row[11] 自營商、
+// row[18] 三大法人合計（**含**外資自營商）。foreignDealerNet 以前寫死 "0"，測試因此看不出
+// 「四格相加 ≠ 合計」這個差異（D-32），改為可帶入並讓預設值反映真實恆等式。
+export const t86Row = ({ code, name, foreignNet = 1000000, foreignDealerNet = 30000, trustNet = 500000, dealerNet = -200000, totalNet = 1330000 } = {}) => [
   code, name || `測${code}`,
   "5,000,000", "4,000,000", Number(foreignNet).toLocaleString("en-US"),
-  "0", "0", "0",
+  "0", "0", Number(foreignDealerNet).toLocaleString("en-US"),
   "800,000", "300,000", Number(trustNet).toLocaleString("en-US"),
   Number(dealerNet).toLocaleString("en-US"),
   "100,000", "250,000", "-150,000",

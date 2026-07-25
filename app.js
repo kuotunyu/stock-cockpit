@@ -706,7 +706,7 @@ function buildIndicatorDetail(stock) {
           { label: "自營商", value: formatShareLots(institutional.dealerNet), tone: toneFromNet(institutional.dealerNet) },
           { label: "法人合計", value: formatShareLots(institutional.totalNet), tone: toneFromNet(institutional.totalNet) },
         ],
-        note: `來源：${institutionalSource}。自營商合計包含自行買賣與避險；外資採官方外陸資買賣超口徑。`,
+        note: `來源：${institutionalSource}。自營商合計包含自行買賣與避險；外資採官方外陸資買賣超口徑（不含外資自營商）。${formatForeignDealerReconcile(institutional)}`,
       }
     : {
         title: "法人籌碼",
@@ -1219,6 +1219,15 @@ function formatGrossWithNet(grossPct, netPct) {
   const net = finiteNumberOrNull(netPct);
   if (net === null) return gross;
   return `${gross}<em class="verify-net" title="已扣一買一賣的手續費與證交稅估算（約 0.471%）">淨 ${formatSignedPercent(net)}</em>`;
+}
+
+// D-32：官方 T86 的「三大法人合計」含外資自營商，而畫面上的外資欄是「外陸資」（不含它），
+// 所以外資＋投信＋自營商永遠比合計少一個外資自營商——實測 5000+1000+500=6500 vs 官方合計 6600。
+// 數字一律維持官方定義不動（改成合併口徑需要對市場慣用定義下斷言，不做），改成把差額講明白。
+function formatForeignDealerReconcile(institutional) {
+  const dealerNet = finiteNumberOrNull(institutional?.foreignDealerNet);
+  if (dealerNet === null) return "";
+  return `法人合計另含外資自營商 ${formatShareLots(dealerNet)}，因此不等於上方三格相加。`;
 }
 
 function renderDataTrustCompact() {
@@ -9343,7 +9352,10 @@ function renderDetail() {
     ],
     法人: institutional
       ? [
-          { label: "外資", value: formatShareLots(institutional.foreignNet), tone: "neutral" },
+          { label: "外陸資", value: formatShareLots(institutional.foreignNet), tone: "neutral" },
+          // 官方 T86 的「三大法人合計」含外資自營商，但它不在外陸資／投信／自營三欄裡。
+          // 少了這一格，畫面上四個數字永遠加不起來（實測差額正好等於外資自營商）。
+          { label: "外資自營", value: formatShareLots(institutional.foreignDealerNet), tone: "neutral" },
           { label: "投信", value: formatShareLots(institutional.trustNet), tone: "high" },
           { label: "自營", value: formatShareLots(institutional.dealerNet), tone: "low" },
           { label: "合計", value: formatShareLots(institutional.totalNet), tone: "volume" },

@@ -1565,7 +1565,14 @@ function buildPortfolio(payload) {
       if (t.shares > pos.shares) {
         return {
           ok: false,
-          error: `${t.date.slice(4, 6)}/${t.date.slice(6, 8)} 賣出 ${t.code} ${t.shares} 股，但當時庫存只有 ${pos.shares} 股（賣超）。請檢查買賣紀錄的日期與股數。`,
+          // D-31：同日多筆買賣的先後，只在**每一筆都填了成交時間**時才靠 executedAt 判斷；
+          // 任一筆缺值就整組退回「記帳時刻／輸入順序」。使用者照對帳單謄寫時常常先記賣出、
+          // 後記買進，順序就反了，於是明明合法的紀錄被判成賣超、整包 PUT 被 400 擋下。
+          // 補填成交時間就能解，但以前完全沒告訴使用者——這裡把自救路徑直接寫進錯誤訊息。
+          error: `${t.date.slice(4, 6)}/${t.date.slice(6, 8)} 賣出 ${t.code} ${t.shares} 股，但當時庫存只有 ${pos.shares} 股（賣超）。`
+            + "請檢查買賣紀錄的日期與股數；若同一天有多筆買賣，請在每一筆補填「成交時間」，"
+            + "否則系統只能依記帳先後排序，可能把當天較晚的買進排在賣出之後。"
+            + "另外，若這檔曾經除權配股或現增，也要補登公司行動，否則股數會停在配股前。",
         };
       }
       const avgCost = pos.cost / pos.shares;
@@ -9005,12 +9012,26 @@ async function advanceSwingVerification(reference, latestDate) {
 }
 
 // 各場景統計＋最近結案明細（10 分鐘快取；獨立於 /api/swing——那份 body 會被凍結存快照，不能內嵌會過期的數字）。
+// D-26：驗證單若因官方日 K 缺漏而停在缺口前，會**永遠**留在 pending——`daysHeld` 只在成功推進時
+// 才 +1，所以 15 個交易日超時結案也永遠碰不到；90 天後被 pruneSwingVerification 無差別刪掉，
+// 從頭到尾都沒進過 resolved 分母。健康的 pending 最多 15 個交易日（約 3 週）就會結案，
+// 所以缺口超過 30 個日曆日的視為「卡住」，單獨計數並揭露，讓分母損耗看得見。
+// **刻意不做**「缺 K 就跳到下一個交易日」：stock1-domain 明訂「中間日期缺 K 就停在缺口前，不可跳日」，
+// 那是為了避免「D1 先停損、D2 才達標」被錯記成勝利，屬刻意設計，不能為了衝分母而破壞。
+const SWING_VERIFY_STALLED_DAYS = 30;
+function isStalledVerificationEntry(entry, todayCompact) {
+  if (!entry || entry.status !== "pending" || !entry.dataGap?.from) return false;
+  const gap = compactDaysDiff(toCompactDate(entry.dataGap.from), todayCompact);
+  return Number.isFinite(gap) && gap > SWING_VERIFY_STALLED_DAYS;
+}
+
 async function buildSwingVerificationSummary() {
   if (swingVerifySummaryCache.value && swingVerifySummaryCache.expiresAt > Date.now()) {
     return swingVerifySummaryCache.value;
   }
   const db = await loadDb();
   const store = db.swingVerification || {};
+  const summaryToday = toTaipeiCompactDate();
   const byScenario = new Map();
   const all = [];
     const versionCounts = new Map();
@@ -9028,12 +9049,13 @@ async function buildSwingVerificationSummary() {
       if (formulaVersion !== SWING_FORMULA_VERSION) continue;
       const s = byScenario.get(entry.scenario) || {
         scenario: entry.scenario,
-        samples: 0, wins: 0, losses: 0, expired: 0, pending: 0,
+        samples: 0, wins: 0, losses: 0, expired: 0, pending: 0, stalled: 0,
         resolved: 0, sumResultPct: 0, sumDaysHeld: 0,
       };
       s.samples += 1;
       if (entry.status === "pending") {
         s.pending += 1;
+        if (isStalledVerificationEntry(entry, summaryToday)) s.stalled += 1;
       } else {
         s.resolved += 1;
         s.sumResultPct += entry.resultPct || 0;
@@ -9053,6 +9075,7 @@ async function buildSwingVerificationSummary() {
     losses: s.losses,
     expired: s.expired,
     pending: s.pending,
+    stalled: s.stalled,
     resolved: s.resolved,
     // 低於最小樣本時回 null——不是「沒有資料」，而是「還不足以當成結論」。
     winRate: s.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((s.wins / s.resolved) * 1000) / 10 : null,
@@ -9071,10 +9094,13 @@ async function buildSwingVerificationSummary() {
     recent: all.filter((entry) => entry.status !== "pending").slice(0, 20),
     pendingCount: all.filter((entry) => entry.status === "pending").length,
     dataGapCount: all.filter((entry) => entry.status === "pending" && entry.dataGap).length,
+    // 卡住＝資料缺口久到不可能再自行結案；它們永遠不會進 resolved 分母，必須讓使用者看得到。
+    stalledCount: all.filter((entry) => isStalledVerificationEntry(entry, summaryToday)).length,
     notes: [
       "驗證規則：進場＝訊號日收盤，之後每個交易日用官方日K高低價判定「先碰目標＝達標、先碰停損（結構停損）＝停損」；同一天兩邊都碰到，保守記停損。",
       `${SWING_VERIFY_MAX_DAYS} 個實際交易日內都沒碰到 → 以第 ${SWING_VERIFY_MAX_DAYS} 日收盤結案（超時）。漏開 App 會用官方日K依日期補判；若中間日K缺漏就停在缺口前並排除結案統計。`,
       `勝率需累積 ${WIN_RATE_MIN_SAMPLES} 筆結案才顯示：分母只含已結案，而達標／停損常 1~3 天就結案、超時要等第 ${SWING_VERIFY_MAX_DAYS} 個交易日，初期分母偏向快速觸價的極端樣本。同一天選出的標的也高度共享大盤走勢，有效樣本數遠小於檔數。`,
+      `因官方日 K 缺漏而停在缺口前超過 ${SWING_VERIFY_STALLED_DAYS} 天的驗證單會標為「卡住」：它們不會自行結案，也永遠不會進入勝率分母，因此分母會比實際發出的訊號數少。`,
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };

@@ -143,3 +143,16 @@ test("同日期併發法人／融資券請求共用 single-flight，不重複 wa
   ]);
   assert.equal(mock.callsFor(/marginTrading\/MI_MARGN|margin\/balance/).length - beforeMargin, 14, "7 天 × 2 市場只抓一輪");
 });
+
+// D-32：官方 T86 的「三大法人合計」含外資自營商，而畫面上的「外資」是外陸資（不含它）。
+// 少了這一格，四個數字永遠加不起來——差額正好等於外資自營商。fixture 以前把該欄寫死 "0"，
+// 所以測試看不出這個差異；現在讓預設值反映真實恆等式並在此釘住。
+test("T86 恆等式：外陸資＋外資自營商＋投信＋自營商＝三大法人合計", () => {
+  const row = t86Row({ code: "2330", foreignNet: 5000, foreignDealerNet: 100, trustNet: 1000, dealerNet: 500, totalNet: 6600 });
+  const r = mod.normalizeTwseInstitutionalRow(row, compactToday(0));
+  assert.equal(r.foreignNet, 5000, "row[4] 是外陸資，不含外資自營商");
+  assert.equal(r.foreignDealerNet, 100, "row[7] 外資自營商必須被解析出來");
+  assert.equal(r.totalNet, 6600, "row[18] 官方合計");
+  assert.equal(r.foreignNet + r.foreignDealerNet + r.trustNet + r.dealerNet, r.totalNet, "四項相加要等於官方合計");
+  assert.notEqual(r.foreignNet + r.trustNet + r.dealerNet, r.totalNet, "少算外資自營商就對不上——這正是畫面誤導的來源");
+});
