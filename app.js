@@ -328,6 +328,10 @@ const dataState = {
   quoteCount: 0,
   realtimeCount: 0,
   fallbackCount: 0,
+  // 後端 /api/quotes 會回「上市與上櫃整批收盤資料日尚未對齊」「沿用 last-good」等 warnings，
+  // 隔日沖與策略雷達都有渲染，唯獨主報價畫面以前連欄位都沒有 → 使用者不知道自己在看舊價。
+  warnings: [],
+  degraded: false,
   error: "",
   loadedOnce: false,
 };
@@ -1192,6 +1196,8 @@ function getOvernightTopPick(groupKey) {
 function getDataTrustTone() {
   if (dataState.error || marketState.error || sourceState.error) return "warn";
   if (getSelectedSource() === "broker") return isBrokerSourceReady() ? "good" : "warn";
+  // 後端已明說資料降級（例如兩市場收盤日未對齊、沿用 last-good）時不能還顯示「資料正常」。
+  if (dataState.degraded || dataState.warnings.length) return "mixed";
   if (dataState.fallbackCount > 0) return "mixed";
   return "good";
 }
@@ -1212,12 +1218,20 @@ function renderDataTrustCompact() {
     : isBrokerSourceReady()
       ? "券商行情已設定"
       : "券商未設定，會回官方資料";
+  // 後端明講的降級原因（兩市場收盤日未對齊、沿用 last-good…）以前只留在 payload 裡沒人顯示。
+  // 這是使用者判斷「現在看到的數字能不能信」的關鍵，最多列兩條避免洗版，其餘用 title 補。
+  const warnings = dataState.warnings || [];
+  const warningText = warnings.slice(0, 2).join("；");
+  const warningHtml = warnings.length
+    ? `<small class="data-trust-warning" title="${escapeHtml(warnings.join("\n"))}">${escapeHtml(warningText)}${warnings.length > 2 ? `（另有 ${warnings.length - 2} 則）` : ""}</small>`
+    : "";
   return `
     <aside class="data-trust-card is-${tone}">
       <span>資料可信度</span>
       <strong>${escapeHtml(toneText)}</strong>
       <p>${escapeHtml(sourceLabel)} / 更新 ${escapeHtml(updated)}</p>
       <small>${escapeHtml(detail)}</small>
+      ${warningHtml}
     </aside>
   `;
 }
@@ -4717,6 +4731,8 @@ async function loadMarketData({ notify = false, renderNow = true } = {}) {
     dataState.quoteCount = quotes.length;
     dataState.realtimeCount = payloads.reduce((sum, payload) => sum + (Number(payload.realtimeCount) || 0), 0);
     dataState.fallbackCount = payloads.reduce((sum, payload) => sum + (Number(payload.fallbackCount) || 0), 0);
+    dataState.warnings = [...new Set(payloads.flatMap((payload) => payload.warnings || []).filter(Boolean))];
+    dataState.degraded = payloads.some((payload) => payload.dataQuality?.degraded === true);
     const realtimeErrors = [...new Set(payloads.map((payload) => payload.realtimeError).filter(Boolean))];
     dataState.error = realtimeErrors.length ? `即時源部分失敗：${realtimeErrors.join("；")}` : "";
     // 到價狀態和本輪行情一起提交，避免同一批資料先畫一次、觸價後又立刻畫第二次。
@@ -4740,6 +4756,8 @@ async function loadMarketData({ notify = false, renderNow = true } = {}) {
     dataState.quoteCount = 0;
     dataState.realtimeCount = 0;
     dataState.fallbackCount = 0;
+    dataState.warnings = [];
+    dataState.degraded = false;
     dataState.error = error.message;
     if (renderNow) render();
     if (notify) showToast(`${getSelectedSourceLabel()}更新失敗`);

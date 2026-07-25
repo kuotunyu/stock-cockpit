@@ -7,7 +7,7 @@ description: Stock1 台股看盤 App 的架構總覽與專案地圖——檔案�
 
 私人台股看盤 Web App：使用者＋2 位朋友各自在自己電腦 `npm start` 跑 localhost，觀察用、不下單。繁體中文介面，回覆使用者一律用繁體中文。**目錄不是 git repo**（使用者更新方式＝整包複製 code 給朋友）。
 
-最後校準：2026-07-26（金融領域稽核：修掉兩套前向驗證的除權息盲點、舊版當沖稅繞過有效日期、除權 ratio=1 假 official、Yahoo 升格沿用他日昨收、realtimeCount 含 stale、未報價持股灌水報酬率分母）；前次 2026-07-25（程式碼層稽核：修掉策略健檢的真實 DOM XSS、`Number(null)===0` 造假價格三處、「載入更多」焦點失效、技術分析擋掉英文字尾 ETF、背景 render 清草稿；後端去重 `loadWithLastGood`／`SECURITY_CODE_PATTERN`、刪 93 行死碼；測試套件補上週末安全）；最新離線測試 561（560 pass／0 fail／1 skip），後續通過狀態仍**以 npm test 最新 TAP 為準**。**改了重大行為請順手更新對應 skill——這些文件同時是使用者的回顧文件。`.agents/skills` 是 canonical；完成後同步鏡像到 `.claude/skills`，避免兩套代理讀到不同規格。**
+最後校準：2026-07-26（金融領域稽核第二批：清掉 DOMAIN-BACKLOG 第一層 D-01／D-05／D-06／D-10／D-12；第一批：修掉兩套前向驗證的除權息盲點、舊版當沖稅繞過有效日期、除權 ratio=1 假 official、Yahoo 升格沿用他日昨收、realtimeCount 含 stale、未報價持股灌水報酬率分母）；前次 2026-07-25（程式碼層稽核：修掉策略健檢的真實 DOM XSS、`Number(null)===0` 造假價格三處、「載入更多」焦點失效、技術分析擋掉英文字尾 ETF、背景 render 清草稿；後端去重 `loadWithLastGood`／`SECURITY_CODE_PATTERN`、刪 93 行死碼；測試套件補上週末安全）；最新離線測試 573（572 pass／0 fail／1 skip），後續通過狀態仍**以 npm test 最新 TAP 為準**。**改了重大行為請順手更新對應 skill——這些文件同時是使用者的回顧文件。`.agents/skills` 是 canonical；完成後同步鏡像到 `.claude/skills`，避免兩套代理讀到不同規格。**
 
 ## 鐵律（違反會直接惹惱使用者）
 
@@ -97,3 +97,6 @@ referenceMarketCache＋referenceCache（上市／上櫃各自 last-good，5 分�
 - 測試資料路徑透過 `importServer({ dataDir, dbPath })`／`bootServer({ dataDir, dbPath })` 顯式傳入；helper 固定 `ADMIN_USERNAME=admin`／`PORT=0`，清除 ambient `SESSION_MAX_AGE_MS`／`COOKIE_SECURE`，未收到 `dbPath` 時也清除 ambient `DB_PATH`。所有 server 測試用 port 0，5174 永遠保留給使用者。
 - 瀏覽器驗證用 preview `stock1-test`（5180）。**preview_screenshot 在此環境常逾時/縮小**——既定慣例改用 preview_eval 讀 getComputedStyle/getBoundingClientRect＋a11y snapshot 驗證；量桌機版面前先 preview_resize 到 ≥1280 寬（預設視窗太窄會誤判換行）。
 - 給使用者的總結：改了什麼、行為變更明列、server.mjs 有動就提醒重啟、純前端提醒 Ctrl+F5。
+- **Git 由使用者自己操作**——不要代跑 commit／push，給指令讓他貼。PowerShell 5.1 不支援 `&&`，一行一個指令。
+- **Commit 訊息一律正體中文（zh-tw）為主，專有名詞直接用原文**（函式名、API 名、`innerHTML`、`single-flight`、ETF 等術語不要硬翻）。沿用既有的 `fix:` / `docs:` / `chore:` 前綴。
+  - **訊息寫成檔案再 `git commit -F <path>`**，不要把中文當參數傳給 `git.exe`：使用者在 Windows PowerShell 5.1 手動操作，直接傳參數有機率變亂碼。（已驗證 `-F` 的結果編碼正確。）

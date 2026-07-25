@@ -729,6 +729,14 @@ button.today-focus-card:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* 後端回報的資料降級原因；用琥珀色與其他說明文字區隔，字級守 --fs-note 下限。 */
+.data-trust-card .data-trust-warning {
+  color: var(--orange-2);
+  font-size: var(--fs-note);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .today-focus-card:not(.is-watch) strong {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

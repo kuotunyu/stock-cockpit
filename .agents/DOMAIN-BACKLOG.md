@@ -15,14 +15,16 @@
 
 ## 現況總表
 
-| 層級 | 項目數 | 說明 |
+| 層級 | 進度 | 說明 |
 |---|---|---|
-| 已完成 | 6 | 2026-07-26 修畢，皆有測試與突變抽查 |
-| 第一層 待處理 | 12（D-01～D-12） | 明確錯誤，正確答案沒有爭議 |
-| 第二層 需拍板 | 14（D-20～D-33） | 真實缺陷，但修法牽涉口徑選擇 |
-| 第三層 待查／限制 | 6（D-40～D-45） | 需重查官方原文，或現有資料源做不到 |
+| 前置修復 | 6 條完成 | 2026-07-26 第一批 |
+| 第一層 D-01～D-12 | **5 完成 / 2 部分 / 5 待處理** | 明確錯誤，正確答案沒有爭議 |
+| 第二層 D-20～D-33 | 0 / 14 | 真實缺陷，但修法牽涉口徑選擇 |
+| 第三層 D-40～D-45 | 0 / 6 | 需重查官方原文，或現有資料源做不到 |
 
-**建議的下一步**：第一層挑 D-01（補完除權息還原的回測缺口）與 D-05（tradeValue 恆 null 導致每一檔都掛「低流動性」）先做，兩者都不需要口徑決策；第二層先決定 D-20（毛報酬揭露），因為它同時影響 D-25 的 RR 門檻要不要納入成本。
+第一層進度：✅ D-05、D-06、D-10、D-12 完成；🟡 D-01 主體完成（剩兩個子項）；⬜ D-02、D-03、D-04、D-07、D-08、D-09、D-11 待處理。
+
+**下一步建議**：第一層剩下的以 D-08（處置名單日期窗，會造成假的處置標籤）與 D-07（非交易日上櫃鉅額／全額交割整批消失）優先，兩者都不需要口徑決策。D-02 與 D-11 會改變選股結果、需要升版本號，建議留到第二層口徑決定之後一起做。第二層先決定 **D-20（毛報酬揭露）**，因為它同時影響 D-25 的 RR 門檻要不要納入交易成本。
 
 ---
 
@@ -43,7 +45,10 @@
 
 ## 第一層：明確錯誤，可直接修
 
-### D-01. 隔日沖**回測**仍用未還原股價（除權息還原的剩餘缺口）
+### 🟡 D-01. 隔日沖**回測**仍用未還原股價（除權息還原的剩餘缺口）
+
+> **2026-07-26 主體完成**：`nextDayPerformance` 改以「隔日那根的交易所官方昨收」為基準（偏離訊號日收盤超過 0.2% 才換，缺值退回原行為）。與波段側相同，比較的是同一份逐檔歷史的相鄰兩根，基礎一致不會誤判。測試：`domain-backlog-tier1.test.mjs`（3 案，含無事件與缺昨收的對照組），已突變抽查。
+> **剩餘子項**：下方兩點（官方欄位不完整時不得推進、無償配股／現增的 shareFactor）仍未處理。
 `buildBacktestUncached`（server.mjs:7362，報酬計算約 7378 一帶的 `nextDayPerformance`）
 證據強度：`已實測`（驗證側已修，回測側未動）
 
@@ -92,7 +97,10 @@
 **⚠ 相依**：月 K 的 `minBars` 從 18 提高到 ≥26 **必須同步放大抓取月數**，否則多數股票會落到「資料不足」而整頁打掉。波段引擎要求 ≥60 根、實抓 6 個月，seed 權重 0.09%，不受影響。
 **測試**：`technical-math.test.mjs`。
 
-### D-05. 當日 K 的 `tradeValue` 恆為 null：台積電也被標「低流動性」
+### ✅ D-05. 當日 K 的 `tradeValue` 恆為 null：台積電也被標「低流動性」
+
+> **2026-07-26 完成**：官方整批收盤本來就有成交金額欄位（TWSE `TradeValue`／TPEx `TransactionAmount`），只是兩個正規器都沒解析。已補上並讓 `appendTodayCloseBar` 沿用；`buildRiskTags` 改成「成交值未知」與「低流動性」兩種標籤，不再用 falsy 判斷。測試：`domain-backlog-tier1.test.mjs`（3 案），已突變抽查。
+> **刻意沒動**：`scoreSwing` 兩條流動性公式的尺度差異。tradeValue 現在會穩定存在，主分支不再逐日跳動——原本的「榜單排序飄移」已經解決；改公式會直接改變排名，屬選股行為變更，留待需要時再議。
 `appendTodayCloseBar`（8360）、`buildRiskTags`、`scoreSwing`（8263）
 證據強度：`已查證`
 
@@ -105,7 +113,9 @@
 **修法**：整批收盤 quote **沒有 tradeValue 可抄**——`normalizeDailyTwse` / `normalizeDailyTpex` 根本沒解析成交金額欄位。要嘛在正規器補上 TWSE `TradeValue` / TPEx 成交金額，要嘛用 `close × volumeShares` 估算並標 `estimated`。同時修 `buildRiskTags` 的 null 判斷、`scoreSwing` 兩條公式的尺度校準、回測補 `computeTurnoverPct`。
 **測試**：`overnight-engine.test.mjs`、`picks-swing.test.mjs`、`parsers.test.mjs`。
 
-### D-06. 資料可信度的 warnings 前端完全沒接
+### ✅ D-06. 資料可信度的 warnings 前端完全沒接
+
+> **2026-07-26 完成**：`dataState` 補上 `warnings` / `degraded`，`loadMarketData` 收集各批 payload 的 warnings 去重，`getDataTrustTone` 納入判定（有降級就不再顯示「資料正常」），`renderDataTrustCompact` 顯示前兩則、其餘收進 title。測試：`tests/frontend/data-trust-warnings.test.mjs`（4 案，含跳脫與不過度收緊的對照組）。
 `app.js` 的 `dataState`（324）、`loadMarketData`
 證據強度：`已實測`（`dataState` 確實沒有 `warnings` 欄位）
 
@@ -148,7 +158,9 @@
 **修法**：把 dividend 納入 `canonicalizeAmount`；`tradeMoneyEstimateFingerprint` 補上 dividend 的 status/receivedDate/receivedAmount。
 **測試**：`trades-instrument-provenance.test.mjs`。
 
-### D-10. 同一檔同時命中兩個分群時，勝率分母把它當兩個獨立樣本
+### ✅ D-10. 同一檔同時命中兩個分群時，勝率分母把它當兩個獨立樣本
+
+> **2026-07-26 完成**：整體 `summary` 改以 code 去重後統計（同檔取分數最高那筆），並新增 `uniqueSignals` / `duplicatedSignals` 揭露重複筆數；`summaryByGroup` 維持以 pick 為單位不變。測試：`domain-backlog-tier1.test.mjs`，已突變抽查。
 `evaluateGroups`（6484）、`saveSignalSnapshot`（6747）、`observeSignalSnapshot`（7009）
 證據強度：`已查證`
 
@@ -172,7 +184,10 @@
 **⚠ 屬選股行為變更，需升 `SWING_FORMULA_VERSION`**。
 **測試**：`picks-swing.test.mjs` 的 features 手算案例。
 
-### D-12. `inspectSwingStock` 不限普通股，對無漲跌幅限制的標的套 10.5% heuristic
+### ✅ D-12. `inspectSwingStock` 不限普通股，對無漲跌幅限制的標的套 10.5% heuristic
+
+> **2026-07-26 完成**：健檢入口補上與掃描端相同的 `isOrdinaryStock` 門檻，非普通股回明確說明而不是硬算出失真型態。測試：`domain-backlog-tier1.test.mjs`，已突變抽查。
+> **剩餘**：下方「IPO 那一類要補說明」的延後風險仍在（新掛牌股滿 60 根後才被 heuristic 追認），需要 quote 帶商品類型欄位才好處理。
 `inspectSwingStock`（8995）對照 `scanSwingBoard`（8746）有 `.filter(isOrdinaryStock)`
 證據強度：`已查證`
 

@@ -2774,6 +2774,9 @@ function normalizeDailyTwse(row) {
     changePct: close !== null && previousClose ? (change / previousClose) * 100 : null,
     unitLots: null,
     volumeLots: Math.round((parseNumber(row.TradeVolume) || 0) / 1000),
+    // 官方整批收盤本來就有成交金額，只是以前沒解析 → 補當日 K 時 tradeValue 恆為 null，
+    // 導致每一檔（含成交數百億的權值股）都被 buildRiskTags 標成「低流動性」。
+    tradeValue: parseNumber(row.TradeValue),
     transactions: parseNumber(row.Transaction),
     rawDate: row.Date,
   };
@@ -2800,6 +2803,7 @@ function normalizeDailyTpex(row) {
     changePct: close !== null && previousClose ? (change / previousClose) * 100 : null,
     unitLots: null,
     volumeLots: Math.round((parseNumber(row.TradingShares) || 0) / 1000),
+    tradeValue: parseNumber(row.TransactionAmount), // 同上：上櫃側的成交金額欄位
     transactions: parseNumber(row.TransactionNumber),
     rawDate: row.Date,
   };
@@ -6451,7 +6455,10 @@ function scoreReversal(metrics) {
 
 function buildRiskTags(metrics) {
   const tags = [];
-  if (!metrics.tradeValue || metrics.tradeValue < 30_000_000) tags.push("低流動性");
+  // 「查不到成交值」和「成交值真的很低」是兩件事，不能都叫低流動性——舊寫法用 falsy 判斷，
+  // 當日 K 缺 tradeValue 時整份清單每一檔都會掛低流動性，標籤變雜訊、真正的警示跟著失效。
+  if (!Number.isFinite(metrics.tradeValue)) tags.push("成交值未知");
+  else if (metrics.tradeValue < 30_000_000) tags.push("低流動性");
   if (metrics.volumeRatio5 >= 5) tags.push("爆量過熱");
   if (metrics.amplitudePct >= 8) tags.push("高振幅");
   if (metrics.closePosition < 0.45) tags.push("收盤轉弱");
@@ -7116,7 +7123,7 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
     const corporateActionAdjusted = hasOfficialAction
       && Number.isFinite(officialPreviousClose)
       && officialPreviousClose > 0
-      && Math.abs(officialPreviousClose / signalClose - 1) > SWING_CORPORATE_ACTION_TOLERANCE;
+      && Math.abs(officialPreviousClose / signalClose - 1) > CORPORATE_ACTION_RATIO_TOLERANCE;
     const base = corporateActionAdjusted ? officialPreviousClose : signalClose;
     const openReturn = pct((bar.open ?? NaN) - base, base);
     const highReturn = pct((bar.high ?? NaN) - base, base);
@@ -7317,6 +7324,19 @@ async function buildSignalVerification() {
     avgCurrentReturn: average(items.map((row) => row.currentReturn)),
     avgHighReturn: average(items.map((row) => row.highReturn)),
   });
+  // 三個分群是平行判定、沒有 else：strongContinuation 的條件是 pullbackReversal 的超集，
+  // 所以溫和上漲的紅 K 必定同時進兩群，同一檔會出現兩筆、貢獻完全相同的漲跌結果。
+  // 分群統計（summaryByGroup）以 pick 為單位是對的，但整體 summary 的分母必須以「檔」為單位
+  // 去重，否則樣本數虛胖、變異數被人為壓低。同檔取分數最高的那筆代表。
+  const dedupeByCode = (items) => {
+    const best = new Map();
+    for (const row of items) {
+      const current = best.get(row.code);
+      if (!current || (Number(row.score) || 0) > (Number(current.score) || 0)) best.set(row.code, row);
+    }
+    return [...best.values()];
+  };
+  const uniqueVerifiedRows = dedupeByCode(verifiedRows);
   const groups = {};
   for (const row of verifiedRows) {
     groups[row.group] ||= { groupName: row.groupName, rows: [] };
@@ -7329,7 +7349,9 @@ async function buildSignalVerification() {
   return {
     ok: true,
     ...observed,
-    summary: summarize(verifiedRows),
+    summary: summarize(uniqueVerifiedRows),
+    uniqueSignals: uniqueVerifiedRows.length,
+    duplicatedSignals: verifiedRows.length - uniqueVerifiedRows.length,
     summaryByGroup,
     rows: verifiedRows.sort((a, b) => (b.currentReturn ?? -999) - (a.currentReturn ?? -999)),
     unverified: unverifiedRows.map((row) => ({ code: row.code, name: row.name, group: row.group, groupName: row.groupName })),
@@ -7344,10 +7366,19 @@ function nextDayPerformance(history, signalIndex) {
   const signal = history[signalIndex];
   const next = history[signalIndex + 1];
   if (!signal || !next || !signal.close) return null;
-  const openReturn = pct(next.open - signal.close, signal.close);
-  const highReturn = pct(next.high - signal.close, signal.close);
-  const closeReturn = pct(next.close - signal.close, signal.close);
-  const lowReturn = pct(next.low - signal.close, signal.close);
+  // 隔日若是除權息／減資日，價格會機械性跳空，拿訊號日收盤當基準會憑空記出大跌。
+  // 交易所自己的昨收在事件日就是官方參考價，而且與 signal.close 來自同一份逐檔歷史、
+  // 是相鄰兩根，比較基礎一致（不像跨來源比對會誤判）。缺值時退回原行為。
+  const officialPreviousClose = Number(next.previousClose);
+  const base = Number.isFinite(officialPreviousClose)
+    && officialPreviousClose > 0
+    && Math.abs(officialPreviousClose / signal.close - 1) > CORPORATE_ACTION_RATIO_TOLERANCE
+    ? officialPreviousClose
+    : signal.close;
+  const openReturn = pct(next.open - base, base);
+  const highReturn = pct(next.high - base, base);
+  const closeReturn = pct(next.close - base, base);
+  const lowReturn = pct(next.low - base, base);
   return {
     date: next.date,
     openReturn,
@@ -8380,7 +8411,7 @@ function appendTodayCloseBar(history, quote, latestDate) {
     change: null,
     volumeShares: Number.isFinite(quote.volumeLots) ? quote.volumeLots * 1000 : null,
     volumeLots: Number.isFinite(quote.volumeLots) ? quote.volumeLots : null,
-    tradeValue: null,
+    tradeValue: Number.isFinite(quote.tradeValue) ? quote.tradeValue : null,
     transactions: quote.transactions ?? null,
     source: "STOCK_DAY_ALL official close (appended)",
   }]);
@@ -8537,7 +8568,7 @@ function normalizeSwingVerificationQuote(row) {
 // 收平盤，仍會 low(95) <= stop(95) 記 loss −5%，而投資人同時領到 5 元現金股利）。
 // 這裡用「交易所官方昨收 ÷ 前一根實際收盤」推出調整比率，把 entry/stop/target 一起搬到
 // 事件後的價格尺度；因為股利已內含在比率裡，之後算出的 resultPct 就是含息總報酬。
-const SWING_CORPORATE_ACTION_TOLERANCE = 0.002; // 0.2%：小於此視為捨入誤差，不動計畫價
+const CORPORATE_ACTION_RATIO_TOLERANCE = 0.002; // 0.2%：小於此視為捨入誤差，不動計畫價
 function swingVerificationActionRatio(row, previousRow) {
   const officialPreviousClose = Number(row?.previousClose);
   const priorClose = Number(previousRow?.price);
@@ -8545,7 +8576,7 @@ function swingVerificationActionRatio(row, previousRow) {
   if (!Number.isFinite(priorClose) || priorClose <= 0) return null;
   const ratio = officialPreviousClose / priorClose;
   if (!Number.isFinite(ratio) || ratio <= 0) return null;
-  return Math.abs(ratio - 1) > SWING_CORPORATE_ACTION_TOLERANCE ? ratio : null;
+  return Math.abs(ratio - 1) > CORPORATE_ACTION_RATIO_TOLERANCE ? ratio : null;
 }
 
 function applySwingCorporateAction(entry, ratio, day) {
@@ -9011,6 +9042,18 @@ async function inspectSwingStock(rawCode) {
       };
     }
     return { ok: false, error: `找不到「${query}」（請輸入上市櫃普通股的代碼或股名，例：2330 或 台積電）` };
+  }
+
+  // 波段引擎的 10.5% 跳空 heuristic 前提是「台股有 ±10% 漲跌幅限制」，只對普通股成立。
+  // 國外成分／槓桿反向 ETF 無漲跌幅限制，任何一天的真實大漲都會被追認成公司行動，
+  // 該日以前的歷史全被乘上假比率，MA／布林／MACD 一起錯，前端還會顯示不存在的權息事件。
+  // 掃描端本來就有 isOrdinaryStock 過濾，健檢是使用者手打代碼的入口，補上同一道門檻。
+  if (!isOrdinaryStock(quote)) {
+    return {
+      ok: false,
+      error: `波段型態健檢只支援上市櫃普通股；「${quote.name || quote.code}」是 ETF／權證等商品，`
+        + "其漲跌幅限制與還原權息規則不同，套用同一套型態判讀會失真。",
+    };
   }
 
   // latestDate：與 buildSwingBoard 一致，取「最多個股共有的官方收盤日」眾數。
