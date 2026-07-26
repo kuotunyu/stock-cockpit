@@ -63,6 +63,52 @@ test("推進：碰到停損＝停損（跳空開低用開盤價計滑價）；�
   assert.equal(both.status, "loss", "同日高低都碰到 → 日K無序列，保守記停損");
 });
 
+// D-24：「同日雙觸保守記停損」的前提是「不知道盤中先碰哪一邊」。
+// 台股開盤是集合競價、是當日第一筆成交且時序完全確定——開盤價若已越過某一邊，
+// 掛在那個價位的單就是在那一撮成交的，沒有先後可猜，保守規則的前提不成立。
+// 舊寫法把停損判定放在目標之前且不看開盤，偏誤是單向的：只會把真實獲利記成虧損。
+test("D-24：開盤已跳空越過目標，即使當日也跌破停損，仍是達標而非停損", () => {
+  const gapUpThenDrop = makeEntry();
+  // 09:00 集合競價就成交在 112（已越過目標 110），之後才殺到 94。
+  mod.advanceSwingVerificationEntry(gapUpThenDrop, dayQuote({ open: 112, high: 113, low: 94, price: 96 }));
+  assert.equal(gapUpThenDrop.status, "win", "開盤 112 時掛在 110 的賣單必然已於該撮成交");
+  assert.equal(gapUpThenDrop.resultPct, 12, "出場價＝開盤 112，不是停損 95");
+
+  // 反向仍照舊：開盤跌破停損就是停損，即使當日高點也摸到目標。
+  const gapDownThenRally = makeEntry();
+  mod.advanceSwingVerificationEntry(gapDownThenRally, dayQuote({ open: 92, high: 111, low: 91, price: 108 }));
+  assert.equal(gapDownThenRally.status, "loss");
+  assert.equal(gapDownThenRally.resultPct, -8, "出場價＝開盤 92");
+});
+
+test("D-24：開盤落在停損與目標之間時，維持原本的雙觸保守規則", () => {
+  const inside = makeEntry();
+  // 開盤 102 在區間內 → 盤中先後真的不明 → 保守記停損。
+  mod.advanceSwingVerificationEntry(inside, dayQuote({ open: 102, high: 111, low: 94, price: 96 }));
+  assert.equal(inside.status, "loss", "開盤沒越過任何一邊，序列不明的前提仍成立");
+  assert.equal(inside.resultPct, -5, "出場價＝停損 95");
+
+  // 邊界：開盤恰等於停損 → 仍走停損出場（價格相同，不因改寫而漂移）。
+  const atStop = makeEntry();
+  mod.advanceSwingVerificationEntry(atStop, dayQuote({ open: 95, high: 111, low: 94, price: 96 }));
+  assert.equal(atStop.status, "loss");
+  assert.equal(atStop.resultPct, -5);
+
+  // 邊界：開盤恰等於目標 → 達標，出場價＝目標。
+  const atTarget = makeEntry();
+  mod.advanceSwingVerificationEntry(atTarget, dayQuote({ open: 110, high: 113, low: 94, price: 96 }));
+  assert.equal(atTarget.status, "win");
+  assert.equal(atTarget.resultPct, 10);
+});
+
+test("D-24：開盤價缺值時不得用 NaN 判定，退回既有的高低價規則", () => {
+  const noOpen = makeEntry();
+  // 官方資料偶爾缺開盤價；num() 會給 NaN，不可讓它靜默通過比較。
+  mod.advanceSwingVerificationEntry(noOpen, { rawDate: compactTradingDay(0), open: null, high: 111, low: 94, price: 96 });
+  assert.equal(noOpen.status, "loss", "開盤未知 → 序列不明 → 保守記停損");
+  assert.equal(noOpen.resultPct, -5);
+});
+
 test("推進：15 個交易日沒碰到 → 以收盤結案（超時）；期間內無觸價只累加天數", () => {
   const pending = makeEntry();
   assert.equal(mod.advanceSwingVerificationEntry(pending, dayQuote()), true);

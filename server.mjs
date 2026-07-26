@@ -9375,8 +9375,29 @@ function advanceSwingVerificationEntry(entry, dayQuote) {
     entry.resolvedAt = day;
     entry.resultPct = roundTo(((exitPrice - entry.entry) / entry.entry) * 100);
   };
+  // D-24 裁決：開盤價優先於「同日雙觸保守記停損」。
+  //
+  // 「雙觸保守記停損」的前提是「日 K 沒有盤中序列，不知道先碰哪一邊」。但台股開盤是
+  // **集合競價**，是當日第一筆成交且時序完全確定——開盤價若已越過某一邊，掛在那個價位的
+  // 單就是在那一撮成交的，沒有先後可猜。前提不成立時，保守規則就不該套用。
+  //
+  // 舊寫法把停損判定放在目標之前且不看開盤：只要 low <= stop 就一律 loss。
+  // entry 100／stop 95／target 110，當日 open 112、high 113、low 94 → 記成 loss −5%，
+  // 但實際上 09:00 開盤 112 就成交了，是 win +12%（誤差 17 個百分點，而且勝負反向）。
+  // 偏誤是單向的：只會把真實的獲利記成虧損，不會反過來，所以會系統性低估勝率與平均報酬。
+  //
+  // 舊寫法對「開盤跳空跌破停損」其實處理對了（open < stop 時用 open 出場），
+  // 可見作者本來就接受「開盤越過該價位時以開盤價成交」，只是漏了另一半。
+  if (Number.isFinite(open) && open <= entry.stop) {
+    resolve("loss", open);
+    return true;
+  }
+  if (Number.isFinite(open) && open >= entry.target) {
+    resolve("win", open);
+    return true;
+  }
   if (low <= entry.stop) {
-    resolve("loss", Number.isFinite(open) && open < entry.stop ? open : entry.stop);
+    resolve("loss", entry.stop);
     return true;
   }
   if (high >= entry.target) {
