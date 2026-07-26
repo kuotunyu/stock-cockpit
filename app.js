@@ -7331,7 +7331,11 @@ function renderTechnicalCorporateActions(data) {
   const info = data.corporateActions;
   if (!info) return "";
   const monthDay = (compact) => `${String(compact).slice(4, 6)}/${String(compact).slice(6, 8)}`;
-  const sourceLabel = (source) => (source === "official" ? "官方" : "估算");
+  // exchange-* 是交易所自己算出來的參考價（比我們套公式更可信），official 是官方公告＋公式，
+  // 其餘都是跳空推測，一律講「估算」。
+  const sourceLabel = (source) => (source === "exchange-result" || source === "exchange-quote"
+    ? "交易所"
+    : source === "official" ? "官方公告" : "估算");
   const eventList = info.events?.length
     ? info.events.map((event) => `<span>${escapeHtml(monthDay(event.date))}：×${escapeHtml(String(event.ratio ?? "--"))}（${escapeHtml(sourceLabel(event.source))}）</span>`).join("")
     : "<span>這段區間沒有偵測到公司行動，圖上就是原始成交價。</span>";

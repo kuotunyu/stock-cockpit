@@ -52,6 +52,19 @@ const ARCHIVE = {
         status: "active",
       },
     },
+    2998: {
+      [EX_DATE]: {
+        kind: "權息",
+        cashDividend: 2,
+        stockRatio: 0.1,
+        subscriptionRatio: 0,
+        subscriptionPrice: 0,
+        source: "test",
+        schemaVersion: 2,
+        formulaComplete: true,
+        status: "active",
+      },
+    },
     2454: {
       [EX_DATE]: {
         // 除權必須 stockRatio 與 subscriptionRatio 都是明確數值才算公式齊備。
@@ -82,11 +95,20 @@ function stockDayMonthRoute() {
       const year = Number(monthCompact.slice(0, 4));
       const month = Number(monthCompact.slice(4, 6));
       const rows = [];
+      let previousClose = null;
       for (let day = 1; day <= 28; day += 1) {
         const compact = `${year}${String(month).padStart(2, "0")}${String(day).padStart(2, "0")}`;
         if (compact >= today) break;
         const postPrice = GAP_CODES.has(stockNo) ? 85 : 92;
         const close = compact >= EX_DATE ? postPrice : 100;
+        // 漲跌價差欄要照真實 TWSE 語意產生，否則測試會建立現實中不可能出現的形狀：
+        //   有官方事件的除權息日 → "X0.00"（不計算漲跌，close-change 推不出昨收）
+        //   其他每一天         → close 減前一交易日收盤的實際差額
+        // GAP_CODES 刻意沒有官方事件（測跳空估算還原），所以它的跳空日照樣給正常數字。
+        const isOfficialExDay = compact === EX_DATE && !GAP_CODES.has(stockNo);
+        const change = isOfficialExDay
+          ? "X0.00"
+          : previousClose === null ? "0.00" : (close - previousClose).toFixed(2);
         rows.push([
           `${year - 1911}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`,
           "2,500,000",
@@ -95,9 +117,10 @@ function stockDayMonthRoute() {
           close.toFixed(2),
           close.toFixed(2),
           close.toFixed(2),
-          "0.00",
+          change,
           "1,800",
         ]);
+        previousClose = close;
       }
       return { stat: "OK", data: rows };
     },
@@ -110,7 +133,13 @@ function yahooHistoryRoute() {
   return {
     match: /query1\.finance\.yahoo\.com/,
     reply: (url) => {
-      if (!String(url.pathname).includes("2999")) {
+      const path = String(url.pathname);
+      // 2999：純現金除息 8 元（Yahoo 不做任何分割調整，事件前後都是原始價）。
+      // 2998：配股 10%＋現金 2 元。Yahoo 事件前的收盤已經自己除過配股（100 / 1.1 = 90.9091），
+      //       事件當天起是原始價（官方參考價 (100-2)/1.1 = 89.0909）。
+      const isCash = path.includes("2999");
+      const isStock = path.includes("2998");
+      if (!isCash && !isStock) {
         return { chart: { result: [{ timestamp: [], indicators: { quote: [{}] } }] } };
       }
       const timestamp = [];
@@ -122,7 +151,9 @@ function yahooHistoryRoute() {
         day.setUTCDate(day.getUTCDate() + i);
         const compact = `${day.getUTCFullYear()}${String(day.getUTCMonth() + 1).padStart(2, "0")}${String(day.getUTCDate()).padStart(2, "0")}`;
         if (compact >= today) break;
-        const price = compact >= EX_DATE ? 92 : 100;
+        const beforeEx = isCash ? 100 : 100 / 1.1;
+        const afterEx = isCash ? 92 : (100 - 2) / 1.1;
+        const price = compact >= EX_DATE ? afterEx : beforeEx;
         timestamp.push(Math.floor(day.getTime() / 1000));
         open.push(price); high.push(price); low.push(price); close.push(price); volume.push(2500000);
       }
@@ -146,10 +177,14 @@ before(async () => {
           stockDayAllRow({ code: "2454", name: "聯發科", close: 92, open: 92, high: 92, low: 92 }),
           stockDayAllRow({ code: "1234", name: "黑松", close: 85, open: 85, high: 85, low: 85 }),
           stockDayAllRow({ code: "00631L", name: "元大台灣50正2", close: 85, open: 85, high: 85, low: 85 }),
-          stockDayAllRow({ code: "2999", name: "備援測試", close: 92, open: 92, high: 92, low: 92 }),
+          stockDayAllRow({ code: "2999", name: "備援純現金", close: 92, open: 92, high: 92, low: 92 }),
+          stockDayAllRow({ code: "2998", name: "備援配股", close: 89.09, open: 89.09, high: 89.09, low: 89.09 }),
         ],
       }),
       stockDayMonthRoute(),
+      // 官方除權除息計算結果表回空：這幾條測的是「歸檔公告＋跳空估算」那兩層，
+      // 計算結果表本身由 corporate-action-results.test.mjs 負責。
+      { match: /www\.twse\.com\.tw\/rwd\/zh\/exRight\/TWT49U/, reply: { stat: "OK", data: [] } },
       { match: /www\.tpex\.org\.tw\/www\/zh-tw\/afterTrading\/tradingStock/, reply: { tables: [{ data: [] }] } },
       yahooHistoryRoute(),
     ],
@@ -227,19 +262,40 @@ test("D-21：跳空估算還原的開關綁在 isOrdinaryStock 上，ETF 代號�
   );
 });
 
-// 技術頁在官方逐月歷史不足時會退到 Yahoo。「Yahoo 的原始 OHLC 是否已自行還原配股」
-// 這個專案從未實測（DOMAIN-BACKLOG D-42），疊上我們自己的還原就可能雙重調整。
-// 掃描端本來就這樣做，不是新風險類別，但這頁會把還原後的價格直接畫給使用者看，必須揭露。
-test("D-21：Yahoo 備援序列也會被還原，且必須揭露其還原語意尚未實測", async () => {
+// 技術頁在官方逐月歷史不足時會退到 Yahoo。2026-07-26 用真實 API 實測 4 檔配股個股：
+// Yahoo 的 indicators.quote 已經把台股配股當成分割自行還原（30% 配股回報 1300:1000 的 split），
+// 但現金股利沒有還原（純現金的對照組 2002 中鋼與官方收盤完全相等）。
+// 所以 Yahoo 的價格座標系跟官方逐檔歷史差一個配股倍數，官方來源算出來的因子必須換算過才能用。
+test("D-21：Yahoo 備援序列的純現金除息照常還原，並揭露來源差異", async () => {
   const body = await mod.buildTechnicalAnalysis({ code: "2999", period: "day" });
   assert.equal(body.ok, true, `error=${body.error}`);
   assert.match(body.source, /^Yahoo/, "這條測的就是備援路徑");
   assert.equal(body.corporateActions.adjusted, true, "備援序列不能因為來源不同就跳過還原");
 
+  // 純現金除息沒有配股，Yahoo 不會做任何分割調整 → 倍數 1，官方因子直接可用。
   const before = body.candles.filter((candle) => String(candle.date).replace(/\D/g, "") < EX_DATE);
   assert.ok(before.length > 0 && before.every((candle) => Math.abs(candle.close - 92) < 1e-6));
 
   assert.match(body.corporateActions.notes.join(" "), /Yahoo 備援序列/);
-  assert.match(body.corporateActions.notes.join(" "), /尚未實測/);
-  assert.equal(body.corporateActions.alert, true, "疊了兩層未經核對的處理就該升級成醒目提示");
+  assert.equal(body.corporateActions.alert, true, "來源語意不同就該升級成醒目提示");
+});
+
+// 這條是雙重還原的守門測試。配股 10%＋現金 2 元、原始前收 100：
+//   官方參考價 = (100 − 2) / 1.1 = 89.0909，原始座標系因子 = 0.890909
+//   Yahoo 事件前的收盤已經是 100 / 1.1 = 90.9091（它自己除過配股了）
+//   正確的 Yahoo 座標系因子 = (100 − 2) / 100 = 0.98 → 90.9091 × 0.98 = 89.0909 ✓
+// 若直接把 0.890909 套到 90.9091 會得到 80.99，配股被還原兩次、事件前整段被壓低 9%。
+test("D-21：Yahoo 序列的配股事件不得雙重還原", async () => {
+  const body = await mod.buildTechnicalAnalysis({ code: "2998", period: "day" });
+  assert.equal(body.ok, true, `error=${body.error}`);
+  assert.match(body.source, /^Yahoo/);
+
+  const before = body.candles.filter((candle) => String(candle.date).replace(/\D/g, "") < EX_DATE);
+  assert.ok(before.length > 0, "測試資料要涵蓋事件前");
+  const adjusted = before.at(-1).close;
+  assert.ok(
+    Math.abs(adjusted - 89.0909) < 0.01,
+    `事件前的 Yahoo 收盤應還原到官方參考價 89.09，實際 ${adjusted}（80.99 代表配股被還原了兩次）`,
+  );
+  assert.ok(Math.abs(adjusted - 80.99) > 1, "明確排除雙重還原的結果");
 });

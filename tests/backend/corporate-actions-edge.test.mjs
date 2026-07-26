@@ -55,6 +55,35 @@ test("官方常態形狀：配股不配現增（現增欄位為 null）必須算
   assert.ok(Math.abs(rightsRatio - rightsExpected) < 1e-12);
 });
 
+// D-41 的防護網。單位已於 2026-07-26 實測確認是「比率」，但上游若改版成「每仟股股數」，
+// 除數會從 1.1 變成 101，整段 K 線塌陷卻仍蓋著 official 章、不走 heuristic、毫無告警。
+test("配股率量級異常（>100%）一律擋下標未定案，不得無聲算出塌掉的線", () => {
+  const previousClose = 100;
+  // 上游改成每仟股股數的災難形狀：0.1 變成 100。
+  assert.equal(
+    officialCorporateActionRatio(
+      { exDate: "20260730", kind: "除權", cashDividend: 0, stockRatio: 100, subscriptionRatio: 0, subscriptionPrice: 0 },
+      previousClose,
+    ),
+    null,
+    "若放行，參考價會變成 100/101≈0.99 元，事件前整段歷史被壓成 1%",
+  );
+  assert.equal(
+    officialCorporateActionRatio(
+      { exDate: "20260730", kind: "除權", cashDividend: 0, stockRatio: 0, subscriptionRatio: 250, subscriptionPrice: 15 },
+      previousClose,
+    ),
+    null,
+    "現增比率同樣要防",
+  );
+  // 邊界：配股 100%（1:1 無償配股）合法且真的存在，不可誤擋。
+  const legit = officialCorporateActionRatio(
+    { exDate: "20260730", kind: "除權", cashDividend: 0, stockRatio: 1, subscriptionRatio: 0, subscriptionPrice: 0 },
+    previousClose,
+  );
+  assert.ok(Math.abs(legit - 0.5) < 1e-12, `1:1 配股的因子應為 0.5，實際 ${legit}`);
+});
+
 test("除權但兩個比率都拿不到值：仍然不得硬算", () => {
   const previousClose = 100;
   // 兩欄全 null → 完全不知道配了多少，只能標 unresolved。
