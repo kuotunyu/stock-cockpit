@@ -5393,6 +5393,27 @@ async function saveSurveillanceHistory() {
 const RISK_SOURCE_FRESH_MS = 60 * 60 * 1000;
 const RISK_SOURCE_STALE_MS = 26 * 60 * 60 * 1000;
 
+// 上市注意股端點（`/announcement/notice`，官方說明就寫「集中市場**當日**公布注意股票」）
+// 在沒有當日公布時**不是回空陣列，而是回一列所有欄位都是空字串／"0" 的哨兵**
+// （2026-07-26 實測：`{"Number":"0","Code":"","Name":"","NumberOfAnnouncement":"0",…}`）。
+// 舊寫法用 `/^\d{4}$/` 過濾代號，哨兵被靜默濾掉 → 變成「今天沒有任何上市注意股」這個**事實陳述**。
+//
+// 這不是假想問題：本機 45 天快照裡 11 個日子共 299 筆注意股，**上市 0 筆、上櫃 299 筆**
+// （兩份官方 4 碼清單零重疊，分類可靠）。上市 1,092 檔／上櫃 889 檔，連續 11 天上市掛零
+// 而上櫃每天 16~39 檔，機率上不可能——同期 `/announcement/notetrans` 還回著
+// 「115年7月23日至115年7月24日連續二次」，證明上市那兩天確實公布過注意資訊。
+// 也就是說這份名單一直是空的，而畫面把它當成「乾淨」。
+//
+// 同一類陷阱在這個專案已經記錄過三次（逐月歷史的 `X0.00`、MIS 的 `0.0000`、
+// 整批收盤的 `Change:"0.0000"`）：**上游用「看得像資料的東西」表達「沒有資料」**。
+// 回 null 代表「拿不到」，讓呼叫端走 last-good ＋ 警告，而不是宣稱零。
+function twseNoticeRowsOrNull(rows) {
+  if (!Array.isArray(rows)) return null;
+  if (!rows.length) return rows;               // 真正的空陣列（RWD 版就是這樣回）→ 尊重它
+  const usable = rows.filter((row) => /^\d{4,6}$/.test(cleanCode(row?.Code)));
+  return usable.length ? usable : null;        // 有列但沒有一個代號 → 哨兵，不是零
+}
+
 async function resolveRiskSource(name, fetcher, warnings) {
   const cached = riskSourceMemory.get(name);
   const cacheAge = cached ? Date.now() - new Date(cached.fetchedAt).getTime() : Infinity;
@@ -5457,7 +5478,10 @@ async function loadRiskSets(riskDate) {
       name: "TWSE 注意股",
       fetcher: async () => {
         const rows = await fetchJsonWithRetry("https://openapi.twse.com.tw/v1/announcement/notice");
-        return rows.map((r) => cleanCode(r.Code)).filter((code) => /^\d{4}$/.test(code));
+        const usable = twseNoticeRowsOrNull(rows);
+        // 拿不到就要拋，讓 resolveRiskSource 走 last-good ＋ 警告；靜默回 [] 等於宣稱「沒有注意股」。
+        if (usable === null) throw new Error("官方只回了空白哨兵列，當日名單尚未公布或已清空");
+        return usable.map((r) => cleanCode(r.Code)).filter((code) => /^\d{4}$/.test(code));
       },
     },
     {
@@ -5808,10 +5832,20 @@ async function getSurveillanceBoard(dateCompact) {
   // ---- 注意（TWSE notice + TPEx warning）----
   const twseNotice = await survFetchRecords("twseNotice", today, "TWSE 注意", warnings, async () => {
     const rows = await fetchJsonWithRetry("https://openapi.twse.com.tw/v1/announcement/notice", { headers: openapiHeaders });
-    return (rows || []).map((r) => {
+    const usable = twseNoticeRowsOrNull(rows);
+    if (usable === null) throw new Error("官方只回了空白哨兵列，當日名單尚未公布或已清空");
+    return usable.map((r) => {
       const code = cleanCode(r.Code);
       if (!/^\d{4}$/.test(code)) return null;
-      return { code, market: "TWSE", count: Number(r.NumberOfAnnouncement) || 1, reason: String(r.TradingInfoForAttention || "").trim() };
+      // `Date` 欄位官方確實有給（D-44 原記錄說「沒有期間欄位」不精確）——它是**公布日**而不是期間。
+      // 對照組：處置股的 tpex_disposal_information 給的是 `DispositionPeriod: "1150727~1150807"`。
+      // 注意交易資訊本質上是「逐日公布」的旗標，沒有期間可言，所以 D-08 不給它加日期窗是對的；
+      // 但公布日必須保留，否則無法分辨這份名單是今天的還是沿用舊的。
+      return {
+        code, market: "TWSE", count: Number(r.NumberOfAnnouncement) || 1,
+        reason: String(r.TradingInfoForAttention || "").trim(),
+        noticeDate: toCompactDate(r.Date) || "",
+      };
     }).filter(Boolean);
   });
   const tpexWarning = await survFetchRecords("tpexWarning", today, "TPEx 注意", warnings, async () => {
@@ -5819,7 +5853,11 @@ async function getSurveillanceBoard(dateCompact) {
     return (rows || []).map((r) => {
       const code = cleanCode(r.SecuritiesCompanyCode);
       if (!/^\d{4}$/.test(code)) return null;
-      return { code, market: "TPEx", count: 1, reason: String(r.TradingInformation || "").trim() };
+      // 上櫃同樣有公布日（民國 "1150724"），兩邊都留下來才比對得出「哪一邊沿用了舊名單」。
+      return {
+        code, market: "TPEx", count: 1, reason: String(r.TradingInformation || "").trim(),
+        noticeDate: toCompactDate(r.Date) || "",
+      };
     }).filter(Boolean);
   });
   const attMap = new Map();
@@ -12226,7 +12264,7 @@ export {
   VERIFY_ROUND_TRIP_COST_PCT, VERIFY_COST_NOTE, netReturnPct,
   findMissingCorporateActions, corporateActionErrors, TRADE_CORPORATE_ACTION_SIDE,
   WIN_RATE_MIN_SAMPLES,
-  lookupStockSurveillance, survFetchRecords, getSurveillanceBoard, getRiskSets,
+  lookupStockSurveillance, survFetchRecords, getSurveillanceBoard, getRiskSets, twseNoticeRowsOrNull,
   // 技術分析數學
   emaSeries, movingAverageSeries, computeMacd, findSwingPoints, buildTrendLine,
   buildFibonacci, buildTechnicalSignals, averageTrueRange, buildTechnicalAnalysis,
