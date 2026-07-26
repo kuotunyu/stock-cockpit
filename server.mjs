@@ -7158,6 +7158,13 @@ function buildPick(metrics, groupInfo, nextDay = null, recentBacktest = null) {
   };
 }
 
+// 隔日沖候選池的絕對成交量下限（D-33，2026-07-26 使用者拍板）。
+// 為什麼需要：排序權重是 |漲跌%| × log10(量+10)，量那一項的值域只有 1~5，壓不過 0~10 的
+// 漲幅項——冷門股靠「相對爆量」很容易擠進 260 檔，而候選池有上限，它們會**擠掉**流動性
+// 好的股票。實測基準日 2026-07-24：6103 合邦整天成交 5 張（17 萬元）拿到 78 分登上強勢續攻。
+// 門檻刻意設得低（波段是 500 張）：只擋「真的買不到」的，其餘維持「低流動性」標籤讓使用者
+// 自己判斷，與注意／處置股「顯示＋標示」的政策一致。實測 260 檔候選池擋掉 12 檔、上板少 3 檔。
+const OVERNIGHT_MIN_VOLUME_LOTS = 100;
 function preselectQuotes(reference, riskSets, dateCompact, maxCandidates = 260) {
   // 注意/處置股不再剔除，改在 pick 上標示（前端可切換隱藏）。
   // 停牌/下市股則硬排除：掛單也不會成交，出現在清單只會誤導。
@@ -7166,6 +7173,7 @@ function preselectQuotes(reference, riskSets, dateCompact, maxCandidates = 260) 
     .filter((quote) => !riskSets?.halted?.has(quote.code) && !riskSets?.delisted?.has(quote.code))
     .filter((quote) => !dateCompact || toCompactDate(quote.asOf || quote.rawDate) === dateCompact)
     .filter((quote) => Number.isFinite(quote.price) && Number.isFinite(quote.previousClose))
+    .filter((quote) => (Number(quote.volumeLots) || 0) >= OVERNIGHT_MIN_VOLUME_LOTS)
     .map((quote) => {
       const changePct = pct(quote.price - quote.previousClose, quote.previousClose) || 0;
       const amplitudePct = pct((quote.high || quote.price) - (quote.low || quote.price), quote.previousClose) || 0;
@@ -7196,7 +7204,8 @@ function groupPicks(picks, maxPerGroup = 20) {
 
 // v2：訊號判定改吃還原權息後的序列（D-02）。門檻一個都沒動，但除權息當天的漲跌幅與
 // 均線基準變了，會改變哪些股票入選，所以舊快照不可與新快照混進同一個分母。
-const OVERNIGHT_FORMULA_VERSION = "overnight-v2-adjusted-basis";
+// v3：候選池加上絕對成交量下限 OVERNIGHT_MIN_VOLUME_LOTS（D-33）。
+const OVERNIGHT_FORMULA_VERSION = "overnight-v3-liquidity-floor";
 // 2026-07-13 前的快照尚未存 formulaVersion；當時只有這一版公式。
 // 這個常數刻意與 current 分開，未來升版時不可把缺欄位舊資料誤認成新版。
 const LEGACY_OVERNIGHT_FORMULA_VERSION = "overnight-v1-aggressive-controlled";
@@ -9186,7 +9195,10 @@ const SWING_MIN_SCAN_COVERAGE = 0.7; // 至少 70% 候選有當日新鮮歷史�
 // v17 只累積了不到一天的 pending 樣本、尚未產生任何已顯示的統計，代價極小。
 // v19：回檔深度加上「低點必須在高點之後」的時序約束（D-11）。門檻數字沒動，但
 // pullbackDepthPct 與量測幅度的算法變了，會改變哪些標的通過「曾回檔 ≥3%」與 RR≥1。
-const SWING_FORMULA_VERSION = "swing-v19-ordered-pullback";
+// v20：走 Yahoo 備援時最後一根 K 的成交金額改由整批收盤補回（原本恆為 null）。
+// scoreSwing 的流動性項最多 10 分，補回來之後排序會變 → 影響 recordSwingVerification
+// 每個場景取前 40 檔的挑選順序，所以要與舊樣本分開統計。
+const SWING_FORMULA_VERSION = "swing-v20-liquidity-restored";
 
 // 台股普通股升降單位：策略建議價必須是交易所可申報的價格，不能只四捨五入到小數二位。
 function stockTickSize(price) {
@@ -9463,6 +9475,16 @@ function resolveMarketCloseDate(reference) {
 function appendTodayCloseBar(history, quote, latestDate) {
   const latestHistDate = history.length ? toCompactDate(history[history.length - 1].date) : "";
   const quoteDate = toCompactDate(quote.asOf || quote.rawDate);
+  // 歷史已經涵蓋到報價那一天 → 不必補一根，但**成交金額要補回去**。
+  // Yahoo 備援序列的每一根 tradeValue 都是 null（chart API 根本沒有這個欄位），走到那條
+  // 路徑時整批收盤的成交金額就進不了最後一根 K，下游的「低流動性」全部退化成「成交值未知」
+  // ——實測連台積電都會這樣，流動性標籤等於失效，而它正是 D-33 要用來判斷的依據。
+  // 兩者是同一個交易日、同一個官方來源（STOCK_DAY_ALL／上櫃整批收盤），補進去就是同一個數字。
+  // 用 slice+concat 換掉最後一根而不是就地改：history 可能來自模組級快取，不可就地變更。
+  if (quoteDate && quoteDate === latestHistDate && Number.isFinite(quote.tradeValue)
+    && !Number.isFinite(history[history.length - 1]?.tradeValue)) {
+    history = history.slice(0, -1).concat([{ ...history[history.length - 1], tradeValue: quote.tradeValue }]);
+  }
   if (
     !quoteDate || quoteDate <= latestHistDate || quoteDate > latestDate ||
     ![quote.open, quote.high, quote.low, quote.price].every(Number.isFinite)
