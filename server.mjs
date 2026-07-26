@@ -7155,7 +7155,7 @@ async function buildOvernightSignalsUncached({
   const issuedShares = companyDirectory.issuedShares;
   // 卡片旁的「近 30 日回測」是歷史統計，必須跑在還原權息後的序列上，
   // 否則除權息當天的機械性跳空會被算成真實跌幅，直接墊高 brokeMinus2Rate、壓低達成率。
-  await Promise.all([
+  const [, corporateActionCoverage] = await Promise.all([
     loadFundamentalsHistory(),
     ensureCorporateActionResults(compactMonthsBefore(latestDate, 5), latestDate),
   ]);
@@ -7205,6 +7205,11 @@ async function buildOvernightSignalsUncached({
       ...riskSets.warnings,
       ...(laggingMarkets.length
         ? [`${laggingMarkets.join("、")}的收盤資料尚未更新到 ${compactToSlashDate(latestDate)}，這份清單暫時只涵蓋已更新的市場，稍晚會自動補齊。`]
+        : []),
+      // 卡片旁的「近 30 日回測」跑在還原後的序列上；來源沒抓齊時那些百分比會比實際差，
+      // 因為除權息當天的機械性跳空會被算成真實跌幅。訊號本身不受影響（它用原始價，見 D-02）。
+      ...(corporateActionCoverage?.degraded
+        ? ["官方除權除息計算結果表這一輪有部分月份沒抓到，卡片上的近 30 日回測數字可能偏低；資料會在下一輪補齊。"]
         : []),
     ]),
     groups,
@@ -9715,7 +9720,7 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
   // 官方除權除息計算結果表則是逐月、一次涵蓋全市場，所以在這裡補一次就夠整輪 240 檔共用。
   // 掃描抓 6 個月歷史，多補一個月避免月初剛好落在邊界。
   const scanFromDate = compactMonthsBefore(latestDate, 7);
-  const [riskSets] = await Promise.all([
+  const [riskSets, , corporateActionCoverage] = await Promise.all([
     getRiskSets(latestDate),
     getDividendSchedule(),
     loadFundamentalsHistory().then(() => ensureCorporateActionResults(scanFromDate, latestDate)),
@@ -9834,11 +9839,21 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     failureReasons,
     coverageRate: roundTo(coverageRate * 100),
     reliable: scanReliable,
+    // 官方除權除息計算結果表這一輪有沒有抓齊。抓不到不會讓掃描失敗（會退回歸檔公告與跳空估算），
+    // 但那代表這批均線／布林／MACD 可能建立在沒還原的價格上——這件事必須看得見。
+    // 這個失敗模式在開發期間三天內出現三次（證交所限流），而且畫面上完全沒有跡象。
+    corporateActionResultsComplete: !corporateActionCoverage?.degraded,
   };
   const provisional = !reference.coverageComplete || !scanReliable;
   const scanWarnings = scanReliable
     ? []
     : [`本次只有 ${freshHistoryCount}/${candidates.length} 檔候選取得 ${compactToSlashDate(latestDate)} 的新鮮歷史，結果暫時顯示但不會寫入正式快照。`];
+  // 還原權息的第一順位來源沒抓齊時一定要說。這一輪的均線／布林／MACD 可能建立在
+  // 沒還原的價格上，而畫面上不會有任何其他跡象——刻意不擋掉結果（歸檔公告與跳空估算仍在），
+  // 但使用者要知道這批數字的基礎比平常弱。已抓到的月份會落盤，下一輪通常就補齊了。
+  if (corporateActionCoverage?.degraded) {
+    scanWarnings.push("官方除權除息計算結果表這一輪有部分月份沒抓到，這批標的的還原權息改用公告公式或跳空估算，均線與布林可能不夠精確；資料會在下一輪補齊。");
+  }
 
   return {
     ok: true,
