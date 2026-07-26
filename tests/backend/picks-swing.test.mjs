@@ -363,3 +363,83 @@ test("buildSwingPick：形狀契約＋上櫃市場標籤", () => {
   }
   assert.equal(pick.indicators.goldenCrossDays, f.goldenCrossDays);
 });
+
+// ---- v21：SWING_MIN_RR 改套在「淨」RR 上 ----
+// 來回成本打**兩邊**：吃掉報酬，又墊高實際虧損。
+//   淨報酬 = 目標 − 進場 − 成本×進場      淨風險 = 進場 − 停損 + 成本×進場
+// 所以淨 RR = 1 的臨界是「reward − risk > 2 × 成本 × 進場價」＝ 進場價的 0.942%。
+// 這與 D-25 拿掉 +3% 下限是同一類問題：一道門檻沒有在做它宣稱的事（「風險大於報酬的
+// 設定不值得做」用毛價算，邊緣區間根本擋不住）。實測 2026-07-24：毛 RR≥1 的 16 檔裡
+// 5 檔的淨 RR <1（中租-KY 1.00→0.63、至上 1.10→0.75、聯強 1.10→0.75）。
+test("buildSwingPlan：淨 RR 把成本算在報酬與風險兩邊", () => {
+  const f = computeSwingFeatures(upRows);
+  f.last.close = 100;
+  f.ma20 = 95;
+  f.boll = { ...f.boll, lower: 96 };
+  f.swings = { ...f.swings, lows: [{ price: 97 }], highs: [{ price: 103.5 }] };
+  const plan = buildSwingPlan(f);
+
+  assert.equal(plan.entry, 100);
+  assert.equal(plan.structuralStop, 97, "停損＝上方最近支撐 97");
+  assert.equal(plan.target, 103.5, "目標＝上方最近壓力 103.5");
+  // 毛：3.5 / 3 = 1.1667；成本 100 × 0.471% = 0.471
+  // 淨：(3.5 − 0.471) / (3 + 0.471) = 3.029 / 3.471 = 0.8726
+  assert.ok(Math.abs(plan.rr - 1.17) < 0.02, `毛 RR 應約 1.17（實際 ${plan.rr}）`);
+  assert.ok(Math.abs(plan.rrNet - 0.87) < 0.02, `淨 RR 應約 0.87（實際 ${plan.rrNet}）`);
+  assert.ok(plan.rr >= 1 && plan.rrNet < 1, "這正是「看起來剛好過關、扣掉成本其實賠錢」的區間");
+});
+
+test("buildSwingPlan：報酬夠大時成本只是小幅折損，不該把好設定也擋掉", () => {
+  const f = computeSwingFeatures(upRows);
+  f.last.close = 100;
+  f.ma20 = 95;
+  f.boll = { ...f.boll, lower: 96 };
+  f.swings = { ...f.swings, lows: [{ price: 95 }], highs: [{ price: 120 }] };
+  const plan = buildSwingPlan(f);
+  // 支撐取「低於進場者中最高的那個」＝布林下軌 96（不是擺動低點 95）→ 風險 4、報酬 20。
+  // 毛：20 / 4 = 5.0；淨：(20 − 0.471) / (4 + 0.471) = 4.37
+  assert.equal(plan.structuralStop, 96, "支撐取最高的那個，不是最低的");
+  assert.ok(Math.abs(plan.rr - 5) < 0.05, `毛 RR 應約 5（實際 ${plan.rr}）`);
+  assert.ok(Math.abs(plan.rrNet - 4.37) < 0.05, `淨 RR 應約 4.37（實際 ${plan.rrNet}）`);
+  assert.ok(plan.rrNet >= 1, "高盈虧比的設定不該被成本擋掉——成本只折損約 13%");
+});
+
+// ---- 被 2% 過濾跳過的最近壓力要說出來（Q3 的結論：不改門檻，改成揭露）----
+// 那道 `> entry × 1.02` 過濾**刻意保留**：上軌續攻選的就是貼著近期高點的股票，
+// 最近擺動高點必然貼著收盤價（實測 11 檔在 +0.11%~+1.81%，拿它們當目標 RR 只有 0.00~0.53，
+// 整批會被剔除）。它不是 D-25 那類缺陷——+3% 下限是把目標**抬到壓力之上**（憑空造報酬），
+// 這道過濾是**跳過不能用的價位**改用更遠的壓力。但被跳過的價位仍是真實關卡，要顯示。
+test("buildSwingPlan：2% 內的壓力不當目標，但要回報給畫面", () => {
+  const f = computeSwingFeatures(upRows);
+  f.last.close = 100;
+  f.ma20 = 95;
+  f.boll = { ...f.boll, lower: 96 };
+  // 101 在 +1%（2% 內，不能當目標）；103.5 在 +3.5%（可用）
+  f.swings = { ...f.swings, lows: [{ price: 97 }], highs: [{ price: 101 }, { price: 103.5 }] };
+  const plan = buildSwingPlan(f);
+
+  assert.equal(plan.target, 103.5, "2% 內的 101 不可當目標，否則 RR 幾乎歸零");
+  assert.equal(plan.nearestResistance, 101, "但要把被跳過的關卡回報出來");
+});
+
+test("buildSwingPlan：最近壓力就是目標時不重複回報", () => {
+  const f = computeSwingFeatures(upRows);
+  f.last.close = 100;
+  f.ma20 = 95;
+  f.boll = { ...f.boll, lower: 96 };
+  f.swings = { ...f.swings, lows: [{ price: 97 }], highs: [{ price: 103.5 }, { price: 110 }] };
+  const plan = buildSwingPlan(f);
+  assert.equal(plan.target, 103.5);
+  assert.equal(plan.nearestResistance, null, "沒有被跳過的關卡就不該顯示");
+});
+
+test("buildSwingPlan：上方完全沒有壓力時 nearestResistance 為 null", () => {
+  const f = computeSwingFeatures(upRows);
+  f.last.close = 100;
+  f.ma20 = 95;
+  f.boll = { ...f.boll, lower: 96 };
+  f.swings = { ...f.swings, lows: [{ price: 97 }], highs: [{ price: 90 }] };
+  const plan = buildSwingPlan(f);
+  assert.equal(plan.nearestResistance, null);
+  assert.ok(plan.target > plan.entry, "沒有壓力時走量測幅度或 2R，目標仍須高於進場");
+});

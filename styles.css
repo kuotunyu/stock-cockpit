@@ -6512,6 +6512,12 @@ body.is-locked .app-shell {
   margin-left: 2px;
 }
 
+/* 「前有壓力」：目標之前還有一個更近的關卡（2% 內所以沒被當目標用）。
+   比一般 hint 醒目一級，但不到紅色警示的程度——它是資訊不是錯誤。 */
+.swing-stat-hint.is-warn {
+  color: var(--yellow);
+}
+
 /* 啟動移停＝進階欄位，淡化一級，讓視覺重心落在「進場／兩個停損／目標／盈虧比」 */
 .swing-stat-sub {
   background: #0c0d0e;

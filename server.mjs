@@ -9325,7 +9325,7 @@ function computeSwingFeatures(rawRows, officialActions, options) {
 const SWING_NEAR_BAND_SIGMA = 1.0; // 距中軌 ≤1.0σ 才算「貼著中軌防守」（0=中軌、2σ=上軌；>1σ 已往上軌走，屬突破/追高，不是中軌攻防）
 const SWING_MIN_GOLDEN_DAYS = 2;   // MACD 需「連續≥2天」維持金叉，濾掉單根 K 的臨界假訊號（whipsaw）
 const SWING_MAX_DOWN_DAY = -6;     // 「站穩」要件：當日(還原後)跌幅不得超過 6%，擋掉雖在中軌上方但今天正在破底/跌停的股
-const SWING_MIN_RR = 1;            // 盈虧比下限：報酬至少要等於風險(RR≥1)才入選。RR<1 的設定不值得做，也順帶淘汰「離中軌過遠→停損遠→RR爛」的股
+const SWING_MIN_RR = 1;            // 盈虧比下限，套在**淨** RR（已扣來回成本）上：報酬至少要等於風險才入選。也順帶淘汰「離中軌過遠→停損遠→RR爛」的股
 const SWING_MIN_SCAN_COVERAGE = 0.7; // 至少 70% 候選有當日新鮮歷史，才可寫正式每日快照／驗證單。
 // 選股邏輯版本：改動後快照版本不符就重算，避免沿用舊邏輯算出的清單（也讓「更完整才覆蓋」只在同版本內比較）。
 // v18：拿掉目標價的「至少 +3%」下限（D-25）。那道下限會在上方壓力很近時把目標硬抬過壓力，
@@ -9336,10 +9336,12 @@ const SWING_MIN_SCAN_COVERAGE = 0.7; // 至少 70% 候選有當日新鮮歷史�
 // v17 只累積了不到一天的 pending 樣本、尚未產生任何已顯示的統計，代價極小。
 // v19：回檔深度加上「低點必須在高點之後」的時序約束（D-11）。門檻數字沒動，但
 // pullbackDepthPct 與量測幅度的算法變了，會改變哪些標的通過「曾回檔 ≥3%」與 RR≥1。
+// v21：SWING_MIN_RR 改套在**淨** RR（已扣 0.471% 來回成本）上。門檻數字沒動，但毛 RR
+// 1.0~1.2 那一段會被剔除——那些是「看起來剛好過關、扣掉成本其實賠錢」的設定。
 // v20：走 Yahoo 備援時最後一根 K 的成交金額改由整批收盤補回（原本恆為 null）。
 // scoreSwing 的流動性項最多 10 分，補回來之後排序會變 → 影響 recordSwingVerification
 // 每個場景取前 40 檔的挑選順序，所以要與舊樣本分開統計。
-const SWING_FORMULA_VERSION = "swing-v20-liquidity-restored";
+const SWING_FORMULA_VERSION = "swing-v21-net-rr-gate";
 
 // 台股普通股升降單位：策略建議價必須是交易所可申報的價格，不能只四捨五入到小數二位。
 function stockTickSize(price) {
@@ -9482,9 +9484,20 @@ function buildSwingPlan(features) {
   // 目標優先用「上方最近的壓力」（擺動高點中高於現價者取最低的那個）；
   // 若已創新高、上方無壓力，改用「量測幅度」（本波回檔前的高低差往上投射）。
   // 這樣盈虧比會隨個股結構自然變化（接近壓力 RR 小、剛起漲 RR 大），而不是恆等於 2R。
-  const overheadHighs = features.swings.highs
+  // `> entry × 1.02` 這道過濾**刻意保留**，而且它不是 D-25 那類的缺陷。
+  // 「上軌續攻」選的就是貼著近期高點的股票，所以最近的擺動高點必然貼著收盤價：
+  // 實測 2026-07-24 通過的 16 檔裡有 11 檔的最近擺動高點在 +0.11%~+1.81%（陽明 +0.11%、
+  // 聯強 +0.23%、興富發 +0.34%），拿它們當目標算出來的 RR 是 0.00~0.53，整批會被剔除。
+  // 那些價位不是「可以獲利了結的壓力」，是收盤價本身的雜訊。
+  // 與 D-25 的差別：+3% 下限是把目標**抬到壓力之上**（憑空造出報酬）；這道過濾是**跳過
+  // 不能用的價位**改用量測幅度，是不同的操作。
+  // 但被跳過的價位仍然是真實的關卡（例如威強電壓力在 +1.81%、目標卻在 +15%），
+  // 所以下面把它一起回傳，讓畫面說出來——不改數字，只是不再隱瞞。
+  const upperHighs = features.swings.highs
     .map((point) => point.price)
-    .filter((price) => Number.isFinite(price) && price > entry * 1.02);
+    .filter((price) => Number.isFinite(price) && price > entry);
+  const nearestResistance = upperHighs.length ? Math.min(...upperHighs) : null;
+  const overheadHighs = upperHighs.filter((price) => price > entry * 1.02);
   const overhead = overheadHighs.length ? Math.min(...overheadHighs) : null;
   // 量測幅度＝「本波回檔的高低差」往上投射。加上 D-11 的時序約束之後，這個幅度可能退化成 0
   // （高點就是最後一根，還沒回檔過）——那時量測幅度是**沒有定義**，不是零。
@@ -9508,7 +9521,25 @@ function buildSwingPlan(features) {
 
   const reward = target - entry;
   const rr = risk > 0 ? roundTo(reward / risk) : null;
-  return { entry, initialStop, trailingTrigger, structuralStop, target, rr };
+  // 淨盈虧比：來回成本打**兩邊**——它同時吃掉報酬、又墊高實際虧損。
+  //   淨報酬 = 目標 − 進場 − 成本×進場       淨風險 = 進場 − 停損 + 成本×進場
+  // 所以淨 RR = 1 的臨界是「reward − risk > 2 × 成本 × 進場價」＝ 進場價的 0.942%。
+  // 這是 `SWING_MIN_RR` 真正該把關的數字：那道門檻宣稱「風險大於報酬的設定不值得做」，
+  // 用毛價算的話在邊緣區間根本沒做到——實測 2026-07-24 通過毛 RR≥1 的 16 檔裡，
+  // 5 檔的淨 RR 其實 <1（中租-KY 1.00→0.63、至上 1.10→0.75、聯強 1.10→0.75）。
+  // 這與 D-25 拿掉 +3% 下限是同一類問題：一道門檻沒有在做它宣稱的事。
+  // 毛 RR 仍然保留並顯示——它是「圖上的結構」；淨 RR 是「值不值得做」，用它把關。
+  // 成本本身仍是低估：VERIFY_COST_NOTE 已載明未計每筆最低 20 元手續費與滑價。
+  const costPerShare = entry * (VERIFY_ROUND_TRIP_COST_PCT / 100);
+  const netRisk = risk + costPerShare;
+  const rrNet = netRisk > 0 ? roundTo((reward - costPerShare) / netRisk) : null;
+  return {
+    entry, initialStop, trailingTrigger, structuralStop, target, rr, rrNet,
+    // 被 2% 過濾跳過的最近壓力：不影響目標，但使用者該知道上方還有關卡。
+    nearestResistance: nearestResistance !== null && (overhead === null || nearestResistance < overhead)
+      ? roundTo(nearestResistance)
+      : null,
+  };
 }
 
 // 0~100 連續評分：趨勢結構 + MACD 動能 + 攻防區位置 + 量能 + 流動性。權重可調。
@@ -10177,7 +10208,9 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
       }
       const plan = buildSwingPlan(features);
       // 盈虧比下限：風險>報酬的設定不值得做，直接剔除（也自然淘汰離中軌過遠→停損遠→RR 爛的股）。
-      if (!Number.isFinite(plan.rr) || plan.rr < SWING_MIN_RR) {
+      // 用**淨** RR 把關：門檻宣稱「風險大於報酬的設定不值得做」，那就得算進來回成本，
+      // 否則毛 RR 1.0~1.2 這一段全部是「看起來剛好過關、實際上賠錢」（見 buildSwingPlan 的說明）。
+      if (!Number.isFinite(plan.rrNet) || plan.rrNet < SWING_MIN_RR) {
         return { hits: [], pick: null, outcome: "rr-filtered", historySuccess: true, freshHistory: true, featureReady: true };
       }
       // 對「所有場景」分類做命中計數：讓分頁能同時顯示兩個場景今天各有幾檔（兩場景互斥、理論上不重疊）。

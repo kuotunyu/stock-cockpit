@@ -5613,8 +5613,14 @@ function renderSwingCard(pick) {
         <div class="swing-stat" title="初始停損：進場後先設在收盤 −5%"><span>${glossLink("建議停損")} <i class="swing-stat-hint">−5%</i></span><strong>${formatNumber(pick.plan?.initialStop)}</strong></div>
         <div class="swing-stat" title="依支撐（擺動低點／布林下軌／月線）設的較大停損；盈虧比就是用它算的"><span>${glossLink("結構停損")}</span><strong>${formatNumber(pick.plan?.structuralStop)}</strong></div>
         <div class="swing-stat swing-stat-sub" title="進階：股價漲到此價（收盤 +5%）後，改用移動停利往上跟、鎖住獲利"><span>${glossLink("啟動移停")} <i class="swing-stat-hint">+5%</i></span><strong>${formatNumber(pick.plan?.trailingTrigger)}</strong></div>
-        <div class="swing-stat" title="上方壓力或波段量測幅度推估的目標價"><span>${glossLink("目標")}</span><strong>${formatNumber(pick.plan?.target)}</strong></div>
-        <div class="swing-stat swing-rr ${rrTone}" title="盈虧比＝(目標−進場)÷(進場−結構停損)，越大越划算"><span>${glossLink("盈虧比")}</span><strong>${Number.isFinite(rr) ? rr.toFixed(1) : "—"}</strong></div>
+        <div class="swing-stat" title="上方壓力或波段量測幅度推估的目標價${Number.isFinite(pick.plan?.nearestResistance)
+          ? `。⚠ 上方 ${formatNumber(pick.plan.nearestResistance)} 還有一個更近的擺動高點，它太貼近收盤價（2% 內）所以不當目標用，但路上會先遇到它。`
+          : ""}"><span>${glossLink("目標")}</span><strong>${formatNumber(pick.plan?.target)}</strong>${
+          Number.isFinite(pick.plan?.nearestResistance) ? '<i class="swing-stat-hint is-warn">前有壓力</i>' : ""
+        }</div>
+        <div class="swing-stat swing-rr ${rrTone}" title="盈虧比＝(目標−進場)÷(進場−結構停損)。括號內是扣掉一買一賣手續費與證交稅之後的淨值，選股門檻用的是淨值（毛值會讓「剛好過關」的設定其實賠錢）"><span>${glossLink("盈虧比")}</span><strong>${Number.isFinite(rr) ? rr.toFixed(1) : "—"}${
+          Number.isFinite(pick.plan?.rrNet) ? `<i class="swing-stat-hint">淨 ${pick.plan.rrNet.toFixed(1)}</i>` : ""
+        }</strong></div>
       </div>
       ${riskRewardBar}
     </article>

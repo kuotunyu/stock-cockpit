@@ -201,8 +201,10 @@ function scenarioWarnings(result) {
 // 這個 fixture 的誠實盈虧比是 0.8——上方最近壓力在 105.31（僅 +2.2%），reward 只有 2.0
 // 而 risk 是 2.5。舊版的下限把目標抬到 106.1（**壓力之上**），硬湊出 RR 1.24 才通過。
 // 也就是說這個 fixture 本身就是 D-25 的活例子，斷言它 RR≥1 等於把被膨脹的行為釘成期望。
-// 真正要守的「對照檔必須通過 RR gate」由下面的 scanSwingBoard 測試直接斷言
-// （codes.includes(COMPLETE)），那條更直接、而且走的是還原後的序列。
+// v21（2026-07-26）之後更進一步：這個 fixture 還原後的毛 RR 是 1.06、淨 RR 只有 0.67，
+// 所以它**連 RR gate 都過不了**。下方的 scanSwingBoard 測試因此改用 `featureReadyCount`
+// 證明「公司行動這道關通過了」，把公司行動與 RR 兩件事拆開；至於 RR gate 本身，
+// 由本檔最後一條測試單獨守（那條刻意允許隨 RR 口徑調整）。
 test("fixture control：未受公司行為污染時確實命中場景", () => {
   const features = mod.computeSwingFeatures(pristineRows, [], { allowHeuristicFallback: true });
   const scenario = mod.classifySwingScenario(features);
@@ -242,16 +244,56 @@ test("inspectSwingStock：同日官方事件公式欄位 unresolved 時不提供
   assert.ok((result.warnings || []).some((warning) => warning.includes(exDateSlash)), `warnings=${JSON.stringify(result.warnings)}`);
 });
 
-test("scanSwingBoard：官方／heuristic 兩種可解事件入選，unresolved 事件排除並計入品質原因", async () => {
+// ⚠ 這條刻意**不**斷言 `codes.includes(COMPLETE / ARCHIVE_GAP)`，改用 `featureReadyCount`。
+// 原因：這兩個 fixture 的盈虧比只是勉強及格（實測毛 1.06／淨 0.67），**任何 RR 口徑的調整
+// 都會把它們踢出榜外**——D-25 拿掉「目標至少 +3%」的下限時已經因此改過一次（見上方控制組
+// 測試的註解），v21 改用淨 RR 把關又壞了第二次。同一個耦合壞兩次就該拆掉。
+//
+// 而且那個 RR≈1 是 fixture 自己的正弦波造成的，不是中軌攻防的本質：`mid = 趨勢 + A·sin(i/2)`
+// 讓收盤貼中軌時，上方最近的擺動高點恰好在 +A、下方擺動低點也在 −A → reward ≈ risk，
+// 放大 A 也無效（實測 A=3/4/5 的毛 RR 都是 0.94~1.11）。真實資料的中軌攻防中位數是
+// 風險 2.28%／報酬 3.33%／毛 RR 1.42，形狀完全不同。
+//
+// 「公司行動有沒有被正確解析」與「這筆交易值不值得做」是兩件事，測試不該綁在一起：
+//   前者：`featureReadyCount` 只在通過公司行動那道關之後才會 +1（`corporate-action-unresolved`
+//         的 featureReady 是 false，而 `rr-filtered` 是 true）→ **與 RR 無關的精準證據**。
+//         本檔上面三條 inspectSwingStock 另外直接證明了兩種還原來源與 unresolved 的行為。
+//   後者：交給 picks-swing 與 swing-pullback-and-fill。
+// 這條留下來守的是**掃描層的品質帳**。
+test("scanSwingBoard：可解事件通過公司行動關卡，unresolved 事件排除並計入品質原因", async () => {
   const reference = await mod.getReferenceData();
   const latestDate = mod.resolveMarketCloseDate(reference);
   const body = await mod.scanSwingBoard(reference, latestDate, "", 240);
   const codes = body.picks.map((pick) => pick.code);
 
-  assert.ok(codes.includes(COMPLETE), `完整官方事件的對照檔應入選；codes=${JSON.stringify(codes)}`);
-  assert.ok(codes.includes(ARCHIVE_GAP), `archive 缺漏但 heuristic 可解的對照檔應入選；codes=${JSON.stringify(codes)}`);
+  assert.equal(body.scanQuality.candidateCount, 3, "前提：候選池就是那三檔 fixture");
+  assert.equal(
+    body.scanQuality.featureReadyCount, 2,
+    "COMPLETE（官方公式）與 ARCHIVE_GAP（跳空估算）都該通過公司行動關卡並算出特徵；"
+    + `unresolved 那一檔不該（實際 ${body.scanQuality.featureReadyCount}）`,
+  );
   assert.ok(!codes.includes(UNRESOLVED), `公式欄位 unresolved 不得進榜；codes=${JSON.stringify(codes)}`);
   assert.equal(body.scanQuality.failureReasons["corporate-action-unresolved"], 1);
-  assert.equal(body.scanQuality.failedCount, 1);
-  assert.equal(body.matchedCount, 2);
+  assert.equal(body.scanQuality.failedCount, 1, "rr-filtered 不算失敗，所以總失敗數就是 unresolved 那一檔");
+});
+
+// v21 的淨 RR 把關。這個 fixture 剛好是教科書級的例子——實測毛 RR 1.06、淨 RR 0.67
+//（進場 87.6／停損 85.8／目標 89.5：報酬只比風險多 0.1 元，來回成本 0.41 元直接吃掉）。
+// 刻意與上面那條公司行動測試**分開**：這一條可以隨 RR 口徑改動而調整，上面那條不行
+//（它壞過兩次就是因為綁在 RR 上）。
+test("淨 RR 把關：毛 RR 過關但扣掉成本後不過關的設定不得進榜", async () => {
+  const inspected = await mod.inspectSwingStock(COMPLETE);
+  assert.equal(inspected.ok, true, inspected.error);
+  assert.ok(inspected.plan.rr >= 1, `前提：毛 RR 要 ≥1（實際 ${inspected.plan.rr}）`);
+  assert.ok(inspected.plan.rrNet < 1, `前提：淨 RR 要 <1（實際 ${inspected.plan.rrNet}）`);
+
+  const reference = await mod.getReferenceData();
+  const latestDate = mod.resolveMarketCloseDate(reference);
+  const body = await mod.scanSwingBoard(reference, latestDate, "", 240);
+  assert.ok(
+    !body.picks.some((pick) => pick.code === COMPLETE),
+    `毛 RR 過關但淨 RR 不過關 → 不該進榜；picks=${JSON.stringify(body.picks.map((p) => [p.code, p.plan?.rr, p.plan?.rrNet]))}`,
+  );
+  // 健檢入口仍然給出計畫與兩個 RR，讓使用者自己看得到為什麼沒上榜
+  assert.ok(Number.isFinite(inspected.plan.rrNet), "健檢要把淨 RR 一起給出來");
 });
