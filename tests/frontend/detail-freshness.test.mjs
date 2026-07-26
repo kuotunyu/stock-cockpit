@@ -32,11 +32,13 @@ test("older trading-date quote is labelled as last trade but keeps its red/green
     renderDetail();
     return {
       tags: document.getElementById("detailTags").textContent,
-      heroBackground: document.querySelector(".price-hero > div:first-child").style.background,
+      // 漲跌方向改由 class 表達（原本是 inline style 寫死色碼，CSS 無法覆寫）。
+      heroClass: document.getElementById("priceHero").className,
     };
   })()`);
   assert.match(rendered.tags, /最後成交 01\/01/);
-  assert.equal(rendered.heroBackground, "var(--up-surface)", "有明確 +1% 漲幅時，即使是上一交易日最後成交也要維持紅漲");
+  assert.match(rendered.heroClass, /\bis-up\b/, "有明確 +1% 漲幅時，即使是上一交易日最後成交也要維持紅漲");
+  assert.doesNotMatch(rendered.heroClass, /\bis-down\b|\bis-flat\b/, "方向只能有一個");
 });
 
 test("missing live price keeps the close label but still uses its valid red/green direction", () => {
@@ -53,12 +55,14 @@ test("missing live price keeps the close label but still uses its valid red/gree
     state.selectedCode = stock.code;
     renderDetail();
     return JSON.stringify({
-      background: document.querySelector(".price-hero > div:first-child").style.background,
+      heroClass: document.getElementById("priceHero").className,
       tags: document.getElementById("detailTags").textContent,
       change: document.getElementById("detailChange").textContent,
     });
   })()`));
-  assert.equal(rendered.background, "var(--up-surface)");
+  assert.match(rendered.heroClass, /\bis-up\b/, "非即時報價也不得改掉紅漲綠跌的方向");
+  // 新鮮度改用琥珀邊框單獨揭露，不去動底色方向——兩件事各有自己的視覺通道。
+  assert.match(rendered.heroClass, /\bis-stale\b/, "退回收盤價時要有 stale 視覺標記");
   // 盤中與盤後的文案不同，但兩者都必須清楚揭露這不是即時成交價。
   assert.match(rendered.tags, /(?:07\/13 收盤|暫無即時成交・顯示昨收)/);
   assert.match(rendered.change, /收盤 \+1/);

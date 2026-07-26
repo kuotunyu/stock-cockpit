@@ -380,21 +380,15 @@
             <i data-lucide="bell-plus"></i>
           </button>
         </header>
-        <section class="price-hero">
-          <div>
+        <!-- 主價格塊只放「現價＋漲跌」。單量／總量在下方「即時」分頁與「量價摘要」指標各印一次，
+             這裡不再印第三次；而且那份 dl（126px 固定欄）才是把 hero 撐高、
+             並把「-125 (▼3.23%)」擠成兩行的真正原因。
+             漲跌方向與新鮮度改由 #priceHero 的 class 交給 CSS，不再用 inline style 寫死色碼。 -->
+        <section class="price-hero" id="priceHero">
+          <div class="price-hero-main">
             <strong id="detailPrice">--</strong>
             <span id="detailChange"></span>
           </div>
-          <dl>
-            <div>
-              <dt>單量</dt>
-              <dd id="detailUnit">--</dd>
-            </div>
-            <div>
-              <dt>總量</dt>
-              <dd id="detailTotal">--</dd>
-            </div>
-          </dl>
         </section>
         <section class="price-alert-box" id="priceAlertBox" hidden></section>
         <p class="detail-strategy-basis" id="detailStrategyBasis" hidden></p>

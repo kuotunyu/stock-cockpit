@@ -944,6 +944,21 @@ function toneFromNet(value) {
   return direction > 0 ? "positive" : direction < 0 ? "negative" : "muted";
 }
 
+// 明細面板欄位的語意色。舊寫法的 tone 不是語意而是「調色盤第幾格」——四個分頁一律
+// neutral→high→low→volume→total 固定輪轉，於是投信買賣超永遠紅、自營永遠綠、
+// 營收 YoY 的 ▼ 是紅色的（符號說跌、顏色說漲，直接互相打臉）。
+//
+// 分辨規則：
+//   有正負的「變化量／流量」（買賣超、YoY、價與均線的差）→ 走台股紅漲綠跌。
+//   沒有正負的「水準值」（開高低、均價、量、本益比、殖利率）→ 不上色，語意由 label 承擔。
+//   無值／未揭露 → is-na 灰，不進紅綠。
+// 平盤門檻沿用既有的 signedDirection（|值| < 0.005），不新增任何門檻。
+function metricToneFromNet(value) {
+  if (finiteNumberOrNull(value) === null) return "na";
+  const direction = signedDirection(value);
+  return direction > 0 ? "up" : direction < 0 ? "down" : "flat";
+}
+
 function signalFromChange(value) {
   const direction = signedDirection(value);
   return direction > 0 ? "red" : direction < 0 ? "green" : "white";
@@ -9337,13 +9352,13 @@ function renderDetail() {
       detailTags: "正在抓官方報價",
       detailPrice: "--",
       detailChange: "",
-      detailUnit: "--",
-      detailTotal: "--",
     };
     for (const [id, text] of Object.entries(placeholders)) {
       const node = document.getElementById(id);
       if (node) node.textContent = text;
     }
+    // 報價還沒進來，不該留著上一檔的漲跌底色與 stale 邊框。
+    document.getElementById("priceHero")?.classList.remove("is-up", "is-down", "is-flat", "is-stale");
     return;
   }
   const indicatorAliasMap = {
@@ -9367,7 +9382,9 @@ function renderDetail() {
   // 收盤價仍有相對昨收的有效漲跌；是否即時由上方「收盤」標記揭露。
   // 只有平盤才使用中性色，避免把實際收漲／收跌誤畫成灰色。
   const neutral = isFlat;
-  const movement = neutral ? "" : changeNum > 0 ? "positive" : "negative";
+  // 原本這裡還有一個 movement，只被下面「第 5 格」的渲染用掉，而那是死碼：
+  // .chart-metric.positive 從來沒有可見效果（em 與 strong 各有明確色，會蓋掉繼承來的顏色），
+  // 而且就算補上規則也是拿「股價方向」去染總量／週轉／法人合計／殖利率四個不同的東西。
   document.getElementById("detailName").textContent = `${stock.code} ${stock.name}`;
   const exchangeLabel = formatExchangeLabel(stock.exchange);
   const sourceKindLabel = quoteContext.label;
@@ -9384,9 +9401,16 @@ function renderDetail() {
       : stock.priceChange !== undefined && stock.priceChange !== null
         ? `${formatSignedPrice(stock.priceChange)} (${formatSignedPercent(stock.change)})`
         : `${stock.change >= 0 ? "▲" : "▼"}${Math.abs(stock.change).toFixed(2)}%`;
-  document.getElementById("detailUnit").textContent = formatOptionalNumber(stock.unit);
-  document.getElementById("detailTotal").textContent = formatOptionalNumber(stock.total);
-  document.querySelector(".price-hero > div:first-child").style.background = neutral ? "#434a56" : changeNum > 0 ? "var(--up-surface)" : "var(--down-surface)";
+  // 漲跌方向與新鮮度都用 class 交給 CSS（與 .market-pill / .chart-zoom-readout 同機制）。
+  // 舊寫法是 app.js 唯一一處 inline 顏色，而 #434a56 是全 repo 唯一出現的那個色碼；
+  // 更麻煩的是 inline style 會永久遮蔽 CSS 裡的背景規則，樣式沒有辦法覆寫。
+  const heroEl = document.getElementById("priceHero");
+  heroEl.classList.toggle("is-up", !neutral && changeNum > 0);
+  heroEl.classList.toggle("is-down", !neutral && changeNum < 0);
+  heroEl.classList.toggle("is-flat", neutral);
+  // 新鮮度第一次有視覺編碼：底色仍守台股紅漲綠跌（方向不可被新鮮度蓋掉），
+  // 「這不是即時成交」只用琥珀邊框揭露，配色沿用 .market-pill.is-stale。
+  heroEl.classList.toggle("is-stale", Boolean(noLive));
   // 策略基準收盤：若這檔同時在策略雷達榜單上（多半是從卡片點進來的），把卡片用的「官方收盤（當日凍結）」
   // 並排顯示在即時報價下方，讓使用者一眼看懂上方即時 vs 榜單基準的關係，不必回去卡片對照。
   const basisEl = document.getElementById("detailStrategyBasis");
@@ -9420,38 +9444,54 @@ function renderDetail() {
       : institutionalState.error
         ? "法人更新失敗"
         : "法人無資料";
+  // 價與均線的差才有方向（均價本身是水準值）。這與同一面板往下約 200px 的「技術均線」指標
+  // 用的是同一個判斷（buildIndicatorDetail 的 stock.price >= ma5），兩處顏色從此一致。
+  const priceNum = finiteNumberOrNull(stock.price);
+  const maDiffTone = (maValue) => (
+    priceNum === null || finiteNumberOrNull(maValue) === null ? "na" : metricToneFromNet(priceNum - maValue)
+  );
   const detailMetrics = {
     即時: [
+      // 開高低都是「水準值」，沒有正負可言 → 不上色，語意由 label 承擔。
+      // 舊寫法把「高」寫死紅、「低」寫死綠，在下跌 3.23% 的日子裡紅色的最高價會被讀成利多。
       { label: "開", value: formatNumber(stock.open ?? spark[0]), tone: "neutral" },
-      { label: "高", value: formatNumber(stock.high ?? Math.max(...spark)), tone: "high" },
-      { label: "低", value: formatNumber(stock.low ?? Math.min(...spark)), tone: "low" },
-      { label: "單量", value: formatOptionalNumber(stock.unit), tone: "volume" },
-      { label: "總量", value: formatOptionalNumber(stock.total), tone: "total" },
+      { label: "高", value: formatNumber(stock.high ?? Math.max(...spark)), tone: "neutral" },
+      { label: "低", value: formatNumber(stock.low ?? Math.min(...spark)), tone: "neutral" },
+      // 成交量是水準值；而且 --yellow 是注意股專用色、--violet 是處置股專用色，
+      // 明細面板不該佔用風險標示的色彩語彙。
+      { label: "單量", value: formatOptionalNumber(stock.unit), tone: "neutral" },
+      { label: "總量", value: formatOptionalNumber(stock.total), tone: "neutral" },
     ],
     均線: [
       { label: "昨收", value: formatNumber(stock.previousClose ?? spark[0]), tone: "neutral" },
-      { label: maTabIsDaily ? "MA5" : "盤中均", value: formatNumber(ma5), tone: "high" },
-      { label: maTabIsDaily && maLongLength >= 20 ? "MA20" : `${maLongLength}筆均`, value: formatNumber(maLong), tone: "low" },
-      { label: "量比5", value: stock.avgVol ? formatNumber(stock.avgVol) : "--", tone: "volume" },
-      { label: "週轉", value: stock.turnover ? `${formatNumber(stock.turnover)}%` : "--", tone: "total" },
+      { label: maTabIsDaily ? "MA5" : "盤中均", value: formatNumber(ma5), tone: maDiffTone(ma5) },
+      { label: maTabIsDaily && maLongLength >= 20 ? "MA20" : `${maLongLength}筆均`, value: formatNumber(maLong), tone: maDiffTone(maLong) },
+      // 量比與週轉率的「高低算好算壞」沒有既定門檻，強度判斷留在下方「量價摘要」（那裡已有門檻與說明）。
+      { label: "量比5", value: stock.avgVol ? formatNumber(stock.avgVol) : "--", tone: stock.avgVol ? "neutral" : "na" },
+      { label: "週轉", value: stock.turnover ? `${formatNumber(stock.turnover)}%` : "--", tone: stock.turnover ? "neutral" : "na" },
     ],
     法人: institutional
       ? [
-          { label: "外陸資", value: formatShareLots(institutional.foreignNet), tone: "neutral" },
+          // 買賣超本身就有正負，紅綠必須跟著值走。舊寫法把投信寫死紅、自營寫死綠，
+          // 於是「紅色的 -800（賣超）」與「綠色的 +500（買超）」會直接讀成相反的意思。
+          { label: "外陸資", value: formatShareLots(institutional.foreignNet), tone: metricToneFromNet(institutional.foreignNet) },
           // 官方 T86 的「三大法人合計」含外資自營商，但它不在外陸資／投信／自營三欄裡。
           // 少了這一格，畫面上四個數字永遠加不起來（實測差額正好等於外資自營商）。
-          { label: "外資自營", value: formatShareLots(institutional.foreignDealerNet), tone: "neutral" },
-          { label: "投信", value: formatShareLots(institutional.trustNet), tone: "high" },
-          { label: "自營", value: formatShareLots(institutional.dealerNet), tone: "low" },
-          { label: "合計", value: formatShareLots(institutional.totalNet), tone: "volume" },
-          { label: "狀態", value: institutionalStatus, tone: "total" },
+          { label: "外資自營", value: formatShareLots(institutional.foreignDealerNet), tone: metricToneFromNet(institutional.foreignDealerNet) },
+          { label: "投信", value: formatShareLots(institutional.trustNet), tone: metricToneFromNet(institutional.trustNet) },
+          { label: "自營", value: formatShareLots(institutional.dealerNet), tone: metricToneFromNet(institutional.dealerNet) },
+          { label: "合計", value: formatShareLots(institutional.totalNet), tone: metricToneFromNet(institutional.totalNet) },
+          // 「法人 2026-07-24」「法人更新失敗」是句子不是數字。載入失敗要比無資料顯眼，
+          // 所以走 warn 橘；其餘狀態走 na 灰。以前它吃 --violet（處置股色），錯訊息被染成處置色。
+          { label: "狀態", value: institutionalStatus, tone: institutionalState.error ? "warn" : "na" },
         ]
       : [
-          { label: "狀態", value: institutionalStatus, tone: "neutral" },
-          { label: "外資", value: "N/A", tone: "high" },
-          { label: "投信", value: "N/A", tone: "low" },
-          { label: "自營", value: "N/A", tone: "volume" },
-          { label: "來源", value: institutionalState.source || "TWSE/TPEx", tone: "total" },
+          // 沒有資料時舊寫法的顏色最花（紅／綠／黃／紫），真正的錯誤反而最不顯眼。
+          { label: "狀態", value: institutionalStatus, tone: institutionalState.error ? "warn" : "na" },
+          { label: "外資", value: "N/A", tone: "na" },
+          { label: "投信", value: "N/A", tone: "na" },
+          { label: "自營", value: "N/A", tone: "na" },
+          { label: "來源", value: institutionalState.source || "TWSE/TPEx", tone: "na" },
         ],
     // 切到基本面籤才 lazy 抓（其餘時候只讀既有快取，不觸發網路）。
     基本面: fundamentalsChips(
@@ -9461,8 +9501,8 @@ function renderDetail() {
     ),
   };
   document.getElementById("chartMetrics").innerHTML = (detailMetrics[state.detailTab] || detailMetrics["即時"])
-    .map((metric, index) => `
-      <span class="chart-metric is-${metric.tone || "neutral"} ${index === 4 ? movement : ""}">
+    .map((metric) => `
+      <span class="chart-metric is-${metric.tone || "neutral"}">
         <em>${glossMaybe(metric.label)}</em>
         <strong>${escapeHtml(metric.value)}</strong>
       </span>
@@ -9653,12 +9693,14 @@ function fundamentalsChips(entry) {
   const f = entry?.data;
   if (!f) {
     const status = entry?.loading ? "基本面載入中" : entry?.error ? "載入失敗" : "--";
+    // 沒有資料時全部走 na 灰；載入失敗要比「還沒抓到」顯眼，所以單獨走 warn 橘。
+    // 舊寫法在無資料時反而顏色最花（紅／綠／黃／紫），錯誤訊息完全不突出。
     return [
-      { label: "狀態", value: status, tone: "neutral" },
-      { label: "月營收", value: "N/A", tone: "high" },
-      { label: "EPS", value: "N/A", tone: "low" },
-      { label: "本益比", value: "N/A", tone: "volume" },
-      { label: "殖利率", value: "N/A", tone: "total" },
+      { label: "狀態", value: status, tone: entry?.error ? "warn" : "na" },
+      { label: "月營收", value: "N/A", tone: "na" },
+      { label: "EPS", value: "N/A", tone: "na" },
+      { label: "本益比", value: "N/A", tone: "na" },
+      { label: "殖利率", value: "N/A", tone: "na" },
     ];
   }
   const rev = f.revenue?.latest;
@@ -9666,10 +9708,15 @@ function fundamentalsChips(entry) {
   const val = f.valuation;
   return [
     { label: rev ? `${Number(rev.yearMonth.slice(5, 7))}月營收` : "月營收", value: rev ? formatRevenueYi(rev.revenue) : "--", tone: "neutral" },
-    { label: "營收YoY", value: Number.isFinite(rev?.yoy) ? formatSignedPercent(rev.yoy) : "--", tone: "high" },
-    { label: eps ? `EPS ${eps.period.slice(4)}` : "EPS", value: eps ? formatNumber(eps.eps) : "--", tone: "low" },
-    { label: "本益比", value: Number.isFinite(val?.pe) ? formatNumber(val.pe) : "--", tone: "volume" },
-    { label: "殖利率", value: Number.isFinite(val?.dividendYield) ? `${formatNumber(val.dividendYield)}%` : "--", tone: "total" },
+    // 營收 YoY 有正負，紅綠必須跟著值走。舊寫法寫死紅，於是「▼15.30%」是紅色的
+    // ——箭頭說衰退、顏色說成長，兩個編碼互相打臉。現在 ▲▼ 與色相永遠同向。
+    { label: "營收YoY", value: Number.isFinite(rev?.yoy) ? formatSignedPercent(rev.yoy) : "--", tone: metricToneFromNet(rev?.yoy) },
+    // EPS 是水準值，本身不上色；但虧損（負 EPS）是有方向的事實，值得標出來。
+    // 舊寫法寫死綠，賺錢與賠錢同色。
+    { label: eps ? `EPS ${eps.period.slice(4)}` : "EPS", value: eps ? formatNumber(eps.eps) : "--", tone: finiteNumberOrNull(eps?.eps) === null ? "na" : Number(eps.eps) < 0 ? "down" : "neutral" },
+    // 本益比與殖利率的「高低算好算壞」是主觀判斷，沒有可依據的門檻（也不得新增）→ 不上色。
+    { label: "本益比", value: Number.isFinite(val?.pe) ? formatNumber(val.pe) : "--", tone: Number.isFinite(val?.pe) ? "neutral" : "na" },
+    { label: "殖利率", value: Number.isFinite(val?.dividendYield) ? `${formatNumber(val.dividendYield)}%` : "--", tone: Number.isFinite(val?.dividendYield) ? "neutral" : "na" },
   ];
 }
 

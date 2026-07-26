@@ -26,8 +26,17 @@ test("detail header, quote facts and metric labels keep the enlarged readable sc
   assert.ok(fontPixels(".detail-top h2") >= 24);
   assert.ok(fontPixels(".detail-top p") >= 15);
   assert.ok(fontPixels(".price-hero span") >= 20);
-  assert.ok(fontPixels(".price-hero dt") >= 17);
-  assert.ok(fontPixels(".price-hero dd") >= 22);
+  // .price-hero dt / dd 隨那份重複的單量／總量欄一起移除——單量與總量在下方「即時」分頁
+  // 與「量價摘要」指標各印一次，hero 不必印第三次。字級下限改守 hero 的價格本體。
+  assert.ok(fontPixels(".price-hero strong") >= 40, "現價是面板上最重要的數字，不得縮到 40px 以下");
   assert.ok(fontPixels(".chart-metric em") >= 16);
   assert.ok(fontPixels(".chart-metric strong") >= 22);
+});
+
+// 2026-07-16 的 UI 整修訂了「字重上限 700」。這是整份面板唯一還留著 900 的地方。
+test("detail panel keeps the project-wide 700 font-weight ceiling", () => {
+  const overWeight = [...styles.matchAll(/\.(?:price-hero|chart-metric|detail-top)[^{]*\{[^}]*font-weight\s*:\s*(\d{3})/g)]
+    .filter((match) => Number(match[1]) > 700)
+    .map((match) => match[0].slice(0, 60));
+  assert.deepEqual(overWeight, [], `明細面板不得有字重 > 700：${overWeight.join(" / ")}`);
 });
