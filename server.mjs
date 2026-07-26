@@ -4650,10 +4650,13 @@ async function loadCorporateActionResultMonth(monthCompact) {
     const start = `${month}01`;
     const end = `${month}31`;
     try {
-      const payload = await fetchJsonWithRetry(
+      // 刻意不重試（fetchJsonWithRetry 的退避是 900ms）。這條來源是「讓還原更精確」的增益，
+      // 而且抓成功的過去月份會永久落盤、失敗的月份 5 分鐘後自然會再試。
+      // 在這裡重試等於讓上游一掛掉，每次驗證推進與掃描都先空睡好幾秒——
+      // 補齊 5 個月 × 900ms 就讓 swing-verify 整合測試在滿載時超時（2026-07-27 實際踩到）。
+      const payload = await fetchJson(
         `${CORPORATE_ACTION_RESULT_URL}?startDate=${start}&endDate=${end}&response=json`,
         { headers: { "user-agent": "Mozilla/5.0" } },
-        1,
       );
       // stat 不是 "OK" 時 data 可能不存在；空月份（真的沒有任何除權息）也是合法結果。
       const rows = Array.isArray(payload?.data) ? payload.data : [];
@@ -5056,10 +5059,33 @@ async function fetchStockHistoryMonth(code, exchange, monthCompact, name = "") {
   return task;
 }
 
+// Yahoo 自己回報的分割事件。這是「Yahoo 到底對這檔做了什麼調整」的權威來源——
+// 它的 indicators.quote 已經把台股配股當成分割還原過（實測 6944 回 1300:1000＝配股 30%），
+// 而我們要把官方座標系的還原因子換算到 Yahoo 座標系時，需要的正是「Yahoo 實際套了多少」，
+// 不是「真實的配股率」。用它比用本機歸檔的公告更準，也不需要歸檔剛好有那一筆。
+// 2026-07-27 實測：split 時間戳換算成台北日期正好等於除權息日；純現金個股（2002 中鋼）
+// 有 events 區塊但沒有 splits 鍵 → 代表「Yahoo 確認沒有做分割調整」，倍數應視為 1。
+function parseYahooSplitFactors(result) {
+  const events = result?.events;
+  if (!events) return null; // 整個 events 區塊都沒回 → 不能斷言 Yahoo 沒調整
+  const byDate = new Map();
+  for (const split of Object.values(events.splits || {})) {
+    const compact = toCompactDate(new Date(Number(split?.date) * 1000));
+    const numerator = parseNumber(split?.numerator);
+    const denominator = parseNumber(split?.denominator);
+    if (!isValidCompactCalendarDate(compact)) continue;
+    if (!Number.isFinite(numerator) || numerator <= 0) continue;
+    if (!Number.isFinite(denominator) || denominator <= 0) continue;
+    byDate.set(compact, numerator / denominator);
+  }
+  return byDate;
+}
+
 function normalizeYahooHistoryRows(payload, quote, maxDateCompact) {
   const result = payload?.chart?.result?.[0];
   const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
   const quoteBlock = result?.indicators?.quote?.[0] || {};
+  const splitFactors = parseYahooSplitFactors(result);
   const rows = [];
   for (let index = 0; index < timestamps.length; index += 1) {
     const date = new Date(Number(timestamps[index]) * 1000);
@@ -5086,6 +5112,9 @@ function normalizeYahooHistoryRows(payload, quote, maxDateCompact) {
       // （2026-07-26 實測），語意跟官方逐檔歷史不同，不可混用。
       exchangePreviousClose: null,
       exchangeCorporateActionMark: false,
+      // Yahoo 對這一天實際套用的分割倍數。有 events 區塊卻沒列這天＝Yahoo 沒調整（倍數 1）；
+      // 整個 events 區塊都沒回才是 null（未知），此時不可假設它沒調整。
+      yahooSplitFactor: splitFactors ? (splitFactors.get(compact) ?? 1) : null,
       change: null,
       volumeShares,
       volumeLots: volumeShares !== null ? Math.round(volumeShares / 1000) : null,
@@ -5106,7 +5135,10 @@ function normalizeYahooHistoryRows(payload, quote, maxDateCompact) {
 async function fetchYahooHistory(quote, dateCompact, range = "2y") {
   const suffix = quote.exchange === "TPEx" ? "TWO" : "TW";
   const symbol = `${quote.code}.${suffix}`;
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${encodeURIComponent(range)}&interval=1d`;
+  // events=div|split：要 Yahoo 一併回報它自己認定的分割與配息事件。分割倍數是把官方還原因子
+  // 換算到 Yahoo 座標系的必要輸入（見 parseYahooSplitFactors），少了它，有配股又不在本機
+  // 歸檔裡的股票會整檔被判 unresolved 而從板子上消失。
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${encodeURIComponent(range)}&interval=1d&events=div%7Csplit`;
   const payload = await fetchJson(url, {
     headers: {
       "user-agent": "Mozilla/5.0",
@@ -8577,9 +8609,17 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
     // 官方來源（計算結果表、公告公式）算出來的因子是「原始座標系」的，必須換算；
     // 由 Yahoo 自身資料推出來的跳空 heuristic 本來就在 Yahoo 座標系，換算會變成錯上加錯。
     const resultKind = rowDate && row?.code ? String(corporateActionResultFor(row.code, rowDate)?.kind || "") : "";
+    // 換算倍數的三個來源，依可信度排序：
+    //   1. Yahoo 自己回報的分割倍數——我們要的正是「Yahoo 實際套了多少」，這是定義上的答案。
+    //   2. 本機歸檔公告的 1＋配股率＋現增率——真實比率，通常等於 Yahoo 套的，但歸檔覆蓋率有限。
+    //   3. 官方計算結果表的 kind：純除息代表沒有配股，倍數必為 1。
+    // 三者都拿不到就回 null，寧可不調也不要把配股還原兩次。
+    const rowSplitFactor = Number(row?.yahooSplitFactor);
     const yahooShareFactor = !fromYahoo
       ? 1
-      : archiveShareFactor ?? ((resultKind && !resultKind.includes("權")) ? 1 : null);
+      : (Number.isFinite(rowSplitFactor) && rowSplitFactor > 0 ? rowSplitFactor : null)
+        ?? archiveShareFactor
+        ?? ((resultKind && !resultKind.includes("權")) ? 1 : null);
     // 官方公式要用「原始座標系的前收」去算，否則現金股利會被拿去跟已經除過配股的價格相減。
     const rawPriorClose = Number.isFinite(yahooShareFactor) && yahooShareFactor > 0
       ? priorClose * yahooShareFactor
@@ -9234,6 +9274,19 @@ function pruneSwingVerification(store, keepDays = 90) {
 
 // 看板掃描完成時記錄驗證單（同日去重、每場景最多 40 檔＝前端顯示上限）。
 // entry 一旦建立就不可回溯刪除——它是「當時真的出現過的建議」；公式改版用 formulaVersion 區分統計。
+// D-30：驗證單要記下「這筆訊號成立當時，這檔是怎麼撮合的」。
+// 處置期間是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的 high/low 只是幾十次撮合的極值，
+// 掛在停損／目標的單未必真的撮得到。判定規則刻意不動（改口徑要另外決策），
+// 但樣本裡必須留下這個事實，否則成績單分不出「連續競價下真的觸價」與「分盤下理論上碰到」。
+// 而且沒存這欄的話，使用者就算在「更多→風險規則」關掉處置股，成績單也過濾不掉它們。
+function swingVerificationFillModel(surveillance) {
+  if (!surveillance || surveillance.kind !== "disposition") return "continuous";
+  const interval = Number(surveillance.interval);
+  if (interval === 5) return "periodicCall5";
+  if (interval === 20) return "periodicCall20";
+  return "periodicCall"; // 確定是處置，但看板沒熱、拿不到分盤間隔
+}
+
 function recordSwingVerification(db, body) {
   const day = toCompactDate(body?.asOf);
   if (!day || !Array.isArray(body?.picks) || body.provisional || body.coverage?.complete === false) return;
@@ -9257,6 +9310,12 @@ function recordSwingVerification(db, body) {
     if (!Number.isFinite(plan.entry) || !Number.isFinite(plan.structuralStop) || !Number.isFinite(plan.target)) continue;
     seen.add(key);
     perScenario.set(scenarioVersion, (perScenario.get(scenarioVersion) || 0) + 1);
+    // 只留判定用得到的欄位，不整包塞進去：驗證單留 90 天，寫進去的東西就是不可回溯的歷史。
+    const surveillance = pick.surveillance ? {
+      kind: String(pick.surveillance.kind || ""),
+      label: String(pick.surveillance.label || ""),
+      interval: Number.isFinite(Number(pick.surveillance.interval)) ? Number(pick.surveillance.interval) : null,
+    } : null;
     list.push({
       code: pick.code,
       name: pick.name,
@@ -9267,6 +9326,8 @@ function recordSwingVerification(db, body) {
       rr: plan.rr ?? null,
       score: pick.score ?? null,
       formulaVersion: bodyVersion,
+      surveillance,
+      fillModel: swingVerificationFillModel(surveillance),
       status: "pending", // pending | win | loss | expired
       resolvedAt: null,
       resultPct: null,
@@ -9550,8 +9611,15 @@ async function buildSwingVerificationSummary() {
         scenario: entry.scenario,
         samples: 0, wins: 0, losses: 0, expired: 0, pending: 0, stalled: 0,
         resolved: 0, sumResultPct: 0, sumDaysHeld: 0,
+        periodicCallSamples: 0, periodicCallResolved: 0,
       };
       s.samples += 1;
+      // D-30：分盤撮合的樣本照舊計入勝率（改口徑要另外決策），但必須數得出來。
+      // 舊紀錄沒有 fillModel 欄位 → 當成 continuous，不追溯改寫歷史樣本。
+      if (entry.fillModel && entry.fillModel !== "continuous") {
+        s.periodicCallSamples += 1;
+        if (entry.status !== "pending") s.periodicCallResolved += 1;
+      }
       if (entry.status === "pending") {
         s.pending += 1;
         if (isStalledVerificationEntry(entry, summaryToday)) s.stalled += 1;
@@ -9582,6 +9650,9 @@ async function buildSwingVerificationSummary() {
     avgResultPct: s.resolved ? Math.round((s.sumResultPct / s.resolved) * 100) / 100 : null,
     avgResultPctNet: s.resolved ? netReturnPct(s.sumResultPct / s.resolved) : null,
     avgDaysHeld: s.resolved ? Math.round((s.sumDaysHeld / s.resolved) * 10) / 10 : null,
+    // 分盤撮合（處置期間）的樣本數：仍計入上面的勝率，但要能單獨看見。
+    periodicCallSamples: s.periodicCallSamples,
+    periodicCallResolved: s.periodicCallResolved,
   }));
   all.sort((a, b) => String(b.resolvedAt || b.day).localeCompare(String(a.resolvedAt || a.day)));
   const body = {
@@ -9595,11 +9666,14 @@ async function buildSwingVerificationSummary() {
     dataGapCount: all.filter((entry) => entry.status === "pending" && entry.dataGap).length,
     // 卡住＝資料缺口久到不可能再自行結案；它們永遠不會進 resolved 分母，必須讓使用者看得到。
     stalledCount: all.filter((entry) => isStalledVerificationEntry(entry, summaryToday)).length,
+    // D-30：處置期間是分盤集合競價，觸價判定的前提（連續競價）在這些樣本上並不成立。
+    periodicCallCount: all.filter((entry) => entry.fillModel && entry.fillModel !== "continuous").length,
     notes: [
       "驗證規則：進場＝訊號日收盤，之後每個交易日用官方日K高低價判定「先碰目標＝達標、先碰停損（結構停損）＝停損」；同一天兩邊都碰到，保守記停損。",
       `${SWING_VERIFY_MAX_DAYS} 個實際交易日內都沒碰到 → 以第 ${SWING_VERIFY_MAX_DAYS} 日收盤結案（超時）。漏開 App 會用官方日K依日期補判；若中間日K缺漏就停在缺口前並排除結案統計。`,
       `勝率需累積 ${WIN_RATE_MIN_SAMPLES} 筆結案才顯示：分母只含已結案，而達標／停損常 1~3 天就結案、超時要等第 ${SWING_VERIFY_MAX_DAYS} 個交易日，初期分母偏向快速觸價的極端樣本。同一天選出的標的也高度共享大盤走勢，有效樣本數遠小於檔數。`,
       `因官方日 K 缺漏而停在缺口前超過 ${SWING_VERIFY_STALLED_DAYS} 天的驗證單會標為「卡住」：它們不會自行結案，也永遠不會進入勝率分母，因此分母會比實際發出的訊號數少。`,
+      "處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到。這些樣本仍計入上面的勝率，但會單獨標示筆數；2026-07-27 之前建立的驗證單沒有記錄撮合方式，一律當成連續競價。",
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
@@ -9692,7 +9766,14 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
       .forEach((pick, index) => picks.push({ ...pick, rank: index + 1 }));
   }
   // 注意/處置/變更交易股保留並標示（前端可切換隱藏）。
-  for (const pick of picks) pick.surveillance = riskSets.surveillance.get(pick.code) || null;
+  // 另外把處置看板知道的分盤間隔補進來（riskSets 只有 kind/label）——驗證單要靠它記錄
+  // 當時的撮合方式（D-30）。看板沒熱時拿不到間隔，那就只知道「處置中」而不知道是幾分盤。
+  for (const pick of picks) {
+    const info = riskSets.surveillance.get(pick.code) || null;
+    if (!info) { pick.surveillance = null; continue; }
+    const interval = lookupStockSurveillance(pick.code, surveillanceBoardCache.value)?.interval ?? null;
+    pick.surveillance = interval ? { ...info, interval } : info;
+  }
 
   // 各場景命中數：同一次掃描已對每檔跑過所有場景偵測，兩個分頁的數字都來自這一份、保證一致。
   const scenarioCounts = {};
@@ -11819,6 +11900,7 @@ export {
   emaSeries, movingAverageSeries, computeMacd, findSwingPoints, buildTrendLine,
   buildFibonacci, buildTechnicalSignals, averageTrueRange, buildTechnicalAnalysis,
   buildAdjustedPeriodRows, resolveCorporateActionAdjustments,
+  parseYahooSplitFactors, normalizeYahooHistoryRows,
   // 隔日沖／波段評分
   buildPick, buildRiskTags, buildReasons, corporateActionGapRatio, officialCorporateActionRatio,
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,
@@ -11826,7 +11908,7 @@ export {
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,
   scanSwingBoard, inspectSwingStock,
   // 波段前向驗證
-  recordSwingVerification, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,
+  recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,
   buildSwingVerificationSummary, pruneSwingVerification,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,

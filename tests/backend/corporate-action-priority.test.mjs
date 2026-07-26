@@ -168,6 +168,105 @@ test("Yahoo＋配股但查不到配股倍數 → 寧可不調，並標未定案"
   assert.deepEqual(adj.unresolvedIndices, [1]);
 });
 
+// 直接抄 2026-07-27 的真實 Yahoo payload 形狀（6944 兆聯實業，配股 30%）。
+// 這兩天連續三個 bug 都源於「離線 fixture 比現實乾淨」，所以這裡刻意保留官方原樣：
+// splits 以「時間戳字串」為鍵、值裡另有 date 欄位，numerator/denominator 是數字不是字串。
+test("D-48：解析真實 Yahoo splits payload——時間戳換算台北日期、倍數＝分子÷分母", () => {
+  const result = {
+    events: {
+      dividends: { 1784768400: { amount: 17, date: 1784768400 } },
+      splits: { 1784768400: { date: 1784768400, numerator: 1300, denominator: 1000, splitRatio: "1300:1000" } },
+    },
+  };
+  const factors = mod.parseYahooSplitFactors(result);
+  assert.ok(factors instanceof Map);
+  // 1784768400 → 2026-07-23T01:00:00Z → 台北 2026/07/23，正是官方除權息日
+  assert.equal(factors.get("20260723"), 1.3);
+  assert.equal(factors.size, 1);
+});
+
+test("D-48：有 events 但沒有 splits 鍵＝Yahoo 確認沒做分割（純現金個股的實際形狀）", () => {
+  // 2002 中鋼實際回傳：events 只有 dividends、完全沒有 splits 鍵。
+  const factors = mod.parseYahooSplitFactors({ events: { dividends: { 1784854800: { amount: 0.15, date: 1784854800 } } } });
+  assert.ok(factors instanceof Map, "要回空 Map 而不是 null——這代表『查過了，沒有分割』");
+  assert.equal(factors.size, 0);
+});
+
+test("D-48：整個 events 區塊沒回時必須回 null（未知，不可當成沒有分割）", () => {
+  assert.equal(mod.parseYahooSplitFactors({}), null);
+  assert.equal(mod.parseYahooSplitFactors(null), null);
+});
+
+test("D-48：畸形的 split 欄位一律跳過，不得算出 0、負數或 Infinity 倍數", () => {
+  const factors = mod.parseYahooSplitFactors({
+    events: {
+      splits: {
+        a: { date: 1784768400, numerator: 1300, denominator: 0 },      // 除以 0
+        b: { date: 1784768400, numerator: 0, denominator: 1000 },      // 倍數 0
+        c: { date: 1784768400, numerator: -2, denominator: 1 },        // 負數
+        d: { date: "壞掉", numerator: 1300, denominator: 1000 },        // 日期無效
+        e: { date: 1784768400, numerator: 1100, denominator: 1000 },   // 唯一合法的一筆
+      },
+    },
+  });
+  assert.equal(factors.size, 1);
+  assert.ok(Math.abs(factors.get("20260723") - 1.1) < 1e-12);
+});
+
+// D-48：換算倍數應優先用 Yahoo 自己回報的分割事件。舊做法只認本機歸檔的公告，
+// 於是「有配股 ＋ 歸檔沒有這筆」的股票會被判 unresolved 而整檔消失（實例 8112 至上）。
+// 我們要的本來就是「Yahoo 實際套了多少」，它自己回報的就是定義上的答案。
+test("D-48：Yahoo 回報的分割倍數優先於本機歸檔，歸檔沒有也算得出來", () => {
+  // 原始：前收 100、現金 2、配股 10% → 參考價 89.0909，原始座標因子 0.890909
+  // Yahoo 事件前收盤 = 100/1.1 = 90.9091，正確的 Yahoo 座標因子 = (100-2)/100 = 0.98
+  const rows = [
+    { ...yahooBar("2026/06/09", "4444", 100 / 1.1), yahooSplitFactor: 1 },
+    { ...yahooBar("2026/06/10", "4444", 89.090909), yahooSplitFactor: 1.1 },
+  ];
+  // 刻意不給任何歸檔公告——這正是舊做法會卡住的情境。
+  const adj = mod.resolveCorporateActionAdjustments(rows, [], { allowHeuristicFallback: true });
+  assert.ok(adj.get(1), "歸檔沒有這筆時，仍應靠 Yahoo 自己的分割倍數算出來");
+  assert.ok(Math.abs(adj.get(1).ratio - 0.98) < 1e-6, `應為 0.98，實際 ${adj.get(1).ratio}`);
+  assert.deepEqual(adj.unresolvedIndices, [], "算得出來就不該標未定案");
+});
+
+test("D-48：Yahoo 說這天沒有分割（倍數 1）時，官方因子原樣採用", () => {
+  // 3333 在計算結果表裡是純除息（參考價 95 ÷ 前收 100），Yahoo 不會做分割調整。
+  const rows = [
+    { ...yahooBar("2026/06/09", "3333", 100), yahooSplitFactor: 1 },
+    { ...yahooBar("2026/06/10", "3333", 95), yahooSplitFactor: 1 },
+  ];
+  const adj = mod.resolveCorporateActionAdjustments(rows, [], { allowHeuristicFallback: true });
+  assert.ok(Math.abs(adj.get(1).ratio - 0.95) < 1e-12);
+});
+
+test("D-48：Yahoo 沒回 events 區塊時不得假設它沒調整，仍退回既有判斷", () => {
+  // yahooSplitFactor 為 null＝未知。5555 在結果表是除權息、歸檔也沒有 → 只能標未定案。
+  const rows = [
+    { ...yahooBar("2026/06/09", "5555", 90.9091), yahooSplitFactor: null },
+    { ...yahooBar("2026/06/10", "5555", 89.090909), yahooSplitFactor: null },
+  ];
+  const adj = mod.resolveCorporateActionAdjustments(rows, [], { allowHeuristicFallback: true });
+  assert.equal(adj.get(1), undefined, "未知倍數時寧可不調");
+  assert.deepEqual(adj.unresolvedIndices, [1]);
+});
+
+test("D-48：Yahoo 分割倍數與歸檔公告不一致時，以 Yahoo 為準", () => {
+  // 歸檔說配股 10%（倍數 1.1），但 Yahoo 實際只套了 1.05。
+  // 要換算到 Yahoo 座標系，用的必須是 Yahoo 實際套的那個數字。
+  const rows = [
+    { ...yahooBar("2026/06/09", "4444", 95.2381), yahooSplitFactor: 1 },
+    { ...yahooBar("2026/06/10", "4444", 89.090909), yahooSplitFactor: 1.05 },
+  ];
+  const action = {
+    exDate: "20260610", kind: "權息", cashDividend: 2, stockRatio: 0.1,
+    subscriptionRatio: 0, subscriptionPrice: 0, formulaComplete: true, status: "active",
+  };
+  const adj = mod.resolveCorporateActionAdjustments(rows, [action], { allowHeuristicFallback: true });
+  // 結果表因子 89.090909/100 = 0.890909；× Yahoo 的 1.05 = 0.935455
+  assert.ok(Math.abs(adj.get(1).ratio - 0.890909 * 1.05) < 1e-5, `實際 ${adj.get(1).ratio}`);
+});
+
 test("Yahoo 的跳空估算還原不得再換算（它本來就在 Yahoo 座標系）", () => {
   // 沒有任何官方事件，只有一根 -20% 跳空。heuristic 是直接從 Yahoo 自己的兩根算出來的。
   const rows = [yahooBar("2026/06/09", "8888", 100), yahooBar("2026/06/10", "8888", 80), yahooBar("2026/06/11", "8888", 80)];

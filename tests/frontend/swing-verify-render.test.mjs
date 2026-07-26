@@ -89,3 +89,42 @@ test("沒資料 → 隱藏；非策略頁不重繪", () => {
   `);
   assert.equal(app.evalIn(`el.swingVerify.dataset.marker`), "untouched", "非策略頁提前 return");
 });
+
+// D-30：處置期間是分盤集合競價，日 K 的高低價只是幾十次撮合的極值，
+// 掛在停損／目標的單未必真的撮得到。這些樣本仍計入勝率，但筆數必須看得見——
+// 否則使用者關掉處置股之後，成績單裡還混著它們卻毫無跡象。
+test("分盤撮合樣本數要顯示在摘要行，沒有時不留贅字", () => {
+  app.evalIn(`
+    state.screen = "strategy";
+    swingVerifyState.data = { ...${JSON.stringify(sample)}, periodicCallCount: 3 };
+    renderSwingVerifyPanel();
+  `);
+  const withCount = app.evalIn(`el.swingVerify.querySelector('small').textContent`);
+  assert.match(withCount, /3 筆分盤撮合/, `實際：${withCount}`);
+
+  app.evalIn(`
+    swingVerifyState.data = { ...${JSON.stringify(sample)}, periodicCallCount: 0 };
+    renderSwingVerifyPanel();
+  `);
+  const without = app.evalIn(`el.swingVerify.querySelector('small').textContent`);
+  assert.doesNotMatch(without, /分盤撮合/, "沒有分盤樣本時不該留下空欄位");
+
+  // 舊 payload 完全沒有這個欄位時也不得炸掉或印出 undefined
+  app.evalIn(`
+    swingVerifyState.data = ${JSON.stringify(sample)};
+    renderSwingVerifyPanel();
+  `);
+  const legacy = app.evalIn(`el.swingVerify.querySelector('small').textContent`);
+  assert.doesNotMatch(legacy, /undefined|NaN/, `實際：${legacy}`);
+});
+
+test("摘要行的 tooltip 要說明分盤撮合為什麼會讓觸價判定失真", () => {
+  app.evalIn(`
+    state.screen = "strategy";
+    swingVerifyState.data = { ...${JSON.stringify(sample)}, periodicCallCount: 2 };
+    renderSwingVerifyPanel();
+  `);
+  const title = app.evalIn(`el.swingVerify.querySelector('small').getAttribute('title')`);
+  assert.match(title, /分盤集合競價/);
+  assert.match(title, /未必真的撮得到/, "要講清楚後果，不能只丟名詞");
+});
