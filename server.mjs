@@ -2939,6 +2939,37 @@ function isOrdinaryStock(quote) {
   return !excluded.some((token) => name.includes(token));
 }
 
+// 整批收盤檔在除權息日把「漲跌」欄設成 "0.0000"——那是一個**可以正常解析的零**，不是遮罩。
+// 於是 previousClose 被算成「今天的收盤」、漲跌變成 0.00%，看起來就像一個正常的平盤日。
+// 2026-07-27 實測 07/24 除息的六檔：畫面全部顯示 0.00%／中性灰，實際相對官方參考價
+// 是 +1.06%（中鋼）到 -2.68%（榮星）。台股慣例是除權息日的漲跌以**除權息參考價**為基準
+// （交易所與券商都這樣報），所以 0.00% 不只是不精確，是錯的。
+// 連帶影響：preselectQuotes 的 momentumValue = |changePct| × log10(量) 變成 0 → 排序墊底
+// → 除權息當天的股票實質上進不了隔日沖候選池。
+//
+// 這與專案早就記錄過的「MIS 的 0.0000 是無成交哨兵」是同一類陷阱，只是沒人檢查過這個欄位。
+//
+// **一定要靠官方事件表判斷，不能看到 0 就當事件**：真正的平盤日同樣回 "0.0000"。
+// 查不到官方參考價時維持原值（並由掃描端的降級揭露負責告知）。
+function applyCorporateActionQuoteBaseline(quote) {
+  if (!quote || quote.change !== 0) return quote;
+  const price = Number(quote.price);
+  if (!Number.isFinite(price) || price <= 0) return quote;
+  const item = corporateActionResultFor(quote.code, quote.rawDate || quote.asOf);
+  if (!item) return quote;
+  const previousClose = item.referencePrice;
+  if (!Number.isFinite(previousClose) || previousClose <= 0) return quote;
+  const change = price - previousClose;
+  return {
+    ...quote,
+    previousClose,
+    change,
+    changePct: (change / previousClose) * 100,
+    // 讓下游（UI／揭露）知道這個漲跌是相對除權息參考價算的，不是相對前一日收盤。
+    corporateActionBaseline: true,
+  };
+}
+
 function normalizeDailyTwse(row) {
   const close = parsePositivePrice(row.ClosingPrice);
   const change = parseNumber(row.Change);
@@ -4843,7 +4874,8 @@ function parseReferenceSnapshot(marketKey, rows, previous) {
   if (!Array.isArray(rows) || !rows.length) throw new Error(`${source.label}整批收盤回傳空資料`);
   const byCode = new Map();
   for (const row of rows) {
-    const quote = source.normalize(row);
+    // 除權息日的漲跌欄是可解析的 "0.0000"，要用官方參考價校正基準（見 applyCorporateActionQuoteBaseline）。
+    const quote = applyCorporateActionQuoteBaseline(source.normalize(row));
     if (quote.code && Number.isFinite(quote.price)) byCode.set(quote.code, quote);
   }
   if (!byCode.size) throw new Error(`${source.label}整批收盤沒有有效代號與價格`);
@@ -11898,7 +11930,7 @@ export {
   cleanCode, parseNumber, parsePercentNumber, unique, average, pct,
   // 行情正規化（quote-normalizers.test）
   normalizeDailyTwse, normalizeDailyTpex, normalizeMisQuote, normalizeFubonQuote,
-  normalizeTaiexIndex, normalizeTxFuture, normalizeTaifexMisTx, taifexContractMonthLabel,
+  normalizeTaiexIndex, normalizeTxFuture, applyCorporateActionQuoteBaseline, normalizeTaifexMisTx, taifexContractMonthLabel,
   computeTurnoverPct, isOrdinaryStock, resolveIndustryName, normalizeWatchListsPayload,
   getReferenceData, getQuotes, fetchMisQuotes,
   // 市場摘要（market-summary.test）
