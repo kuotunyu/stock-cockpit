@@ -400,6 +400,9 @@
         </div>
         <section class="chart-box">
           <div class="chart-metrics" id="chartMetrics"></div>
+          <!-- 狀態／來源／單位是句子不是數字，塞進 111px 的數字格必然截字（實測「基本面載入中」溢出 21px），
+               而且第 6 格會讓 6 欄格線長出只填 1/3 的孤行。移到格線下方講一次。 -->
+          <p class="chart-metrics-note" id="chartMetricsNote" hidden></p>
           <div class="detail-chart-wrap">
             <button class="detail-zoom-btn" id="detailZoomOpen" type="button" aria-haspopup="dialog" aria-controls="technicalZoomModal" title="放大：看每根 K 棒、縮放平移、畫趨勢線（內附操作說明）">
               <i data-lucide="maximize-2"></i>

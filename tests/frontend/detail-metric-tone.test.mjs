@@ -36,6 +36,7 @@ const renderTab = (tab, over = {}) => JSON.parse(app.evalIn(`JSON.stringify((() 
   return [...document.querySelectorAll("#chartMetrics .chart-metric")].map((cell) => ({
     label: cell.querySelector("em").textContent.trim(),
     value: cell.querySelector("strong").textContent.trim(),
+    flag: (cell.querySelector(".cm-flag") || { textContent: "" }).textContent.trim(),
     cls: cell.className,
   }));
 })())`));
@@ -85,7 +86,93 @@ test("法人無資料時全部走灰，不得有任何紅綠", () => {
   for (const cell of cells) {
     assert.doesNotMatch(cell.cls, /\bis-up\b|\bis-down\b/, `${cell.label} 在沒有資料時不該上紅綠`);
   }
-  assert.match(cellFor(cells, "外資").cls, /\bis-na\b/);
+  assert.match(cellFor(cells, "外陸資").cls, /\bis-na\b/);
+});
+
+// 6 欄格線是 span2×3 ＋ span3×2＝剛好 5 格；第 6 格會長出只填 1/3 的孤行。
+test("每個分頁都是 5 格，狀態與來源不佔數字格", () => {
+  const withData = renderTab("法人", {
+    institutional: { asOf: "2026-07-24", foreignNet: 1, foreignDealerNet: 1, trustNet: 1, dealerNet: 1, totalNet: 1 },
+  });
+  assert.equal(withData.length, 5, "以前是 6 格（含狀態），第 6 格會產生孤行");
+  assert.equal(withData.some((c) => c.label === "狀態"), false);
+
+  const without = renderTab("法人", { institutional: null });
+  assert.equal(without.length, 5);
+  // 兩條分支的 label 要一致，否則切換時格子會跳。
+  assert.deepEqual(without.map((c) => c.label), withData.map((c) => c.label));
+
+  assert.equal(renderTab("即時").length, 5);
+  assert.equal(renderTab("均線").length, 5);
+});
+
+test("狀態與單位改由格線下方的註腳承擔（句子不塞進數字格）", () => {
+  const note = JSON.parse(app.evalIn(`JSON.stringify((() => {
+    const stock = ${JSON.stringify({ ...BASE_STOCK, institutional: { asOf: "2026-07-24", foreignNet: 1, foreignDealerNet: 1, trustNet: 1, dealerNet: 1, totalNet: 1 } })};
+    stocks.length = 0; stocks.push(stock);
+    state.selectedCode = stock.code;
+    state.detailTab = "法人";
+    renderDetail();
+    const el = document.getElementById("chartMetricsNote");
+    return { text: el.textContent, hidden: el.hidden, cls: el.className };
+  })())`));
+  assert.equal(note.hidden, false, "法人分頁要顯示註腳");
+  assert.match(note.text, /2026-07-24/, "資料日期要講出來");
+  assert.match(note.text, /張/, "買賣超的單位講一次就好，不必每格都印");
+});
+
+test("即時分頁沒有要說的話時，註腳必須隱藏（天天亮的提示等於沒有提示）", () => {
+  const note = JSON.parse(app.evalIn(`JSON.stringify((() => {
+    const stock = ${JSON.stringify(BASE_STOCK)};
+    stocks.length = 0; stocks.push(stock);
+    state.selectedCode = stock.code;
+    state.detailTab = "即時";
+    renderDetail();
+    const el = document.getElementById("chartMetricsNote");
+    return { text: el.textContent, hidden: el.hidden };
+  })())`));
+  assert.equal(note.hidden, true);
+  assert.equal(note.text, "");
+});
+
+// ---- 收盤位置與均線方向的徽章：紅綠色盲下的第二編碼 ----
+
+test("收在當日最低要標出來（最弱的形態，以前只是兩個不相關的並列數字）", () => {
+  const atLow = renderTab("即時", { price: 3750, open: 3805, high: 4010, low: 3750, priceStale: false });
+  assert.equal(cellFor(atLow, "低").flag, "收最低");
+  assert.equal(cellFor(atLow, "高").flag, "", "沒有收在最高就不該標");
+
+  const atHigh = renderTab("即時", { price: 4010, open: 3805, high: 4010, low: 3750, priceStale: false });
+  assert.equal(cellFor(atHigh, "高").flag, "收最高");
+  assert.equal(cellFor(atHigh, "低").flag, "");
+
+  const middle = renderTab("即時", { price: 3900, open: 3805, high: 4010, low: 3750, priceStale: false });
+  assert.equal(cellFor(middle, "高").flag, "");
+  assert.equal(cellFor(middle, "低").flag, "");
+});
+
+test("一價到底與非即時報價都不得標收盤位置", () => {
+  // 高＝低（漲停鎖死／一價到底）→ 收盤位置無定義，兩個徽章都不能出。
+  const locked = renderTab("即時", { price: 100, open: 100, high: 100, low: 100, priceStale: false });
+  assert.equal(cellFor(locked, "高").flag, "");
+  assert.equal(cellFor(locked, "低").flag, "");
+  // priceStale＝price 是退回的官方收盤價，不是這一天的成交，不可宣稱收在哪裡。
+  const stale = renderTab("即時", { price: 3750, open: 3805, high: 4010, low: 3750, priceStale: true });
+  assert.equal(cellFor(stale, "低").flag, "");
+});
+
+test("均線要有文字方向：紅綠色盲下那格的顏色是唯一編碼", () => {
+  const above = renderTab("均線", { price: 100, spark: [98, 99, 100, 100, 100] });
+  assert.equal(cellFor(above, "均").flag, "價在上");
+  const below = renderTab("均線", { price: 96, spark: [100, 100, 100, 100, 96] });
+  assert.equal(cellFor(below, "均").flag, "價在下");
+});
+
+test("徽章用外框而非色相（色盲可讀）", () => {
+  const styles = readFileSync(new URL("../../styles.css", import.meta.url), "utf8");
+  const rule = styles.match(/\.chart-metric \.cm-flag\s*\{([^}]*)\}/);
+  assert.ok(rule, "缺少 .cm-flag 規則");
+  assert.match(rule[1], /border:\s*1px solid currentColor/, "用外框，不靠色相區分");
 });
 
 // ---- 即時／均線：水準值不上色 ----
@@ -143,20 +230,29 @@ test("EPS 是水準值不上色，但虧損要標出來", () => {
   assert.equal(chipFor(loss, "EPS").tone, "down", "虧損是有方向的事實，以前與獲利同色");
 });
 
-test("基本面載入失敗要比「還沒抓到」顯眼", () => {
+test("基本面無資料時五格全灰，狀態改由註腳承擔", () => {
   const failed = chips({ error: "boom" });
-  assert.equal(chipFor(failed, "狀態").tone, "warn");
-  const loading = chips({ loading: true });
-  assert.equal(chipFor(loading, "狀態").tone, "na");
-  // 無資料的四格一律灰，不得是紅／綠／黃／紫。
-  for (const label of ["月營收", "EPS", "本益比", "殖利率"]) {
-    assert.equal(chipFor(failed, label).tone, "na");
+  for (const label of ["月營收", "營收YoY", "EPS", "本益比", "殖利率"]) {
+    assert.equal(chipFor(failed, label).tone, "na", `${label} 沒資料時不得上色`);
   }
+  // 「狀態」不再佔數字格——它是句子，會截字，也會讓 5 格變 6 格長出孤行。
+  assert.equal(failed.length, 5);
+  assert.equal(failed.some((c) => c.label === "狀態"), false);
 });
 
-test("無資料分支的第一格仍是「狀態」（既有測試靠這個位置）", () => {
-  assert.equal(chips({ loading: true })[0].label, "狀態");
-  assert.equal(chips({ loading: true }).length, 5);
+test("無資料分支的 label 要與有資料分支一一對應（切分頁時格子不能跳）", () => {
+  const withData = chips({ data: {
+    revenue: { latest: { yearMonth: "2026-06", revenue: 1, yoy: 1 } },
+    eps: { latest: { period: "2026Q1", eps: 1 } },
+    valuation: { pe: 1, dividendYield: 1 },
+  } });
+  const without = chips({ loading: true });
+  assert.equal(withData.length, without.length);
+  // 月營收與 EPS 的 label 會帶期別（「6月營收」「EPS Q1」），所以比對「有沒有這個概念」。
+  assert.deepEqual(
+    without.map((c) => c.label),
+    ["月營收", "營收YoY", "EPS", "本益比", "殖利率"],
+  );
 });
 
 // ---- 不可回頭的結構性保證 ----

@@ -9389,10 +9389,20 @@ function renderDetail() {
   const exchangeLabel = formatExchangeLabel(stock.exchange);
   const sourceKindLabel = quoteContext.label;
   const tagsEl = document.getElementById("detailTags");
+  // 「最後成交 07/24」已經是判讀過的結論，後面再接一次完整時戳「2026/07/24 13:30:00」
+  // 等於同一個日期講兩次，格式還不一致，而且在 430px 的欄寬剛好把副標擠成兩行。
+  // 結論已含那個日期時只補時間；沒含時保留原樣。完整時戳移到 title。
+  const asOfText = String(stock.asOf || "");
+  const asOfDateMatch = asOfText.match(/(\d{4})\/(\d{2})\/(\d{2})/);
+  const asOfMonthDay = asOfDateMatch ? `${asOfDateMatch[2]}/${asOfDateMatch[3]}` : "";
+  const asOfTime = (asOfText.match(/\d{2}:\d{2}/) || [""])[0];
+  const asOfLabel = asOfMonthDay && sourceKindLabel.includes(asOfMonthDay) ? asOfTime : asOfText;
   tagsEl.textContent = stock.official
-    ? [exchangeLabel, sourceKindLabel, stock.asOf || "", getDetailScreenContext(stock)].filter(Boolean).join(" ・ ")
+    ? [exchangeLabel, sourceKindLabel, asOfLabel, getDetailScreenContext(stock)].filter(Boolean).join(" ・ ")
     : `${formatStrategyLabel(stock.strategies[0])} ・ ${stock.groups.includes("overnight") ? "隔日沖訊號" : "盤中觀察"} ・ 本機推估`;
-  tagsEl.title = stock.official ? `資料來源：${stock.source || "官方"}` : "";
+  tagsEl.title = stock.official
+    ? `資料來源：${stock.source || "官方"}${asOfText ? ` / ${asOfText}` : ""}`
+    : "";
   document.getElementById("detailPrice").textContent = formatQuotePrice(stock.price);
   document.getElementById("detailChange").textContent = noLive
     ? `收盤 ${stock.priceChange !== undefined && stock.priceChange !== null ? `${formatSignedPrice(stock.priceChange)} ` : ""}(${formatSignedPercent(stock.change)})`
@@ -9450,13 +9460,30 @@ function renderDetail() {
   const maDiffTone = (maValue) => (
     priceNum === null || finiteNumberOrNull(maValue) === null ? "na" : metricToneFromNet(priceNum - maValue)
   );
+  // 紅綠色盲下 MA 那兩格的顏色是**唯一**的編碼（法人有 +/-、營收 YoY 有 ▲▼，均線什麼都沒有），
+  // 所以再給一個文字編碼。用詞與同一面板往下 200px 的「技術均線」指標一致。
+  const maFlag = (tone) => (tone === "up" ? "價在上" : tone === "down" ? "價在下" : "");
+  // 收盤位置：收在當日最低＝最弱的形態，收在最高＝最強。三個數字本來都在畫面上，
+  // 只是被當成不相關的並列數字，從來沒有人把它們關聯起來。
+  // 這裡只比對已有的值、不新增任何計算或門檻，所以徽章永遠不會和畫面上的數字矛盾。
+  const dayHighNum = finiteNumberOrNull(stock.high ?? Math.max(...spark));
+  const dayLowNum = finiteNumberOrNull(stock.low ?? Math.min(...spark));
+  // 高＝低（一價到底／漲停鎖死／spark 只有一點）時收盤位置無定義；
+  // noLive 時 price 是退回的官方收盤價、不是這一天的成交，兩種情形都不標。
+  const canFlagPosition = dayHighNum !== null && dayLowNum !== null
+    && dayHighNum > dayLowNum && priceNum !== null && !noLive;
+  const atDayHigh = canFlagPosition && Math.abs(priceNum - dayHighNum) < 1e-9;
+  const atDayLow = canFlagPosition && Math.abs(priceNum - dayLowNum) < 1e-9;
+  // 「張」在五個格子裡各印一次，還把最長的字串塞進最窄的格子（實測 +1,200 張 溢出 3px）。
+  // 單位改由註腳講一次。formatShareLots 本身不動——formatters.test.mjs 直接驗它。
+  const netLots = (value) => String(formatShareLots(value)).replace(/\s*張$/, "");
   const detailMetrics = {
     即時: [
       // 開高低都是「水準值」，沒有正負可言 → 不上色，語意由 label 承擔。
       // 舊寫法把「高」寫死紅、「低」寫死綠，在下跌 3.23% 的日子裡紅色的最高價會被讀成利多。
       { label: "開", value: formatNumber(stock.open ?? spark[0]), tone: "neutral" },
-      { label: "高", value: formatNumber(stock.high ?? Math.max(...spark)), tone: "neutral" },
-      { label: "低", value: formatNumber(stock.low ?? Math.min(...spark)), tone: "neutral" },
+      { label: "高", value: formatNumber(stock.high ?? Math.max(...spark)), tone: "neutral", flag: atDayHigh ? "收最高" : "" },
+      { label: "低", value: formatNumber(stock.low ?? Math.min(...spark)), tone: "neutral", flag: atDayLow ? "收最低" : "" },
       // 成交量是水準值；而且 --yellow 是注意股專用色、--violet 是處置股專用色，
       // 明細面板不該佔用風險標示的色彩語彙。
       { label: "單量", value: formatOptionalNumber(stock.unit), tone: "neutral" },
@@ -9464,8 +9491,8 @@ function renderDetail() {
     ],
     均線: [
       { label: "昨收", value: formatNumber(stock.previousClose ?? spark[0]), tone: "neutral" },
-      { label: maTabIsDaily ? "MA5" : "盤中均", value: formatNumber(ma5), tone: maDiffTone(ma5) },
-      { label: maTabIsDaily && maLongLength >= 20 ? "MA20" : `${maLongLength}筆均`, value: formatNumber(maLong), tone: maDiffTone(maLong) },
+      { label: maTabIsDaily ? "MA5" : "盤中均", value: formatNumber(ma5), tone: maDiffTone(ma5), flag: maFlag(maDiffTone(ma5)) },
+      { label: maTabIsDaily && maLongLength >= 20 ? "MA20" : `${maLongLength}筆均`, value: formatNumber(maLong), tone: maDiffTone(maLong), flag: maFlag(maDiffTone(maLong)) },
       // 量比與週轉率的「高低算好算壞」沒有既定門檻，強度判斷留在下方「量價摘要」（那裡已有門檻與說明）。
       { label: "量比5", value: stock.avgVol ? formatNumber(stock.avgVol) : "--", tone: stock.avgVol ? "neutral" : "na" },
       { label: "週轉", value: stock.turnover ? `${formatNumber(stock.turnover)}%` : "--", tone: stock.turnover ? "neutral" : "na" },
@@ -9474,24 +9501,26 @@ function renderDetail() {
       ? [
           // 買賣超本身就有正負，紅綠必須跟著值走。舊寫法把投信寫死紅、自營寫死綠，
           // 於是「紅色的 -800（賣超）」與「綠色的 +500（買超）」會直接讀成相反的意思。
-          { label: "外陸資", value: formatShareLots(institutional.foreignNet), tone: metricToneFromNet(institutional.foreignNet) },
+          { label: "外陸資", value: netLots(institutional.foreignNet), tone: metricToneFromNet(institutional.foreignNet) },
           // 官方 T86 的「三大法人合計」含外資自營商，但它不在外陸資／投信／自營三欄裡。
           // 少了這一格，畫面上四個數字永遠加不起來（實測差額正好等於外資自營商）。
-          { label: "外資自營", value: formatShareLots(institutional.foreignDealerNet), tone: metricToneFromNet(institutional.foreignDealerNet) },
-          { label: "投信", value: formatShareLots(institutional.trustNet), tone: metricToneFromNet(institutional.trustNet) },
-          { label: "自營", value: formatShareLots(institutional.dealerNet), tone: metricToneFromNet(institutional.dealerNet) },
-          { label: "合計", value: formatShareLots(institutional.totalNet), tone: metricToneFromNet(institutional.totalNet) },
-          // 「法人 2026-07-24」「法人更新失敗」是句子不是數字。載入失敗要比無資料顯眼，
-          // 所以走 warn 橘；其餘狀態走 na 灰。以前它吃 --violet（處置股色），錯訊息被染成處置色。
-          { label: "狀態", value: institutionalStatus, tone: institutionalState.error ? "warn" : "na" },
+          { label: "外資自營", value: netLots(institutional.foreignDealerNet), tone: metricToneFromNet(institutional.foreignDealerNet) },
+          { label: "投信", value: netLots(institutional.trustNet), tone: metricToneFromNet(institutional.trustNet) },
+          { label: "自營", value: netLots(institutional.dealerNet), tone: metricToneFromNet(institutional.dealerNet) },
+          { label: "合計", value: netLots(institutional.totalNet), tone: metricToneFromNet(institutional.totalNet) },
+          // 「狀態」原本是第 6 格。6 欄格線是 span2×3 ＋ span3×2＝剛好 5 格，
+          // 第 6 格會長出只填 1/3 的孤行；而且「法人 2026-07-24」是句子，塞進 111px 必然截字。
+          // 已移到格線下方的註腳（detailNotes）。
         ]
       : [
           // 沒有資料時舊寫法的顏色最花（紅／綠／黃／紫），真正的錯誤反而最不顯眼。
-          { label: "狀態", value: institutionalStatus, tone: institutionalState.error ? "warn" : "na" },
-          { label: "外資", value: "N/A", tone: "na" },
-          { label: "投信", value: "N/A", tone: "na" },
-          { label: "自營", value: "N/A", tone: "na" },
-          { label: "來源", value: institutionalState.source || "TWSE/TPEx", tone: "na" },
+          // 而且 label 與有資料時對不起來（外資 vs 外陸資、少了外資自營與合計），
+          // 切分頁時格子會跳。改成與有資料分支一一對應的 5 格。
+          { label: "外陸資", value: "未揭露", tone: "na" },
+          { label: "外資自營", value: "未揭露", tone: "na" },
+          { label: "投信", value: "未揭露", tone: "na" },
+          { label: "自營", value: "未揭露", tone: "na" },
+          { label: "合計", value: "未揭露", tone: "na" },
         ],
     // 切到基本面籤才 lazy 抓（其餘時候只讀既有快取，不觸發網路）。
     基本面: fundamentalsChips(
@@ -9505,9 +9534,30 @@ function renderDetail() {
       <span class="chart-metric is-${metric.tone || "neutral"}">
         <em>${glossMaybe(metric.label)}</em>
         <strong>${escapeHtml(metric.value)}</strong>
+        ${metric.flag ? `<b class="cm-flag">${escapeHtml(metric.flag)}</b>` : ""}
       </span>
     `)
     .join("");
+  // 狀態／來源／單位這類句子放在格線下方講一次，不佔數字格（會截字，也會長出孤行）。
+  const fundamentalsEntry = fundamentalsState.byCode.get(String(stock.code || "").trim()) || null;
+  const detailNotes = {
+    即時: "",
+    均線: maTabIsDaily ? "" : "資料不足 5 個交易日，暫以盤中樣本計算均價。",
+    法人: institutional
+      ? `${institutionalStatus}・買賣超單位：張`
+      : `${institutionalStatus}・來源 ${institutionalState.source || "TWSE/TPEx"}`,
+    基本面: fundamentalsNote(fundamentalsEntry),
+  };
+  const noteText = detailNotes[state.detailTab] || "";
+  const noteEl = document.getElementById("chartMetricsNote");
+  if (noteEl) {
+    noteEl.textContent = noteText;
+    noteEl.hidden = !noteText;
+    // 載入失敗要比「還沒抓到」顯眼，與格子的 is-warn 同一套判準。
+    const failed = (state.detailTab === "法人" && Boolean(institutionalState.error))
+      || (state.detailTab === "基本面" && Boolean(fundamentalsEntry?.error));
+    noteEl.classList.toggle("is-warn", failed);
+  }
   document.querySelectorAll(".detail-tabs button").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.detailTab === state.detailTab);
   });
@@ -9688,16 +9738,26 @@ function formatRevenueYi(thousandTwd) {
   return `${Math.round(thousandTwd / 10).toLocaleString("zh-TW")} 萬`;
 }
 
+// 基本面分頁的註腳：狀態／來源這類句子不放進數字格。
+// 刻意與 fundamentalsChips 分開回傳，不改它的簽章（既有測試直接驗那個陣列的長度與內容）。
+function fundamentalsNote(entry) {
+  if (entry?.data) return "";
+  if (entry?.loading) return "基本面載入中";
+  if (entry?.error) return "基本面載入失敗，稍後會自動重試。";
+  return "尚未取得基本面資料。";
+}
+
 // detail panel「基本面」籤的 5 顆 chip（獨立函式方便測試）。
 function fundamentalsChips(entry) {
   const f = entry?.data;
   if (!f) {
-    const status = entry?.loading ? "基本面載入中" : entry?.error ? "載入失敗" : "--";
-    // 沒有資料時全部走 na 灰；載入失敗要比「還沒抓到」顯眼，所以單獨走 warn 橘。
-    // 舊寫法在無資料時反而顏色最花（紅／綠／黃／紫），錯誤訊息完全不突出。
+    // 沒有資料時全部走 na 灰。舊寫法在無資料時反而顏色最花（紅／綠／黃／紫），
+    // 錯誤訊息完全不突出。「狀態」是句子不是數字（實測「基本面載入中」在 111px 格子裡溢出 21px），
+    // 已移到格線下方的註腳（見 fundamentalsNote）；這裡改成與有資料分支一一對應的 5 格，
+    // 切分頁時格子不會跳。
     return [
-      { label: "狀態", value: status, tone: entry?.error ? "warn" : "na" },
       { label: "月營收", value: "N/A", tone: "na" },
+      { label: "營收YoY", value: "N/A", tone: "na" },
       { label: "EPS", value: "N/A", tone: "na" },
       { label: "本益比", value: "N/A", tone: "na" },
       { label: "殖利率", value: "N/A", tone: "na" },

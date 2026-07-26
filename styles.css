@@ -5221,6 +5221,33 @@ body.is-locked .app-shell {
   line-height: 1;
 }
 
+/* 收盤位置與均線方向的徽章。用外框而不是色相，這樣它在紅綠色盲下也讀得到
+   ——MA 那兩格的顏色原本是唯一的編碼。外框寫法沿用 .flow-pill 的先例。 */
+.chart-metric .cm-flag {
+  justify-self: start;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  color: var(--flat-text);
+  font-size: 14px;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+/* 狀態／來源／單位這類句子的落點。它們以前被塞進 111px 的數字格，必然截字。 */
+.chart-metrics-note {
+  margin: -4px 0 10px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.chart-metrics-note.is-warn {
+  color: var(--orange-2);
+}
+
 .chart-metric strong {
   min-width: 0;
   overflow: hidden;

@@ -47,9 +47,22 @@ test("fundamentalsChips：資料齊全 → 5 顆 chip（月營收億／YoY／EPS
   assert.ok(chips[4].value.endsWith("%"));
 });
 
-test("fundamentalsChips：載入中／失敗／無資料 三態", () => {
-  assert.equal(json(`fundamentalsChips({ loading: true })`)[0].value, "基本面載入中");
-  assert.equal(json(`fundamentalsChips({ error: "boom" })`)[0].value, "載入失敗");
+// 三態必須分辨得出來，但「狀態」不再佔一個數字格——它是句子，塞進 111px 的格子必然截字
+// （實測「基本面載入中」溢出 21px），而且會讓 5 格變 6 格、長出只填 1/3 的孤行。
+// 改由 fundamentalsNote 承擔，斷言的意圖不變、只換位置。
+test("fundamentalsChips／fundamentalsNote：載入中／失敗／無資料 三態", () => {
+  assert.equal(json(`fundamentalsNote({ loading: true })`), "基本面載入中");
+  assert.match(json(`fundamentalsNote({ error: "boom" })`), /失敗/);
+  assert.match(json(`fundamentalsNote(null)`), /尚未取得/);
+  assert.equal(json(`fundamentalsNote({ data: { ok: true } })`), "", "有資料就不該再留狀態字");
+
+  // 無資料時 5 格的 label 要與有資料時一一對應，切分頁時格子才不會跳。
+  const loading = json(`fundamentalsChips({ loading: true })`);
+  assert.equal(loading.length, 5);
+  assert.deepEqual(loading.map((c) => c.value), ["N/A", "N/A", "N/A", "N/A", "N/A"]);
+  assert.deepEqual(loading.map((c) => c.tone), ["na", "na", "na", "na", "na"], "沒資料時不得有紅綠黃紫");
+
+  // 有 data 但欄位為空是另一種情形：格子仍給 --，不是 N/A。
   const empty = json(`fundamentalsChips({ data: { ok: true, revenue: null, eps: null, valuation: null, dividends: [] } })`);
   assert.equal(empty[0].value, "--");
   assert.equal(empty[3].value, "--", "缺估值 → --");
