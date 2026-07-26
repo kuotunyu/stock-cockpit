@@ -603,6 +603,33 @@ function isConfirmedDayTradeStatus(status) {
   return status === "brokerConfirmed" || status === "userConfirmed";
 }
 
+// 現股當沖減半的合格股數必須是一個交易單位（1,000 股）的整數倍。
+//
+// 法源（2026-07-26 查證官方原文，不是二手新聞）：
+//   《證券交易稅條例》§2-2 明文「適用前項規定稅率之股票交易，應依金融主管機關、證券交易所、
+//     證券櫃檯買賣中心訂定之**有價證券當日沖銷交易作業相關規定**辦理」→ 作業辦法被稅法引用。
+//   《有價證券當日沖銷交易作業辦法》§1 第 4 項：「**零股**、鉅額買賣、依證券交易所營業細則
+//     第七十四條之交易…**不適用本辦法**。」TWSE「當日沖銷交易專區」同文。
+//   普通交易與盤後定價交易的買賣單位都是 1,000 股，而「零股」的定義就是不足一個交易單位；
+//   零股既然被排除，合格的沖銷數量必然是 1,000 的整數倍。
+//
+// ⚠ 最後一步是**推論**——法規沒有直接寫「配對股數必須是 1000 的倍數」。所以這個函式只用來
+//   (a) 保守估稅：不足一整股單位的部分不給減半（與債券 ETF 缺官方 stamp 時「先按一般稅率估、
+//       要求覆核」同一套處理），以及 (b) 標記待覆核讓使用者拿對帳單核對。**不硬擋輸入**，
+//   因為券商實際稅額永遠優先，而且擋掉合法輸入的代價比高估稅額大。
+//
+// 順帶記錄兩件查證結果，避免後人重查或誤修：
+//   • **盤後定價交易可以當沖**：作業辦法 §1 第 3 項「以普通交易收盤前之買賣間**及普通交易
+//     收盤前之買賣與盤後定價交易間**之反向沖銷者為限」。所以 `afterHoursFixed` 不該被擋。
+//   • **優惠期間到民國 116 年（2027）12 月 31 日**，`STOCK_DAY_TRADE_TAX_TO` 目前正確。
+//     網路上仍能查到「到 2026 年底」的說法，那是舊版修法，已再次延長，不要照著改。
+const STOCK_TRADING_UNIT_SHARES = 1000;
+function dayTradeEligibleShares(matchedShares) {
+  const shares = Number(matchedShares);
+  if (!Number.isInteger(shares) || shares <= 0) return 0;
+  return Math.floor(shares / STOCK_TRADING_UNIT_SHARES) * STOCK_TRADING_UNIT_SHARES;
+}
+
 // Effective-dated estimate only. Broker statement amounts always take precedence in normalization.
 function computeTradeTaxRule({
   side = "sell",
@@ -637,9 +664,16 @@ function computeTradeTaxRule({
     const inReliefPeriod = Boolean(tradeDate)
       && tradeDate >= STOCK_DAY_TRADE_TAX_FROM
       && tradeDate <= STOCK_DAY_TRADE_TAX_TO;
-    const dayTradeShares = inReliefPeriod ? requestedMatched : 0;
+    // 零股不適用當沖（作業辦法 §1(4)），所以不足一個交易單位的部分不給減半。
+    const eligibleMatched = dayTradeEligibleShares(requestedMatched);
+    const dayTradeShares = inReliefPeriod ? eligibleMatched : 0;
     if (requestedMatched > 0 && !inReliefPeriod) {
       warnings.push("成交日不在現股當沖減半課稅期間，已按一般股票稅率估算");
+    }
+    if (requestedMatched > eligibleMatched) {
+      const oddShares = requestedMatched - eligibleMatched;
+      warnings.push(`當沖配對股數 ${requestedMatched} 股不是 ${STOCK_TRADING_UNIT_SHARES} 股的整數倍，`
+        + `其中 ${oddShares} 股按一般稅率估算（零股不適用現股當沖）。請與券商對帳單核對。`);
     }
     if (dayTrade?.status === "legacyDeclared") {
       warnings.push("舊版當沖標記缺少券商、帳戶與配對股數，未自動套用優惠稅率");

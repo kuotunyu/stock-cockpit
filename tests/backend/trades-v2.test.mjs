@@ -45,13 +45,16 @@ test("computeTradeTaxRule：股票一般、完整與部分當沖皆按實際配�
   assert.equal(full.rate, 0.0015);
   assert.equal(full.dayTradeShares, 1000);
 
+  // 部分當沖的樣本改成法律上站得住的數字：賣 3,000 股、其中 2,000 股是當天沖銷掉的。
+  // 舊案例用 400 股——那在台股必然是零股交易，而零股**不適用**現股當沖
+  //（有價證券當日沖銷交易作業辦法 §1 第 4 項），見下方專門的測試。
   const partial = mod.computeTradeTaxRule({
-    side: "sell", price: 100, shares: 1000, date: "20260710", instrumentType: "stock",
-    dayTrade: { status: "brokerConfirmed", matchedShares: 400 },
+    side: "sell", price: 100, shares: 3000, date: "20260710", instrumentType: "stock",
+    dayTrade: { status: "brokerConfirmed", matchedShares: 2000 },
   });
-  assert.equal(partial.amount, 240, "400 股 × 1.5‰ + 600 股 × 3‰");
+  assert.equal(partial.amount, 600, "2,000 股 × 1.5‰ + 1,000 股 × 3‰ = 300 + 300");
   assert.equal(partial.rate, null, "混合稅率不可偽裝成單一 rate");
-  assert.equal(partial.dayTradeShares, 400);
+  assert.equal(partial.dayTradeShares, 2000);
 });
 
 test("computeTradeTaxRule：當沖優惠與債券指數 ETF 停徵日期邊界", () => {
@@ -161,16 +164,17 @@ test("v2 estimated：部分當沖保存 matchedShares、來源與 effective-date
     schemaVersion: 2,
     settings: SETTINGS,
     records: [v2Record({
-      dayTrade: { status: "brokerConfirmed", matchedShares: 400, pairId: "pair-1" },
+      shares: 3000,
+      dayTrade: { status: "brokerConfirmed", matchedShares: 2000, pairId: "pair-1" },
     })],
   };
   const validation = mod.validateTradesMutationInput(input, "20260713");
   assert.equal(validation.ok, true, JSON.stringify(validation.errors));
   const record = mod.normalizeTradesPayload(input, { todayCompact: "20260713" }).records[0];
-  assert.equal(record.tax, 240);
+  assert.equal(record.tax, 600, "2,000 股 × 1.5‰ + 1,000 股 × 3‰");
   assert.equal(record.taxSource, "estimated");
   assert.equal(record.taxRuleId, "tw-stock-daytrade-20170428-20271231");
-  assert.equal(record.dayTrade.matchedShares, 400);
+  assert.equal(record.dayTrade.matchedShares, 2000);
 });
 
 test("v2 estimated：未經官方確認的債券 ETF 不套 0 稅率，先按一般 ETF 估算", () => {
