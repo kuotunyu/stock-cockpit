@@ -6035,14 +6035,59 @@ async function getSurveillanceBoard(dateCompact) {
   }
 
   // ---- 歷史快照差異：今日新進/出關、注意升溫、連續天數 ----
-  const hadHardFailure = warnings.some((w) => w.includes("抓取失敗："));
+  // 抓取失敗要**分類別**看。舊寫法一刀切（任何來源失敗 → prev 設 null、整份歷史停更），
+  // 在「TWSE 注意股端點長期只回空白哨兵列」被揭露出來之後（見 twseNoticeRowsOrNull），
+  // 等於把新進／出關／連 N 天／接近處置門檻**永久關掉**——而處置、全額交割、鉅額那幾類的
+  // 資料其實是完整的，沒有理由陪葬。
+  //   失敗的類別 → 不比對（避免把抓不到誤判成出關），也不寫進今天的快照（避免明天看到假新進）。
+  //   成功的類別 → 照常比對與落盤。
+  const SURVEILLANCE_HISTORY_FIELDS = [
+    { field: "disposition", match: /處置/ },
+    { field: "attention", match: /注意/ },
+    { field: "block", match: /鉅額/ },
+    { field: "changed", match: /全額交割/ },
+  ];
+  const failedFields = new Set();
+  for (const warning of warnings) {
+    const at = warning.indexOf("抓取失敗：");
+    if (at < 0) continue;
+    const label = warning.slice(0, at);
+    for (const { field, match } of SURVEILLANCE_HISTORY_FIELDS) if (match.test(label)) failedFields.add(field);
+  }
+  const hadHardFailure = failedFields.size > 0;
   if (hadHardFailure) {
-    warnings.push("部分公告來源目前沒有可用資料，本次不更新每日歷史，也不計算新進／出關，避免把抓取失敗誤判成名單異動。");
+    const names = SURVEILLANCE_HISTORY_FIELDS
+      .filter(({ field }) => failedFields.has(field))
+      .map(({ match }) => String(match.source));
+    warnings.push(`${names.join("、")}的公告來源目前沒有可用資料，這幾類本次不更新每日歷史、也不計算出關`
+      + "（避免把抓取失敗誤判成名單異動）；其餘類別照常比對。");
   }
   const history = await loadSurveillanceHistory();
   const pastDates = Object.keys(history).filter((d) => d < today).sort();
-  const comparisonAsOf = !hadHardFailure && pastDates.length ? pastDates.at(-1) : "";
+  const comparisonAsOf = pastDates.length ? pastDates.at(-1) : "";
   const prev = comparisonAsOf ? history[comparisonAsOf] : null;
+  // 兩種問題要分開，否則會關掉本來可信的資訊：
+  //  (a) 對照快照**根本沒有這個欄位**（先前那一輪失敗被省略）→ 完全不能比，
+  //      否則今天整批都會被標成「新進」。
+  //  (b) 這一輪某個來源抓不到 → 該市場的代號今天整批缺席。這時
+  //      **「新進」與「連 N 天」仍然可信**——今天出現在名單上的代號，它前一份快照在不在，
+  //      是查得到的事實（缺席的市場在雙邊都缺席，不會產生假訊號）；
+  //      但**「出關」不可信**，因為代號消失可能只是因為抓不到，不是真的解除。
+  // 實例：TWSE 注意股端點長期只回哨兵列，歷史快照裡本來就只有上櫃代號，
+  // 那 14 檔上櫃注意股的連續天數是真的，沒有理由一起關掉。
+  // 還有第三個條件：**名單組成必須一致**。拿「缺了上市那一半」的名單跟「完整」的名單比，
+  // 會把整批上市股當成新進。所以快照要記下當時哪幾類是不完整的（partial），
+  // 只在組成相同時才比對。這讓長期缺一個市場的類別（例如上市注意股端點一直只回哨兵列）
+  // 仍然能對上櫃那半算連續天數，而不是整個功能停擺；等哪天上市端點恢復，
+  // 組成不一致會自動擋掉那一次比對，不會爆出一批假新進。
+  // 而且組成不一致的風險是**單向**的：
+  //   對照不完整 ＋ 今天完整 → 對照缺的那些代號今天全部看起來像「新進」→ 必須擋。
+  //   對照完整 ＋ 今天不完整 → 今天的代號是對照的子集，「它昨天在不在」照樣查得到 → 可以比。
+  // （這與 D-24 的裁決同一個形狀：看起來對稱的兩種情形，實際上只有一邊會產生假訊號。）
+  const prevPartial = new Set(prev?.partial || []);
+  const canCompare = (field) => Boolean(prev) && prev[field] !== undefined
+    && !(prevPartial.has(field) && !failedFields.has(field));
+  const canTrustRemovals = (field) => canCompare(field) && !failedFields.has(field);
   const comparisonIsPreviousTradingDay = Boolean(
     comparisonAsOf && resolveNextTradingDate(comparisonAsOf, tradingCalendar).date === today
   );
@@ -6062,46 +6107,64 @@ async function getSurveillanceBoard(dateCompact) {
   };
   const dispItems = [...aboutToDispose, ...inDisposition]; // aboutToRelease 與 inDisposition 共用同一批物件
   const dispCodesToday = new Set(dispItems.map((i) => i.code));
+  const newLabelFor = () => (comparisonIsPreviousTradingDay ? "今日新進" : `較 ${compactToIsoDate(comparisonAsOf)} 新增`);
+  const compareDisposition = canCompare("disposition");
   for (const it of dispItems) {
-    it.isNew = prev ? !(prev.disposition || []).includes(it.code) : false;
-    it.newLabel = it.isNew
-      ? (comparisonIsPreviousTradingDay ? "今日新進" : `較 ${compactToIsoDate(comparisonAsOf)} 新增`)
-      : "";
+    it.isNew = compareDisposition ? !(prev.disposition || []).includes(it.code) : false;
+    it.newLabel = it.isNew ? newLabelFor() : "";
   }
+  const compareAttention = canCompare("attention");
   for (const it of attention) {
-    const prevCount = prev && prev.attention ? prev.attention[it.code] : undefined;
-    it.isNew = prev ? !(prev.attention && it.code in prev.attention) : false;
-    it.newLabel = it.isNew
-      ? (comparisonIsPreviousTradingDay ? "今日新進" : `較 ${compactToIsoDate(comparisonAsOf)} 新增`)
-      : "";
-    it.daysOnList = consecutiveDays(it.code, "attention");
+    const prevCount = compareAttention ? prev.attention?.[it.code] : undefined;
+    it.isNew = compareAttention ? !(prev.attention && it.code in prev.attention) : false;
+    it.newLabel = it.isNew ? newLabelFor() : "";
+    it.daysOnList = compareAttention ? consecutiveDays(it.code, "attention") : null;
     const rising = comparisonIsPreviousTradingDay && prevCount != null && Number(it.count || 0) > Number(prevCount);
     // 接近處置門檻（謹慎、僅供參考）：注意累計次數偏高，或連續多日在注意且次數還在升。
-    it.nearDisposition = Number(it.count || 0) >= 3 || (rising && it.daysOnList >= 2);
+    // 累計次數是這一輪官方給的，即使比對不成立也仍然可信，所以那一半照算。
+    it.nearDisposition = Number(it.count || 0) >= 3 || (rising && Number(it.daysOnList || 0) >= 2);
   }
+  const compareChanged = canCompare("changed");
   for (const it of changedTrading) {
-    it.isNew = prev ? !(prev.changed || []).includes(it.code) : false;
-    it.newLabel = it.isNew
-      ? (comparisonIsPreviousTradingDay ? "今日新進" : `較 ${compactToIsoDate(comparisonAsOf)} 新增`)
-      : "";
+    it.isNew = compareChanged ? !(prev.changed || []).includes(it.code) : false;
+    it.newLabel = it.isNew ? newLabelFor() : "";
   }
-  const prevDisp = new Set(prev?.disposition || []);
-  const enteredSinceComparison = prev ? [...dispCodesToday].filter((c) => !prevDisp.has(c)).length : 0;
-  const releasedSinceComparison = prev ? [...prevDisp].filter((c) => !dispCodesToday.has(c)).length : 0;
+  const prevDisp = new Set(compareDisposition ? prev.disposition || [] : []);
+  const enteredSinceComparison = compareDisposition ? [...dispCodesToday].filter((c) => !prevDisp.has(c)).length : 0;
+  // 出關必須用更嚴的判準：代號從名單消失，可能只是這一輪抓不到。
+  const releasedSinceComparison = canTrustRemovals("disposition")
+    ? [...prevDisp].filter((c) => !dispCodesToday.has(c)).length
+    : 0;
   const enteredToday = comparisonIsPreviousTradingDay ? enteredSinceComparison : 0;
   const releasedToday = comparisonIsPreviousTradingDay ? releasedSinceComparison : 0;
 
-  // 只有全部公告來源都有「本次資料或同日 last-good」才寫歷史；否則空陣列會製造假出關。
-  if (!hadHardFailure && todayIsTradingDay) {
-    history[today] = {
+  // 落盤時把「哪幾類不完整」一起記下來（partial），組成不同的兩份名單才不會被拿來互比。
+  // 不完整的那一類仍然寫入——長期缺一個市場時（例如上市注意股端點只回哨兵列）省略會讓
+  // 隔天完全比不了，寫進去反而能讓上櫃那半持續算連續天數。
+  // 同一交易日先抓到的真實資料不因後來失敗而丟掉，所以用 merge 而不是覆寫。
+  if (todayIsTradingDay) {
+    const snapshot = {
       disposition: [...dispCodesToday],
       attention: Object.fromEntries(attention.map((i) => [i.code, Number(i.count || 1)])),
       changed: changedTrading.map((i) => i.code),
       block: blockTrades.map((i) => i.code),
     };
+    // 同一天內若某類別先前那一輪是完整的，就別讓這一輪的殘缺名單蓋過去。
+    const previousToday = history[today] || {};
+    const previousTodayPartial = new Set(previousToday.partial || []);
+    const partial = [];
+    for (const { field } of SURVEILLANCE_HISTORY_FIELDS) {
+      const wasComplete = previousToday[field] !== undefined && !previousTodayPartial.has(field);
+      if (failedFields.has(field) && wasComplete) {
+        snapshot[field] = previousToday[field];   // 保留先前完整的那一份
+        continue;
+      }
+      if (failedFields.has(field) || previousTodayPartial.has(field)) partial.push(field);
+    }
+    history[today] = { ...previousToday, ...snapshot, ...(partial.length ? { partial } : {}) };
     for (const k of Object.keys(history).sort().slice(0, -45)) delete history[k];
     await saveSurveillanceHistory();
-  } else if (!hadHardFailure) {
+  } else {
     warnings.push("今天不是排定交易日，本次只顯示公告，不新增每日快照或連續日數。");
   }
 
@@ -6123,7 +6186,13 @@ async function getSurveillanceBoard(dateCompact) {
       changedTrading: changedTrading.length,
     },
     aboutToDispose, inDisposition, aboutToRelease, attention, blockTrades, changedTrading,
-    hasHistory: !!prev,
+    // 「有沒有可用的歷史比對」——至少一個類別真的比對得出來才算，不是單看 prev 存不存在。
+    hasHistory: SURVEILLANCE_HISTORY_FIELDS.some(({ field }) => canCompare(field)),
+    // 完全無法比對的類別（對照快照缺該欄位）：這些的「新進」一律不標。
+    staleHistoryFields: SURVEILLANCE_HISTORY_FIELDS.filter(({ field }) => !canCompare(field)).map(({ field }) => field),
+    // 可以比「新進」但不能比「出關」的類別（這一輪來源抓不到，代號消失不代表解除）。
+    unreliableRemovalFields: SURVEILLANCE_HISTORY_FIELDS
+      .filter(({ field }) => canCompare(field) && !canTrustRemovals(field)).map(({ field }) => field),
     enteredToday,
     releasedToday,
     enteredSinceComparison,
