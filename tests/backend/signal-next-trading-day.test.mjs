@@ -62,9 +62,14 @@ const pick = (code, name, price) => ({
   code, name, exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", score: 80, price, changePct: 3,
 });
 
+// formulaVersion 一定要跟現行版本一致，否則公式升版後這批快照會被驗證統計濾掉，
+// 這裡問的「觀察日挑哪一天」就沒有樣本可測了。
 async function setSnapshot(picks) {
   const db = await mod.loadDb();
-  db.signalSnapshots = [{ asOf: toIso(D0), savedAt: "", coverage: { complete: true }, picks }];
+  db.signalSnapshots = [{
+    asOf: toIso(D0), savedAt: "", coverage: { complete: true },
+    formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, picks,
+  }];
   await mod.saveDb(db);
 }
 

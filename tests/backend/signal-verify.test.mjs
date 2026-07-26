@@ -55,9 +55,12 @@ const pickOf = (price = 100) => ({
   score: 80, price, changePct: 5, reasons: [], riskTags: [],
 });
 
+// 沒寫 formulaVersion 的快照會被當成 LEGACY 版，公式一升版就被驗證統計濾掉——
+// 這裡的多數測試問的是「驗證數學對不對」，不是版本隔離，所以預設補上現行版本；
+// 真的要測跨版本的案例照樣可以自己指定（見下面的 overnight-v0-test）。
 async function resetSnapshots(list = []) {
   const db = await mod.loadDb();
-  db.signalSnapshots = list;
+  db.signalSnapshots = list.map((item) => ({ formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, ...item }));
   await mod.saveDb(db);
   return db;
 }

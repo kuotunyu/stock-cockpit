@@ -4615,6 +4615,13 @@ function corporateActionHistoryForCode(code, fromDate = "", throughDate = "") {
 const CORPORATE_ACTION_RESULT_URL = "https://www.twse.com.tw/rwd/zh/exRight/TWT49U";
 const CORPORATE_ACTION_RESULT_CURRENT_TTL_MS = 6 * 3600e3;
 const CORPORATE_ACTION_RESULT_MAX_MONTHS = 30; // 技術頁最長抓 24 個月，留一點餘裕
+// 補齊範圍必須涵蓋「歷史真正可能退到多遠」，不是「正常情況抓幾個月」。
+// 掃描、隔日沖、驗證推進三個入口都開了 allowExternalFallback + fallbackRange "1y"：
+// 官方逐檔歷史被限流時整包會退成 Yahoo 的一年序列。只補 5~8 個月的話，第 9~13 個月的
+// 除權息在同步的 corporateActionResultFor() 查不到、Yahoo 列又沒有 X 標記與交易所昨收、
+// 跳空多半也低於 10.5% → **完全不還原**；而且那幾個月根本沒被請求過，degraded 仍是 false，
+// 揭露機制會在最常見的降級情境下回報「一切正常」。
+const CORPORATE_ACTION_RESULT_FALLBACK_MONTHS = 13; // Yahoo 備援上限 1y ＋ 1 個月邊界餘裕
 const CORPORATE_ACTION_RESULT_RETRY_MS = 5 * 60e3;
 // 併發只壓到 2。冷啟動總共也才 8~24 個請求、抓完就落盤永久有效，快個兩秒毫無意義；
 // 但證交所會限流，實測併發 6 在掃描流程裡會整批失敗（8 個月全掛），
@@ -4661,14 +4668,37 @@ function corporateActionResultMonthState(monthCompact) {
   return fundamentalsHistory?.corporateActionResultMonths?.[monthCompact] || null;
 }
 
+// 封月（該月結束之後才抓的）＝資料完整且永遠不會再變；未封月的只在 TTL 內算數。
+function corporateActionResultMonthUsable(state) {
+  if (state?.status !== "ok") return false;
+  if (state.sealed) return true;
+  return Date.parse(state.observedAt || 0) + CORPORATE_ACTION_RESULT_CURRENT_TTL_MS > Date.now();
+}
+
+// TWSE RWD 對「查無符合資料」回 HTTP 200、`stat` 是一句中文抱歉、而且**完全沒有 data 欄位**
+// （2026-07-26 實測 20260901~20260931：`{"stat":"很抱歉，沒有符合條件的資料!"}`）。
+// 舊寫法只看 `Array.isArray(payload.data)`，於是這種回應被寫成「抓成功、零筆除權息」，
+// 配合上面的封月邏輯就是一個**永遠補不回來的空月**。
+// 真的沒有事件的月份長什麼樣？實測 2010-02 到 2026-06 共 10 個抽樣月份（含 2011-02、
+// 2012-02 這種只有 1 筆的淡月）**全部**是 `stat:"OK"` 且帶 data，找不到 stat 非 OK 的合法空月。
+// 所以這裡把 stat 非 OK 一律當上游失敗：最壞情況是某個真空月每 5 分鐘重試一次並亮降級警告，
+// 遠好過靜默把一整個月的除權息當成不存在。
+function corporateActionResultPayloadRows(payload) {
+  if (String(payload?.stat || "").trim().toUpperCase() !== "OK") return null;
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
 async function loadCorporateActionResultMonth(monthCompact) {
   const month = String(monthCompact || "").slice(0, 6);
   if (!/^\d{6}$/.test(month)) return { status: "skipped", rows: 0 };
   await loadFundamentalsHistory();
-  const currentMonth = toTaipeiCompactDate().slice(0, 6);
   const state = corporateActionResultMonthState(month);
-  // 已經抓過的過去月份永遠不會再變，直接用歸檔；當月還會長出新的除權息日，要定期回抓。
-  if (state?.status === "ok" && (month < currentMonth || Date.parse(state.observedAt || 0) + CORPORATE_ACTION_RESULT_CURRENT_TTL_MS > Date.now())) {
+  // 「過去月份永遠不會再變」只對**該月結束之後才抓的那一份**成立。當月抓的必然是半成品
+  // ——TWT49U 只公布到約 T+1（2026-07-26 查 202607，最後一列是 115年07月27日）。
+  // 舊寫法用 `month < currentMonth` 判斷，於是「7 月 3 日抓的 7 月」一跨到 8 月就被鎖成
+  // 永久真相，7 月 4 日之後的除權息再也補不回來。改成看抓取當下是不是已經跨月（sealed）。
+  // 既有歸檔沒有 sealed 欄位 → 一律當未封月重抓一次，正好把舊資料裡的半成品洗掉。
+  if (corporateActionResultMonthUsable(state)) {
     return { status: "cached", rows: state.rows || 0 };
   }
   const failedAt = corporateActionResultFailures.get(month);
@@ -4689,8 +4719,8 @@ async function loadCorporateActionResultMonth(monthCompact) {
         `${CORPORATE_ACTION_RESULT_URL}?startDate=${start}&endDate=${end}&response=json`,
         { headers: { "user-agent": "Mozilla/5.0" } },
       );
-      // stat 不是 "OK" 時 data 可能不存在；空月份（真的沒有任何除權息）也是合法結果。
-      const rows = Array.isArray(payload?.data) ? payload.data : [];
+      const rows = corporateActionResultPayloadRows(payload);
+      if (rows === null) throw new Error(`上游回 stat=${String(payload?.stat || "").slice(0, 40)}`);
       const byCode = normalizeCorporateActionResultRows(rows);
       const history = await loadFundamentalsHistory();
       history.corporateActionResults ||= {};
@@ -4707,6 +4737,8 @@ async function loadCorporateActionResultMonth(monthCompact) {
         rows: rows.length,
         codes: byCode.size,
         observedAt: new Date().toISOString(),
+        // 抓取當下已經跨月＝這份資料是完整的、之後不會再變。
+        sealed: month < toTaipeiCompactDate().slice(0, 6),
       };
       await saveFundamentalsHistory();
       corporateActionResultFailures.delete(month);
@@ -4732,17 +4764,23 @@ async function ensureCorporateActionResults(fromDate, throughDate) {
   let month = Number(from.slice(4, 6));
   const endYear = Number(through.slice(0, 4));
   const endMonth = Number(through.slice(4, 6));
-  while ((year < endYear || (year === endYear && month <= endMonth)) && months.length < CORPORATE_ACTION_RESULT_MAX_MONTHS) {
+  while (year < endYear || (year === endYear && month <= endMonth)) {
     months.push(`${year}${String(month).padStart(2, "0")}`);
     month += 1;
     if (month > 12) { month = 1; year += 1; }
+    if (months.length > CORPORATE_ACTION_RESULT_MAX_MONTHS * 4) break; // 參數壞掉時的煞車
   }
+  // 上限要從**新的那一端**留。舊寫法在迴圈條件裡就停，砍掉的是離今天最近的月份
+  // ——那正是還原權息最需要的一段，而且被砍掉的月份根本沒進 results，degraded 還是 false。
+  const truncated = Math.max(0, months.length - CORPORATE_ACTION_RESULT_MAX_MONTHS);
+  const wanted = truncated ? months.slice(-CORPORATE_ACTION_RESULT_MAX_MONTHS) : months;
   // 一次請求就涵蓋全市場所有代號，所以月份數就是請求數。冷啟動要補 24 個月，
   // 序列化會讓第一次開頁等太久，並行度壓在 6 是「別把官方端點打爆」與「別卡住使用者」的折衷。
   // 抓過的過去月份會落盤，之後每個月只會多一次請求。
-  const results = await mapLimit(months, CORPORATE_ACTION_RESULT_CONCURRENCY, (item) => loadCorporateActionResultMonth(item));
-  const degraded = results.some((result) => result?.status === "unavailable");
-  return { months: months.length, degraded };
+  const results = await mapLimit(wanted, CORPORATE_ACTION_RESULT_CONCURRENCY, (item) => loadCorporateActionResultMonth(item));
+  // 被上限砍掉的月份等同「沒抓到」，一樣要算降級——否則揭露機制會在最需要它的時候說「一切正常」。
+  const degraded = truncated > 0 || results.some((result) => result?.status === "unavailable");
+  return { months: wanted.length, degraded, truncated };
 }
 
 // 「這個月真的抓成功過」才算查得過。這道區分很重要：
@@ -4753,7 +4791,9 @@ async function ensureCorporateActionResults(fromDate, throughDate) {
 function corporateActionResultMonthCovered(dateCompact) {
   const month = String(toCompactDate(dateCompact) || "").slice(0, 6);
   if (!/^\d{6}$/.test(month)) return false;
-  return corporateActionResultMonthState(month)?.status === "ok";
+  // 用與快取同一條「可用」判準：封月的永遠算數；當月抓的那一份只到 T+1，過期就不能再宣稱
+  // 「查得過」——否則月底那幾天的除權息會被當成「查了但拿不到比率」而誤標未定案。
+  return corporateActionResultMonthUsable(corporateActionResultMonthState(month));
 }
 
 function corporateActionResultFor(code, exDate) {
@@ -7154,7 +7194,9 @@ function groupPicks(picks, maxPerGroup = 20) {
   return groups;
 }
 
-const OVERNIGHT_FORMULA_VERSION = "overnight-v1-aggressive-controlled";
+// v2：訊號判定改吃還原權息後的序列（D-02）。門檻一個都沒動，但除權息當天的漲跌幅與
+// 均線基準變了，會改變哪些股票入選，所以舊快照不可與新快照混進同一個分母。
+const OVERNIGHT_FORMULA_VERSION = "overnight-v2-adjusted-basis";
 // 2026-07-13 前的快照尚未存 formulaVersion；當時只有這一版公式。
 // 這個常數刻意與 current 分開，未來升版時不可把缺欄位舊資料誤認成新版。
 const LEGACY_OVERNIGHT_FORMULA_VERSION = "overnight-v1-aggressive-controlled";
@@ -7189,8 +7231,10 @@ async function buildOvernightSignalsUncached({
   // 否則除權息當天的機械性跳空會被算成真實跌幅，直接墊高 brokeMinus2Rate、壓低達成率。
   const [, corporateActionCoverage] = await Promise.all([
     loadFundamentalsHistory(),
-    ensureCorporateActionResults(compactMonthsBefore(latestDate, 5), latestDate),
+    // 下面 getStockHistory 開了 fallbackRange "1y"，補齊範圍要跟得上最遠可能退到的月份。
+    ensureCorporateActionResults(compactMonthsBefore(latestDate, CORPORATE_ACTION_RESULT_FALLBACK_MONTHS), latestDate),
   ]);
+  const unresolvedToday = [];
   const enriched = await mapLimit(candidates, 3, async (quote) => {
     let history = await getStockHistory(quote, latestDate, 4, {
       allowExternalFallback: true,
@@ -7198,18 +7242,40 @@ async function buildOvernightSignalsUncached({
       fallbackRange: "1y",
     });
     history = appendTodayCloseBar(history, quote, latestDate);
-    // 刻意只把還原後的序列餵給「歷史統計」，今天的訊號判定仍用原始價：
-    // 改變 metrics 就等於改變選股口徑（DOMAIN-BACKLOG D-02），那是要另外決策的事。
+    // 訊號判定與歷史統計都跑在還原權息後的序列上（D-02）。
+    // 沒還原時 computeMetrics 的「前一根收盤」是除權息**前**的價格，算出來的是一個機械性
+    // 跌幅而不是真實漲跌——同一天同一檔因此有兩個漲跌幅：候選池用交易所口徑的
+    // quote.previousClose（＝參考價），metrics 用前一根 close。還原後前一根 close 就是官方
+    // 參考價，兩個數字終於是同一件事。
+    // 今天那一根本身永遠不會被還原：factor 從 1 起算、事件當根在 factor 更新前就寫入，
+    // 所以卡片上的開高低收與成交量仍是真實成交數字（pinned in overnight-back-adjust.test）。
     const officialActions = corporateActionHistoryForCode(quote.code, history[0]?.date, history.at(-1)?.date);
-    const adjustedHistory = backAdjustForCorporateActions(history, officialActions, {
-      allowHeuristicFallback: isOrdinaryStock(quote),
-    });
-    const metrics = computeMetrics(history);
+    const adjustOptions = { allowHeuristicFallback: isOrdinaryStock(quote) };
+    const adjustments = resolveCorporateActionAdjustments(history, officialActions, adjustOptions);
+    // 交易所說「今天有事件」但比率算不出來 → 還原不會發生，changePct 就退回機械性跌幅，
+    // 而且畫面上毫無跡象。與波段掃描同一條規則：算不出來就不給結論，寧可少一檔。
+    // 實測 2026-07-24（260 檔／31,137 根 K）：unresolved 只佔 0.016%，落在訊號日的 0 檔。
+    if ((adjustments.unresolvedIndices || []).includes(history.length - 1)) {
+      unresolvedToday.push(quote.code);
+      return [];
+    }
+    const adjustedHistory = backAdjustForCorporateActions(history, officialActions, adjustOptions);
+    const metrics = computeMetrics(adjustedHistory);
     if (!metrics || toCompactDate(metrics.date) !== latestDate) return [];
     metrics.turnover = computeTurnoverPct(metrics.volumeLots, issuedShares.get(metrics.code) ?? NaN);
-    return evaluateGroups(metrics).map((groupInfo) =>
-      buildPick(metrics, groupInfo, null, summarizeRecentBacktest(adjustedHistory, groupInfo.group, 30))
-    );
+    // 訊號日本身就是事件日時，畫面上的漲跌幅是相對參考價算的，要說出來——
+    // 使用者對照券商 App 看到的是同一個口徑，但對照「昨天的收盤價」會兜不起來。
+    const todayAdjustment = adjustments.get(adjustedHistory.length - 1) || null;
+    const basisTag = !todayAdjustment ? "" :
+      String(todayAdjustment.source || "").startsWith("heuristic") ? "疑似公司行動・漲跌為估算" : "除權息日・漲跌對參考價";
+    return evaluateGroups(metrics).map((groupInfo) => {
+      const pick = buildPick(metrics, groupInfo, null, summarizeRecentBacktest(adjustedHistory, groupInfo.group, 30));
+      if (basisTag) {
+        pick.riskTags = [...pick.riskTags, basisTag];
+        pick.corporateActionBasis = { source: todayAdjustment.source, referencePrice: metrics.previousClose };
+      }
+      return pick;
+    });
   });
 
   const picks = enriched.flat();
@@ -7238,10 +7304,15 @@ async function buildOvernightSignalsUncached({
       ...(laggingMarkets.length
         ? [`${laggingMarkets.join("、")}的收盤資料尚未更新到 ${compactToSlashDate(latestDate)}，這份清單暫時只涵蓋已更新的市場，稍晚會自動補齊。`]
         : []),
-      // 卡片旁的「近 30 日回測」跑在還原後的序列上；來源沒抓齊時那些百分比會比實際差，
-      // 因為除權息當天的機械性跳空會被算成真實跌幅。訊號本身不受影響（它用原始價，見 D-02）。
+      // 訊號判定與卡片旁的「近 30 日回測」都跑在還原後的序列上（D-02）；來源沒抓齊時，
+      // 除權息當天的機械性跳空會被算成真實跌幅，回測百分比偏低、當天的訊號也可能整個跑掉。
       ...(corporateActionCoverage?.degraded
-        ? ["官方除權除息計算結果表這一輪有部分月份沒抓到，卡片上的近 30 日回測數字可能偏低；資料會在下一輪補齊。"]
+        ? ["官方除權除息計算結果表這一輪有部分月份沒抓到，除權息當天的漲跌幅與近 30 日回測數字可能失真；資料會在下一輪補齊。"]
+        : []),
+      // 「交易所說有事件、我們算不出比率」的股票被排除了，要說出來——否則使用者只會
+      // 發現某一檔今天莫名其妙不見了。
+      ...(unresolvedToday.length
+        ? [`${unresolvedToday.length} 檔今天有官方公司行動但參考價尚未取得（${unresolvedToday.slice(0, 5).join("、")}${unresolvedToday.length > 5 ? "…" : ""}），這些暫時不列入清單，公告補齊後會自動恢復。`]
         : []),
     ]),
     groups,
@@ -8323,7 +8394,7 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
   });
   // 官方除權除息計算結果表：resolveCorporateActionAdjustments 是同步的，所以要先把
   // 這段期間的月份補齊，它才查得到。抓過的月份會落盤，之後只會多抓當月。
-  const resultCoverage = await ensureCorporateActionResults(rawHistory[0]?.date, rawHistory.at(-1)?.date);
+  let resultCoverage = await ensureCorporateActionResults(rawHistory[0]?.date, rawHistory.at(-1)?.date);
   let historySource = rawHistory.some((row) => row.source === "Yahoo Finance chart fallback")
     ? "Yahoo Finance chart fallback (official history unavailable)"
     : "TWSE/TPEx official history";
@@ -8333,12 +8404,18 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
   if (rows.length < minBars && !rawHistory.some((row) => row.source === "Yahoo Finance chart fallback")) {
     try {
       const fallbackHistory = await fetchYahooHistory(quote, dateCompact, analysisPeriod === "month" ? "5y" : "2y");
+      // 這一份比上面那次抓的長很多（月K 退到 5 年），加長的那段月份從來沒被補齊過，
+      // 而 prepareRows → resolveCorporateActionAdjustments 是**同步查表**，
+      // 所以不先 ensure 就等於那幾十個月一律查不到官方參考價、完全不還原，
+      // 而 resultCoverage 還停在第一次的範圍上（degraded 是 false），揭露不會觸發。
+      const extendedCoverage = await ensureCorporateActionResults(fallbackHistory[0]?.date, fallbackHistory.at(-1)?.date);
       const fallbackPrepared = prepareRows(fallbackHistory);
       if (fallbackPrepared.rows.length > rows.length) {
         rawHistory = fallbackHistory;
         historySource = "Yahoo Finance chart fallback (official history unavailable)";
         prepared = fallbackPrepared;
         rows = fallbackPrepared.rows;
+        resultCoverage = extendedCoverage;
       }
     } catch {
       // Keep the official rows and return the normal insufficient-data message below.
@@ -8354,7 +8431,11 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
     corporateActions.alert = true;
   }
   if (resultCoverage.degraded) {
-    corporateActions.notes.push("官方除權除息計算結果表有部分月份暫時抓不到，這段期間改用公告公式或跳空估算還原。");
+    // 「抓不到」與「超出補齊範圍」是兩件事：後者在月K 退到 5 年時是必然的（上限 30 個月），
+    // 講成「暫時抓不到」會讓使用者以為等一下重整就好。
+    corporateActions.notes.push(resultCoverage.truncated
+      ? `這張圖最舊的 ${resultCoverage.truncated} 個月超出官方除權除息計算結果表的補齊範圍，那一段改用公告公式或跳空估算還原。`
+      : "官方除權除息計算結果表有部分月份暫時抓不到，這段期間改用公告公式或跳空估算還原。");
     corporateActions.alert = true;
   }
   if (rows.length < minBars) {
@@ -8546,6 +8627,26 @@ function corporateActionGapRatio(row, previousClose, thresholdPct = 10.5) {
 // 除權息參考價＝[(前收－息值)＋(現增認購價×現增配股率)]／(1＋無償配股率＋現增配股率)。
 // 回傳「參考價／前收」作為事件前所有價格的回溯調整因子。
 const CORPORATE_ACTION_MAX_PLAUSIBLE_RATIO = 1;
+
+// 量級檢查要由價格公式與股數倍數**共用**，否則同一筆事件會被兩條路判出相反的結論。
+// 舊寫法只把上限寫在 officialCorporateActionRatio 裡，於是：
+//   (a) 上游若把比率改成「每仟股股數」（帳本那側 2026 年就有同名防呆，見「無償配股率大於 1」），
+//       價格那條被擋下標未定案，但 1＋stockRatio＋subscriptionRatio 仍算出 101，
+//       直接餵給 Yahoo 座標系換算（ratio × 101）與成交量還原因子；
+//   (b) 反過來，真正合法的 >100% 無償配股會被價格那條擋成未定案，股數倍數卻照樣給出 2.x。
+// 回 null＝「這筆的股數倍數不可信」，呼叫端一律當成推導不出來處理。
+function plausibleShareFactor(action) {
+  if (!action) return null;
+  const clamp = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
+  };
+  const stockRatio = clamp(action.stockRatio);
+  const subscriptionRatio = clamp(action.subscriptionRatio);
+  if (stockRatio > CORPORATE_ACTION_MAX_PLAUSIBLE_RATIO || subscriptionRatio > CORPORATE_ACTION_MAX_PLAUSIBLE_RATIO) return null;
+  return 1 + stockRatio + subscriptionRatio;
+}
+
 function officialCorporateActionRatio(action, previousClose) {
   if (!action || !Number.isFinite(previousClose) || previousClose <= 0) return null;
   if (action.formulaComplete === false || action.status === "withdrawn") return null;
@@ -8635,12 +8736,22 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
     const priorClose = Number(previousRow?.close);
     const officialAction = rowDate ? actionsByDate.get(rowDate) : null;
     // Yahoo 備援序列不能沿用官方逐檔歷史的語意（見 yahooSpaceRatio）。
+    // **兩個問法不一樣，不可共用一個旗標**：
+    //   fromYahoo（事件日那一列）→ 決定「這一列自己的欄位可不可信」，例如 exchangePreviousClose。
+    //   priorFromYahoo（前一列）→ 決定「即將被乘上因子的那些列在哪個座標系」，因子只作用在
+    //     index 之前的列，所以座標系要問前一列。
+    // 混用會在接縫上取反：三個入口都是 getStockHistory(allowExternalFallback) → appendTodayCloseBar，
+    // 官方逐檔被限流時會產生「一整串 Yahoo 列 ＋ 一根官方當日 K」；事件正好落在那根時
+    // fromYahoo 是 false，rawSpace 的換算被整組跳過。實測（6944，Yahoo 已套 1.3 分割）：
+    // 事件前收盤被壓成 599.41 而不是 779.23——整段歷史低 23%，而且 unresolvedIndices 是空的、
+    // source 還蓋著 exchange-result 官方章，掃描端與健檢端都不會攔。
     const fromYahoo = String(row?.source || "").startsWith("Yahoo");
+    const priorFromYahoo = String(previousRow?.source || "").startsWith("Yahoo");
 
     // 無償配股／現增會同時改變股數，成交量要按這個倍數反向調整。
-    const stockRatio = Number.isFinite(Number(officialAction?.stockRatio)) ? Math.max(0, Number(officialAction.stockRatio)) : 0;
-    const subscriptionRatio = Number.isFinite(Number(officialAction?.subscriptionRatio)) ? Math.max(0, Number(officialAction.subscriptionRatio)) : 0;
-    const archiveShareFactor = officialAction ? 1 + stockRatio + subscriptionRatio : null;
+    // 走與價格公式同一道量級檢查（plausibleShareFactor）：比率明顯不像比率時回 null，
+    // 讓下游當成「推導不出來」，而不是拿一個 101 倍去乘成交量或 Yahoo 換算倍數。
+    const archiveShareFactor = plausibleShareFactor(officialAction);
 
     // Yahoo 的價格座標系跟官方逐檔歷史差了一個配股倍數（它已自行把配股當分割還原）。
     // 官方來源（計算結果表、公告公式）算出來的因子是「原始座標系」的，必須換算；
@@ -8651,11 +8762,16 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
     //   2. 本機歸檔公告的 1＋配股率＋現增率——真實比率，通常等於 Yahoo 套的，但歸檔覆蓋率有限。
     //   3. 官方計算結果表的 kind：純除息代表沒有配股，倍數必為 1。
     // 三者都拿不到就回 null，寧可不調也不要把配股還原兩次。
+    // 問的是「前一列（會被乘上因子的那些）在哪個座標系」，所以用 priorFromYahoo；
+    // 但分割倍數本身要讀事件日那一列——Yahoo 是在事件當天套上分割的。
     const rowSplitFactor = Number(row?.yahooSplitFactor);
-    const yahooShareFactor = !fromYahoo
+    // 結果表的順位高於歸檔：它說這天有配股（kind 含「權」）而歸檔卻推出「股數沒變」（倍數 1），
+    // 代表歸檔缺了配股欄位，不是真的沒配股——這種矛盾一律當推導不出來，別拿 1 去換算。
+    const archiveContradictsResult = resultKind.includes("權") && archiveShareFactor === 1;
+    const yahooShareFactor = !priorFromYahoo
       ? 1
       : (Number.isFinite(rowSplitFactor) && rowSplitFactor > 0 ? rowSplitFactor : null)
-        ?? archiveShareFactor
+        ?? (archiveContradictsResult ? null : archiveShareFactor)
         ?? ((resultKind && !resultKind.includes("權")) ? 1 : null);
     // 官方公式要用「原始座標系的前收」去算，否則現金股利會被拿去跟已經除過配股的價格相減。
     const rawPriorClose = Number.isFinite(yahooShareFactor) && yahooShareFactor > 0
@@ -8715,7 +8831,8 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
 
     if (ratio !== null) {
       let shareFactor = archiveShareFactor ?? 1;
-      if (fromYahoo) {
+      // 同樣是「被調整的那些列在哪個座標系」的問題 → priorFromYahoo。
+      if (priorFromYahoo) {
         if (rawSpace) {
           // 知道配股倍數才能換算到 Yahoo 座標系；換算不出來就寧可不調——
           // 寧可少還原一次現金股利，也不要把配股還原兩次（那會把事件前的價格整段壓低）。
@@ -9750,8 +9867,9 @@ async function buildSwingVerificationSummary() {
 async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates) {
   // 權息預告一旦過日就離開上游滾動窗；掃描前先刷新並落盤，讓同一輪 K 線可用官方參考價還原。
   // 官方除權除息計算結果表則是逐月、一次涵蓋全市場，所以在這裡補一次就夠整輪 240 檔共用。
-  // 掃描抓 6 個月歷史，多補一個月避免月初剛好落在邊界。
-  const scanFromDate = compactMonthsBefore(latestDate, 7);
+  // 補齊範圍看的是「歷史最遠可能退到哪」而不是「正常抓幾個月」：下面 getStockHistory 開了
+  // fallbackRange "1y"，被限流時整包會變成 Yahoo 的一年序列（見 CORPORATE_ACTION_RESULT_FALLBACK_MONTHS）。
+  const scanFromDate = compactMonthsBefore(latestDate, CORPORATE_ACTION_RESULT_FALLBACK_MONTHS);
   const [riskSets, , corporateActionCoverage] = await Promise.all([
     getRiskSets(latestDate),
     getDividendSchedule(),
@@ -10063,7 +10181,7 @@ async function inspectSwingStock(rawCode) {
   const rows = addPreviousClose(history)
     .filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite));
   // 同步的 resolveCorporateActionAdjustments 要查交易所計算結果表，得先把月份補齊。
-  await ensureCorporateActionResults(rows[0]?.date, rows.at(-1)?.date);
+  const resultCoverage = await ensureCorporateActionResults(rows[0]?.date, rows.at(-1)?.date);
   const officialActions = corporateActionHistoryForCode(quote.code, rows[0]?.date, rows.at(-1)?.date);
   const features = computeSwingFeatures(rows, officialActions, { allowHeuristicFallback: true });
   if (!features) {
@@ -10136,10 +10254,20 @@ async function inspectSwingStock(rawCode) {
     score: roundTo(scoreSwing(features, plan, verdict.key || "midBandDefense")),
     verdict,
     scenarios,
-    warnings: reference.warnings || [],
+    // 掃描（scanQuality）、隔日沖（warnings）、技術頁（corporateActions.notes）都會揭露還原
+    // 來源的降級，健檢原本是唯一漏掉的入口——而且 corporateActionResultMonthCovered 刻意讓
+    // 「上游抓不到」不算未定案（否則會誤剔一批大型股），所以降級時上面那道
+    // corporateActionUnresolved 擋門不會觸發，結果會以完全正常的樣子端出去。
+    warnings: unique([
+      ...(reference.warnings || []),
+      ...(resultCoverage.degraded
+        ? ["官方除權除息計算結果表這一輪沒抓齊，這檔的還原改用公告公式或跳空估算，均線與布林可能不夠精確。"]
+        : []),
+    ]),
     dataQuality: {
       degraded: Boolean(reference.degraded),
       referenceComplete: Boolean(reference.coverageComplete),
+      corporateActionResultsComplete: !resultCoverage.degraded,
       markets: reference.markets,
     },
     disclaimer: "本功能只做技術型態檢測，提供進出參考價位，不是買賣建議，也不保證獲利。",
@@ -11977,7 +12105,7 @@ export {
   buildAdjustedPeriodRows, resolveCorporateActionAdjustments,
   parseYahooSplitFactors, normalizeYahooHistoryRows,
   // 隔日沖／波段評分
-  buildPick, buildRiskTags, buildReasons, corporateActionGapRatio, officialCorporateActionRatio,
+  buildPick, buildRiskTags, buildReasons, corporateActionGapRatio, officialCorporateActionRatio, plausibleShareFactor,
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,
   SWING_FORMULA_VERSION, stockTickSize, roundToStockTick,
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,
@@ -11989,6 +12117,7 @@ export {
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,
   corporateActionHistoryForCode,
   normalizeCorporateActionResultRows, loadCorporateActionResultMonth, ensureCorporateActionResults,
+  corporateActionResultMonthUsable, corporateActionResultPayloadRows, corporateActionResultMonthCovered, CORPORATE_ACTION_RESULT_MAX_MONTHS,
   corporateActionResultFor, corporateActionResultRatio, CORPORATE_ACTION_RESULT_URL,
   peekDividendSchedule, getCompanyDirectory, getIssuedShares, getCompanyMeta, buildFundamentals,
   // 伺服器
