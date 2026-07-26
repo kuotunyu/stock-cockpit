@@ -7777,6 +7777,51 @@ async function getOfficialObservationEvidence(quote, signalDate, observationDate
   }
 }
 
+// 觀察日若是除權息日，要用實測可靠的來源解出「事件後尺度的基準價」。
+// 偵測（歸檔 或 計算結果表有這一筆）與量化（比率／官方參考價）分開，判準與波段驗證一致。
+// 正常日子這裡不會多打任何請求：沒有候選就直接回空 Map。
+async function resolveObservationActionBases(picks, observationCompact, reference) {
+  const bases = new Map();
+  if (!observationCompact || !Array.isArray(picks) || !picks.length) return bases;
+  // 計算結果表既是量化來源、也是比歸檔更完整的偵測來源（歸檔只從部署後累積），所以先補齊當月。
+  // 一次請求涵蓋全市場，且有 24 小時／TTL 快取，成本可忽略。
+  await ensureCorporateActionResults(compactMonthsBefore(observationCompact, 1), observationCompact);
+  const candidates = unique(picks.map((pick) => pick.code).filter(Boolean)).filter((code) => (
+    corporateActionHistoryForCode(code, observationCompact, observationCompact).length > 0
+    || corporateActionResultFor(code, observationCompact) !== null
+  ));
+  if (!candidates.length) return bases;
+  await mapLimit(candidates, 4, async (code) => {
+    // ① 上市：交易所自己算的比率（實測過去 228 筆事件 228 筆都查得到）。
+    const ratio = corporateActionResultRatio(code, observationCompact);
+    if (ratio !== null) {
+      bases.set(code, { ratio, source: "exchange-result" });
+      return;
+    }
+    // ② 上櫃：沒有 TWT49U 對應端點，改查官方逐檔月歷史——那裡的漲跌欄是相對參考價算出來的
+    //    正常數字，close − change 就是官方參考價（實測 5/5）。**整批當日收盤不行**，
+    //    它的漲跌欄在事件日是中文字串 `"除息"`／`"除權"`。
+    const quote = reference?.byCode?.get(code);
+    if (!quote?.exchange) {
+      bases.set(code, { unresolved: true });
+      return;
+    }
+    try {
+      const rows = await fetchStockHistoryMonth(code, quote.exchange, observationCompact, quote.name);
+      const exact = rows.find((row) => toCompactDate(row.date) === observationCompact);
+      const exchangePreviousClose = Number(exact?.exchangePreviousClose);
+      if (Number.isFinite(exchangePreviousClose) && exchangePreviousClose > 0) {
+        bases.set(code, { base: exchangePreviousClose, source: "exchange-quote" });
+        return;
+      }
+    } catch {
+      // 抓取失敗與「抓到了但欄位被遮」都算解不出來——都不可以拿原始價當基準。
+    }
+    bases.set(code, { unresolved: true });
+  });
+  return bases;
+}
+
 async function observeSignalSnapshot(snapshot, { allowIntraday = false, reference = null, calendar = null } = {}) {
   const signalCompact = toCompactDate(snapshot?.asOf);
   const picks = Array.isArray(snapshot?.picks) ? snapshot.picks : [];
@@ -7868,6 +7913,7 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
 
   // 下面判定除權息基準要查官方歸檔，先確保它已載入（未載入時 corporateActionHistoryForCode 只會回空陣列）。
   await loadFundamentalsHistory();
+  const actionBaseByCode = await resolveObservationActionBases(picks, observationCompact, reference);
   const evidenceWarnings = [...evidenceByCode.values()].map((evidence) => evidence.warning).filter(Boolean);
   const rows = picks.map((pick) => {
     const evidence = evidenceByCode.get(pick.code);
@@ -7877,18 +7923,32 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
       return { ...pick, verified: false, pendingReason: evidence?.status || "missing" };
     }
     // 觀察日若是除權息日，價格會機械性跳空，拿訊號日原始收盤當基準會直接記成大跌
-    //（配息 5% 就必然觸發 brokeMinus2）。交易所自己的昨收在事件日就是官方參考價，用它換掉基準價
-    // 即可讓報酬回到含息的同一尺度。
-    // **必須先由官方歸檔確認當日真的有除權息事件才換基準**：bar.previousClose 與 pick.price 來自
-    // 不同來源／不同時點，單純比大小會誤判（快照價與官方收盤的正常差異就會觸發），
-    // 那會靜靜改掉所有報酬數字。沒有官方事件時一律沿用訊號日收盤，行為不變。
-    const officialPreviousClose = Number(bar.previousClose);
-    const hasOfficialAction = corporateActionHistoryForCode(pick.code, observationCompact, observationCompact).length > 0;
-    const corporateActionAdjusted = hasOfficialAction
-      && Number.isFinite(officialPreviousClose)
-      && officialPreviousClose > 0
-      && Math.abs(officialPreviousClose / signalClose - 1) > CORPORATE_ACTION_RATIO_TOLERANCE;
-    const base = corporateActionAdjusted ? officialPreviousClose : signalClose;
+    //（配息 5% 就必然觸發 brokeMinus2）。基準價要換成事件後的同一尺度，報酬才是含息總報酬。
+    //
+    // **絕不可用 `bar.previousClose`**（2026-07-27 實測 20260724 的 18 筆真實事件）：
+    //   整批當日收盤／上市：`Change` 是 `"0.0000"` 哨兵（12/12）→ previousClose ＝ 當日收盤，
+    //     基準價會變成「觀察日自己的收盤」，currentReturn 恆為 0、高低報酬改成相對收盤衡量。
+    //   整批當日收盤／上櫃：`Change` 是**中文字串** `"除息"`／`"除權"`（6/6）→ parseNumber 回 null
+    //     → 換不了基準 → 退回訊號日收盤 → 假大跌（6435 配息 7.5 元／股價 270 → −2.7%，觸發 brokeMinus2）。
+    //   逐檔月歷史／上市：漲跌欄被遮成 `"X0.00"` → 同樣是 null → 假大跌。
+    // 四種組合裡只有「逐檔月歷史／上櫃」是對的，所以基準改由 resolveObservationActionBases
+    // 用兩個實測可靠的來源解（上市 TWT49U 228/228、上櫃逐檔月歷史 5/5）。
+    //
+    // 偵測仍然先行、且擴大為「歸檔 或 計算結果表有這一筆」——歸檔只從部署後累積，
+    // 而 TWT49U 涵蓋全部歷史（D-43 實測抓到台積電／鴻海／中華電等歸檔完全沒有的事件）。
+    // 偵測到卻解不出基準時**不給結論**：標 unverified 讓它留在 pending，
+    // 寧可少一筆樣本，也不要把假大跌灌進成績單（partial 不污染分母是既有設計）。
+    const action = actionBaseByCode.get(pick.code) || null;
+    if (action?.unresolved) {
+      return { ...pick, verified: false, pendingReason: "corporate-action-unresolved" };
+    }
+    // 結果表給的是比率（參考價 ÷ 除權息前收盤），乘在快照價上；快照價與官方收盤的正常差異
+    // 因此不會被吸進報酬裡。上櫃走逐檔月歷史時拿到的是絕對的官方參考價。
+    const base = action
+      ? (action.ratio != null ? signalClose * action.ratio : action.base)
+      : signalClose;
+    const corporateActionAdjusted = Boolean(action)
+      && Math.abs(base / signalClose - 1) > CORPORATE_ACTION_RATIO_TOLERANCE;
     const openReturn = pct((bar.open ?? NaN) - base, base);
     const highReturn = pct((bar.high ?? NaN) - base, base);
     const lowReturn = pct((bar.low ?? NaN) - base, base);

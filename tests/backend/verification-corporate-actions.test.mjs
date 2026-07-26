@@ -24,10 +24,55 @@ await writeFile(join(dataDir, "fundamentals-cache.json"), JSON.stringify({
         observedAt: "2026-01-01T00:00:00.000Z", revision: 1,
       },
     },
+    2882: {
+      [D1]: {
+        kind: "除息", cashDividend: 5, stockRatio: 0, subscriptionRatio: 0, subscriptionPrice: 0,
+        observedAt: "2026-01-01T00:00:00.000Z", revision: 1,
+      },
+    },
+    // 上櫃：歸檔有公告，但上櫃沒有 TWT49U 對應端點 → 必須走逐檔月歷史拿官方參考價。
+    5488: {
+      [D1]: {
+        kind: "除息", cashDividend: 5, stockRatio: 0, subscriptionRatio: 0, subscriptionPrice: 0,
+        source: "TPEx", observedAt: "2026-01-01T00:00:00.000Z", revision: 1,
+      },
+    },
+  },
+  // 官方除權除息計算結果表：2412 在 D1 前收 100 → 參考價 95（比率 0.95）。
+  // 這是上市側唯一可靠的比率來源——整批當日收盤與逐檔月歷史的漲跌欄在事件日都不可用
+  // （前者是 "0.0000" 哨兵，後者被遮成 "X0.00"）。
+  // 刻意**不**預先寫 corporateActionResultMonths：下面有一條測試要驗「該月結果表沒抓過時，
+  // 上市 X 標記不足以停等」（上游打嗝不該讓驗證單全部停擺）。需要月份狀態的測試自己臨時設。
+  //
+  // 兩個代號刻意分工，否則測試會互相打到：
+  //   2412 只有歸檔公告、**沒有**結果表 → 量化失敗，用來測停等／解不出基準。
+  //   2882 歸檔＋結果表都有（前收 100 → 參考價 95）→ 量化成功，用來測正確換基準。
+  //   6488 只有結果表、**沒有**歸檔公告 → 測「歸檔漏了但交易所有登記」也要偵測得到
+  //        （D-43 實測：台積電 06-11、鴻海 07-02、中華電 07-09 都是歸檔完全沒有的真實事件）。
+  corporateActionResults: {
+    2882: { [D1]: { kind: "除息", preClose: 100, referencePrice: 95 } },
+    6488: { [D1]: { kind: "除息", preClose: 100, referencePrice: 95 } },
   },
 }), "utf8");
 
-const { mod, mock } = await importServer({ dataDir, routes: [] });
+// 上櫃逐檔月歷史：漲跌欄是**相對參考價**算出來的正常數字（2026-07-27 實測 5/5），
+// 所以 close − change 就是官方參考價。上櫃沒有 TWT49U 對應端點，這是它唯一的比率來源。
+// 對照組：整批當日收盤的漲跌欄在事件日是中文字串 "除息"／"除權"，完全不能用。
+const TPEX_HISTORY_ROWS = {
+  tables: [{
+    data: [
+      // [日期, 成交仟股, 成交仟元, 開, 高, 低, 收, 漲跌, 筆數]
+      [`${Number(D1.slice(0, 4)) - 1911}/${D1.slice(4, 6)}/${D1.slice(6, 8)}`, "100", "9500", "95", "96", "94.5", "95.5", "0.50", "10"],
+    ],
+  }],
+  name: "測試上櫃",
+};
+const { mod, mock } = await importServer({
+  dataDir,
+  routes: [
+    { match: /tpex\.org\.tw\/www\/zh-tw\/afterTrading\/tradingStock/, reply: TPEX_HISTORY_ROWS },
+  ],
+});
 const { replaySwingVerificationHistory } = mod;
 // replaySwingVerificationHistory 是同步的，公司行動偵測要讀「已載入」的歸檔。
 // 生產路徑由 advanceSwingVerification 先 await 這個載入，測試必須照同一個順序，
@@ -258,29 +303,109 @@ test("D-01：比率已套用但推進失敗，重跑不可把同一筆事件乘�
   assert.equal(entry.lastChecked, D1);
 });
 
-test("隔日沖驗證：只有官方歸檔確認當日有除權息，才可以換掉基準價", async () => {
-  // 訊號日收 100；觀察日除息 5 元（官方參考價 95），當天開 95 高 96 低 94.5 收 95.5。
+// 2026-07-27 實測 20260724 的 18 筆真實事件後改寫：基準價**不可**取自 bar.previousClose。
+//   整批當日／上市：Change 是 "0.0000" 哨兵（12/12）→ previousClose ＝ 當日收盤
+//     → 基準價變成觀察日自己的收盤，currentReturn 恆為 0。
+//   整批當日／上櫃：Change 是中文字串 "除息"／"除權"（6/6）→ null → 退回訊號日收盤 → 假大跌。
+//   逐檔月歷史／上市：漲跌欄被遮成 "X0.00" → 同樣是 null → 假大跌。
+// 現在改由計算結果表的比率（上市）或逐檔月歷史的官方參考價（上櫃）解基準。
+// 觀察日那一列刻意帶 previousClose: 95.5（＝當日收盤），複製上市整批端點的 "0.0000" 哨兵行為。
+// 舊寫法會拿它當基準 → currentReturn 恆為 0；正確答案要來自計算結果表的比率 0.95。
+const observeWithMonthSealed = async (picks, byCode) => {
+  const history = await mod.loadFundamentalsHistory();
+  history.corporateActionResultMonths ||= {};
+  history.corporateActionResultMonths[D1.slice(0, 6)] = {
+    status: "ok", rows: 1, codes: 1, observedAt: "2026-01-01T00:00:00.000Z", sealed: true,
+  };
+  try {
+    return await mod.observeSignalSnapshot({
+      asOf: `${D0.slice(0, 4)}-${D0.slice(4, 6)}-${D0.slice(6, 8)}`,
+      picks,
+    }, {
+      reference: { byCode: new Map(byCode), warnings: [] },
+      calendar: { tradingDays: [D0, D1], holidayRows: [], warnings: [] },
+    });
+  } finally {
+    delete history.corporateActionResultMonths[D1.slice(0, 6)];
+  }
+};
+
+test("隔日沖驗證：觀察日是除權息日時，用官方計算結果表的比率換基準價", async () => {
+  // 訊號日收 100；觀察日除息 5 元（結果表：前收 100 → 參考價 95），當天開 95 高 96 低 94.5 收 95.5。
   // 未修正前 lowReturn = (94.5−100)/100 = −5.5% → brokeMinus2；正確應以 95 為基準。
-  const withEvent = await mod.observeSignalSnapshot({
-    asOf: `${D0.slice(0, 4)}-${D0.slice(4, 6)}-${D0.slice(6, 8)}`,
-    picks: [{ code: "2412", name: "中華電", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
-  }, {
-    reference: {
-      byCode: new Map([["2412", {
-        code: "2412", name: "中華電", exchange: "TWSE", rawDate: D1,
-        open: 95, high: 96, low: 94.5, price: 95.5, previousClose: 95,
-      }]]),
-      warnings: [],
-    },
-    calendar: { tradingDays: [D0, D1], holidayRows: [], warnings: [] },
-  });
+  const withEvent = await observeWithMonthSealed(
+    [{ code: "2882", name: "國泰金", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
+    [["2882", {
+      code: "2882", name: "國泰金", exchange: "TWSE", rawDate: D1,
+      // 哨兵：上市整批端點在事件日的 Change 是 "0.0000"，於是 previousClose 等於當日收盤。
+      open: 95, high: 96, low: 94.5, price: 95.5, previousClose: 95.5,
+    }]],
+  );
   const row = withEvent.rows?.[0];
   assert.ok(row, JSON.stringify(withEvent).slice(0, 300));
   assert.equal(row.verified, true);
-  assert.equal(row.corporateActionAdjusted, true, "歸檔有事件 → 換基準");
-  assert.equal(row.adjustedBase, 95);
+  assert.equal(row.corporateActionAdjusted, true, "偵測到事件 → 換基準");
+  assert.equal(row.adjustedBase, 95, "基準＝訊號日收盤 × 0.95，不是哨兵給的 95.5");
   assert.equal(row.brokeMinus2, false, "以參考價為基準只跌 0.53%，不該記破線");
   assert.ok(Math.abs(row.currentReturn - 0.53) < 0.02, `currentReturn=${row.currentReturn}`);
+  // 舊行為的特徵：基準取哨兵 95.5 時 currentReturn 會剛好是 0。
+  assert.notEqual(row.currentReturn, 0, "基準若誤取觀察日收盤，報酬會恆為 0");
+});
+
+// 上櫃沒有 TWT49U 對應端點（1065 個收錄代號裡只有 1 檔上櫃），唯一的比率來源是逐檔月歷史。
+// **不可**改用整批當日收盤：它的漲跌欄在事件日是中文字串 "除息"／"除權"（實測 6/6）。
+test("隔日沖驗證：上櫃走官方逐檔月歷史的參考價換基準價", async () => {
+  const result = await observeWithMonthSealed(
+    [{ code: "5488", name: "松普", exchange: "TPEx", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
+    [["5488", {
+      code: "5488", name: "松普", exchange: "TPEx", rawDate: D1,
+      // 整批端點的哨兵：漲跌欄是中文字串 → parseNumber 回 null → previousClose 也是 null。
+      open: 95, high: 96, low: 94.5, price: 95.5, previousClose: null,
+    }]],
+  );
+  const row = result.rows?.[0];
+  assert.ok(row, JSON.stringify(result).slice(0, 300));
+  assert.equal(row.verified, true);
+  assert.equal(row.corporateActionAdjusted, true);
+  assert.equal(row.adjustedBase, 95, "逐檔月歷史的 close − change＝95．5 − 0.5＝95＝官方參考價");
+  assert.equal(row.brokeMinus2, false, "以參考價為基準只跌 0.53%，不該記破線");
+});
+
+// 本機歸檔只從部署後累積，交易所的計算結果表涵蓋全部歷史。D-43 實測：歸檔漏掉台積電（06-11）、
+// 鴻海（07-02）、中華電（07-09）等真實事件，跳空 −0.22%~−4.30% 全在 10.5% heuristic 門檻之下。
+// 所以偵測不能只問歸檔——結果表有這一筆就是交易所自己說「這天有事件」。
+test("隔日沖驗證：歸檔漏了但計算結果表有登記，仍要換基準價", async () => {
+  const result = await observeWithMonthSealed(
+    [{ code: "6488", name: "環球晶", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
+    [["6488", {
+      code: "6488", name: "環球晶", exchange: "TWSE", rawDate: D1,
+      open: 95, high: 96, low: 94.5, price: 95.5, previousClose: 95.5,
+    }]],
+  );
+  const row = result.rows?.[0];
+  assert.ok(row, JSON.stringify(result).slice(0, 300));
+  assert.equal(row.verified, true);
+  assert.equal(row.corporateActionAdjusted, true, "歸檔沒有這筆，但交易所結果表有 → 仍要換基準");
+  assert.equal(row.adjustedBase, 95);
+  assert.equal(row.brokeMinus2, false);
+});
+
+// 2412 有歸檔公告但沒有結果表，且逐檔月歷史被 fetch mock 擋住（＝抓不到）→ 解不出基準。
+// 舊行為會用哨兵 previousClose 或退回訊號日收盤，兩種都會產出一個看起來正常的錯數字。
+test("隔日沖驗證：偵測到除權息卻解不出官方比率時，不給結論而非給錯的", async () => {
+  const result = await observeWithMonthSealed(
+    [{ code: "2412", name: "中華電", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
+    [["2412", {
+      code: "2412", name: "中華電", exchange: "TWSE", rawDate: D1,
+      open: 95, high: 96, low: 94.5, price: 95.5, previousClose: 95.5,
+    }]],
+  );
+  const row = result.rows?.[0];
+  assert.ok(row, JSON.stringify(result).slice(0, 300));
+  assert.equal(row.verified, false, "解不出基準就不可宣稱驗證完成");
+  assert.equal(row.pendingReason, "corporate-action-unresolved");
+  assert.equal(row.brokeMinus2, undefined, "不可留下用原始價算出來的假破線");
+  assert.equal(result.complete, false, "整份快照因此不算完整，不會污染長期分母");
 });
 
 test("隔日沖驗證：歸檔沒有事件時，價差再大也不可自作主張換基準價", async () => {
