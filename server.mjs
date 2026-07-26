@@ -8484,6 +8484,13 @@ function buildTechnicalSignals(rows, macd, maShort, maMid, swings, supportLine, 
   return {
     breakout,
     breakdown,
+    // 「站在線的哪一側」是**狀態**，「今天剛穿過」是**事件**（breakout/breakdown 要求前一根還在線的另一側）。
+    // 舊寫法只回事件，於是價格早就站上壓力線之後，畫面同時顯示「壓力 3669.71」與
+    // 「目前沒有明確突破或跌破」——使用者看到收盤 3750 高於壓力 3670 卻被告知沒突破。
+    // 邏輯沒錯（那次突破不是今天），但那句話把「不是今天」講成了「沒有」。
+    // 實例：2454 聯發科 2026-07-24（收 3750／壓力線 3669.71）。
+    aboveResistance: Number.isFinite(resistanceNow) && last.close > resistanceNow,
+    belowSupport: Number.isFinite(supportNow) && last.close < supportNow,
     longWatch,
     risks,
     signals,
@@ -8629,6 +8636,9 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
     ? {
       breakout: false,
       breakdown: false,
+      // suppressed 時連「站在線的哪一側」都不能講：那條線畫在沒有正確還原的價格上。
+      aboveResistance: false,
+      belowSupport: false,
       longWatch: false,
       suppressed: "corporate-action-unresolved",
       risks: [],

@@ -163,6 +163,40 @@ test("signals：突破壓力線 → breakout＋longWatch 條件齊備", () => {
   assert.ok(out.signals.includes("突破壓力線"));
 });
 
+// 「今天剛穿過」（breakout）與「已經站在線的哪一側」（aboveResistance）是兩件事。
+// breakout 刻意要求前一根還在線的另一側，所以價格早就站上壓力線之後 breakout 是 false——
+// 那是對的，但前端只讀 breakout 的話會同時顯示「壓力 3669.71」與「沒有明確突破」，
+// 而收盤 3750 明明在那條線上方（2454 聯發科 2026-07-24 實例）。
+test("signals：已站在壓力線上方但不是今天穿過 → breakout false、aboveResistance true", () => {
+  const rows = baseRows();
+  rows.at(-2).close = 110;   // 前一根就已經在 105 之上
+  rows.at(-1).close = 112;
+  const resistance = { slope: 0, intercept: 105 };
+  const out = buildTechnicalSignals(rows, flatMacd(rows.length), flatMa(rows.length, 101), flatMa(rows.length, 102), noSwings, null, resistance);
+  assert.equal(out.breakout, false, "不是今天才穿過，就不算突破事件");
+  assert.equal(out.aboveResistance, true, "但狀態上確實在壓力線上方，這件事必須說得出來");
+  assert.ok(!out.signals.includes("突破壓力線"));
+});
+
+test("signals：已在支撐線下方但不是今天跌破 → breakdown false、belowSupport true", () => {
+  const rows = baseRows();
+  rows.at(-2).close = 90;
+  rows.at(-1).close = 88;
+  const support = { slope: 0, intercept: 95 };
+  const out = buildTechnicalSignals(rows, flatMacd(rows.length), flatMa(rows.length, 101), flatMa(rows.length, 102), noSwings, support, null);
+  assert.equal(out.breakdown, false);
+  assert.equal(out.belowSupport, true);
+});
+
+test("signals：線的另一側時兩個旗標都是 false（不得反向誤報）", () => {
+  const rows = baseRows();               // 收盤固定 100
+  const resistance = { slope: 0, intercept: 105 };
+  const support = { slope: 0, intercept: 95 };
+  const out = buildTechnicalSignals(rows, flatMacd(rows.length), flatMa(rows.length, 101), flatMa(rows.length, 102), noSwings, support, resistance);
+  assert.equal(out.aboveResistance, false, "100 < 105，不在壓力線上方");
+  assert.equal(out.belowSupport, false, "100 > 95，不在支撐線下方");
+});
+
 test("averageTrueRange：含跳空的 TR 手算", () => {
   const rows = [
     { high: 10, low: 8, close: 9 },   // TR = 2

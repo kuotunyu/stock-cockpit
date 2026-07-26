@@ -5163,7 +5163,10 @@ function renderOvernightGroups() {
   el.overnightGroups.innerHTML = `
     <div class="overnight-summary">
       <div class="overnight-summary-primary">
-        <strong>${state.overnightView === "overview" ? "隔日沖總覽 v1" : `只看：${activeGroup?.[1] || "隔日沖分群"}`}</strong>
+        <!-- 這裡原本寫死「隔日沖總覽 v1」。它指的是面板版面版本，但畫面上從不顯示真正的
+             公式版本（OVERNIGHT_FORMULA_VERSION 目前已是 v3），使用者看到的唯一一個「v」
+             會被讀成引擎版本。標籤本身對使用者沒有資訊量，直接拿掉。 -->
+        <strong>${state.overnightView === "overview" ? "隔日沖總覽" : `只看：${activeGroup?.[1] || "隔日沖分群"}`}</strong>
         <span><b>訊號日</b>${dateLabels.signalLabel}</span>
         <span><b>觀察日</b>${dateLabels.observationLabel}</span>
       </div>
@@ -5545,9 +5548,14 @@ function renderSwingCard(pick) {
     if (volRatio >= 1.2) reasons.push(`量能放大（量比 ${volRatio.toFixed(1)}）`);
     else if (volRatio >= 0.9) reasons.push("量能持穩");
   }
+  // 「划不划算」要用**淨**盈虧比判斷（門檻也是套在淨值上）。用毛值講「相當划算」會在
+  // 高風險設定上失準：毛 2.0 但停損很近時，扣掉來回成本後可能只剩 1.3。
+  // 兩個數字都顯示，讓使用者看得出成本吃掉多少。
+  const rrNet = Number(pick.plan?.rrNet);
   if (Number.isFinite(rr)) {
-    if (rr >= 2) reasons.push(`盈虧比 ${rr.toFixed(1)}、相當划算`);
-    else if (rr >= 1) reasons.push(`盈虧比 ${rr.toFixed(1)}`);
+    const shown = Number.isFinite(rrNet) ? `盈虧比 ${rr.toFixed(1)}（淨 ${rrNet.toFixed(1)}）` : `盈虧比 ${rr.toFixed(1)}`;
+    const judged = Number.isFinite(rrNet) ? rrNet : rr;
+    reasons.push(judged >= 2 ? `${shown}、相當划算` : shown);
   }
   if (score >= 80) reasons.push(`型態分 ${score} 偏高`);
   const reasonHtml = reasons.length
@@ -5574,7 +5582,7 @@ function renderSwingCard(pick) {
     : "";
   return `
     <article class="swing-card" data-swing-code="${pick.code}" role="button" tabindex="0" aria-label="${escapeHtml(pick.name)} ${pick.code} 策略明細">
-      <div class="swing-rank-badge ${scoreTier}" style="--score:${Math.max(6, Math.min(100, score))}%" title="策略評分 0–100：趨勢＋MACD動能＋貼近中軌＋量能＋流動性＋盈虧比綜合計算，越高代表型態越好且越划算；盈虧比<1 的設定不列入。RANK 依評分由高到低排名。">
+      <div class="swing-rank-badge ${scoreTier}" style="--score:${Math.max(6, Math.min(100, score))}%" title="策略評分 0–100：趨勢＋MACD動能＋貼近中軌＋量能＋流動性＋盈虧比綜合計算，越高代表型態越好且越划算；扣掉一買一賣手續費與證交稅之後的淨盈虧比小於 1 的設定不列入。RANK 依評分由高到低排名。">
         <small>RANK</small>
         <strong>${pick.rank}</strong>
         <em>${score}<i>分</i></em>
@@ -7203,7 +7211,17 @@ function renderTechnicalAnalysis() {
   // 官方公司行動欄位不齊時後端會把型態結論整組停掉。這裡必須跟著改寫文案——
   // 沿用「尚未同時滿足突破、量能、MACD 與均線條件」會把「沒評估」講成「評估過但沒過」。
   const suppressed = Boolean(signals.suppressed);
-  const trendState = suppressed ? "暫不判讀" : signals.breakout ? "突破壓力線" : signals.breakdown ? "跌破支撐線" : "區間觀察";
+  // 「今天剛穿過」（breakout/breakdown）與「已經站在線的哪一側」（aboveResistance/belowSupport）
+  // 是兩件事。只講事件的話，價格早就站上壓力線之後，畫面會同時顯示「壓力 3669.71」與
+  // 「沒有明確突破」——使用者看到收盤 3750 高於壓力 3670，那句話等於在騙他。
+  // 實例：2454 聯發科 2026-07-24。
+  const trendState = suppressed
+    ? "暫不判讀"
+    : signals.breakout ? "突破壓力線"
+      : signals.breakdown ? "跌破支撐線"
+        : signals.aboveResistance ? "壓力線上方"
+          : signals.belowSupport ? "支撐線下方"
+            : "區間觀察";
   const badge = suppressed ? "暫不判讀" : signals.longWatch ? "做多觀察" : signals.risks?.length ? "風險提醒" : "技術觀察";
   const badgeClass = suppressed ? "is-neutral" : signals.longWatch ? "is-positive" : signals.risks?.length ? "is-risk" : "is-neutral";
   // 還原權息提示：純官方還原只放進下方明細（台股年年配息，天天掛警示等於沒警示）；
@@ -7231,7 +7249,12 @@ function renderTechnicalAnalysis() {
     <article>
       <span>趨勢線</span>
       <strong>${trendState}</strong>
-      <p>${suppressed ? "還原基礎不完整，不判斷突破或跌破。" : signals.breakout ? "收盤價突破近期壓力線。" : signals.breakdown ? "收盤價跌破上升支撐線。" : "目前沒有明確突破或跌破。"}</p>
+      <p>${suppressed ? "還原基礎不完整，不判斷突破或跌破。"
+        : signals.breakout ? "收盤價突破近期壓力線。"
+          : signals.breakdown ? "收盤價跌破上升支撐線。"
+            : signals.aboveResistance ? "收盤價已在壓力線上方，但不是今天才突破的。"
+              : signals.belowSupport ? "收盤價已在支撐線下方，但不是今天才跌破的。"
+                : "目前沒有明確突破或跌破。"}</p>
     </article>
     <article>
       <span>MACD</span>

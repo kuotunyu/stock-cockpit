@@ -155,3 +155,51 @@ test("D-21：估算還原／官方欄位不齊要升級成醒目提示", () => {
   assert.match(unresolved.badge, /暫不判讀/, "徽章不能還掛著「技術觀察」");
   assert.doesNotMatch(unresolved.summary, /尚未同時滿足/, "沒評估就不能說沒滿足");
 });
+
+// 「壓力 3669.71」＋「目前沒有明確突破或跌破」同時出現，而收盤 3750 就在那條線上方
+// ——邏輯沒錯（那次突破不是今天），但那句話把「不是今天」講成了「沒有」。
+// 2454 聯發科 2026-07-24 實機截圖抓到的。
+const trendPanel = (signals) => JSON.parse(app.evalIn(`JSON.stringify((() => {
+  technicalState.loading = false;
+  technicalState.error = "";
+  technicalState.data = {
+    ok: true, code: "2454", name: "聯發科", period: "day", asOf: "2026/07/24",
+    candles: [
+      { date: "2026/07/23", open: 3900, high: 3950, low: 3860, close: 3880, volumeLots: 9000, maShort: 3697, maMid: 3883, macd: { dif: -80.98, dea: -111.09, histogram: 25 } },
+      { date: "2026/07/24", open: 3805, high: 4010, low: 3750, close: 3750, volumeLots: 8371, maShort: 3697, maMid: 3883, macd: { dif: -80.98, dea: -111.09, histogram: 30.11 } }
+    ],
+    signals: ${JSON.stringify(signals)},
+    fibonacci: { active: false },
+    trendLines: {
+      support: null,
+      resistance: { valueAtLast: 3669.71, points: [{ date: "2026/06/20", price: 4200 }, { date: "2026/07/10", price: 3900 }] },
+    },
+    corporateActions: { adjusted: false, source: "", notes: [], events: [] },
+  };
+  state.technicalCode = "2454";
+  state.technicalPeriod = "day";
+  renderTechnicalAnalysis();
+  const cards = [...el.technicalSummary.querySelectorAll("article")];
+  const card = cards.find((c) => (c.querySelector("span")?.textContent || "").trim() === "趨勢線");
+  return { state: (card?.querySelector("strong")?.textContent || "").trim(), text: (card?.querySelector("p")?.textContent || "").trim() };
+})())`));
+
+test("已站在壓力線上方但不是今天突破：不可說成「沒有明確突破」", () => {
+  const out = trendPanel({ breakout: false, breakdown: false, aboveResistance: true, belowSupport: false, risks: [], signals: [], checks: {} });
+  assert.equal(out.state, "壓力線上方", `狀態要講出來（實際「${out.state}」）`);
+  assert.match(out.text, /已在壓力線上方/);
+  assert.match(out.text, /不是今天/, "要點明是狀態不是今天的事件");
+  assert.doesNotMatch(out.text, /沒有明確突破/, "價格就在線上方，不可說沒有突破");
+});
+
+test("今天剛突破 → 仍講「突破壓力線」", () => {
+  const out = trendPanel({ breakout: true, breakdown: false, aboveResistance: true, belowSupport: false, risks: [], signals: ["突破壓力線"], checks: {} });
+  assert.equal(out.state, "突破壓力線");
+  assert.match(out.text, /收盤價突破近期壓力線/);
+});
+
+test("真的在區間內 → 才說「沒有明確突破或跌破」", () => {
+  const out = trendPanel({ breakout: false, breakdown: false, aboveResistance: false, belowSupport: false, risks: [], signals: [], checks: {} });
+  assert.equal(out.state, "區間觀察");
+  assert.match(out.text, /目前沒有明確突破或跌破/);
+});

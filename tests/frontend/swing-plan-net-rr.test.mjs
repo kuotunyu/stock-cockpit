@@ -69,3 +69,27 @@ test("「前有壓力」用黃色 hint，不是紅色警示（它是資訊不是
   assert.match(rule[1], /color\s*:\s*var\(--yellow\)/, "用黃色：它是資訊不是錯誤");
   assert.doesNotMatch(rule[1], /var\(--red\)/, "不該升級成紅色警示");
 });
+
+// 「划不划算」的判斷要跟門檻同一個口徑（淨值）。用毛值講「相當划算」會在停損很近的設定上失準。
+test("上榜亮點的「相當划算」用淨值判斷，兩個數字都顯示", () => {
+  // 毛 2.0 但淨 1.3（停損很近、成本佔比高）→ 不該說「相當划算」
+  const marginal = render({
+    plan: { entry: 100, initialStop: 95, structuralStop: 98, trailingTrigger: 105, target: 104, rr: 2, rrNet: 1.3, nearestResistance: null },
+  });
+  assert.match(marginal, /盈虧比 2\.0（淨 1\.3）/, "兩個數字都要出現");
+  assert.doesNotMatch(marginal, /相當划算/, "淨值只有 1.3，不該說相當划算");
+
+  // 毛 4.0、淨 3.6 → 說得上划算
+  const good = render({
+    plan: { entry: 100, initialStop: 95, structuralStop: 96, trailingTrigger: 105, target: 120, rr: 5, rrNet: 4.37, nearestResistance: null },
+  });
+  assert.match(good, /盈虧比 5\.0（淨 4\.4）、相當划算/);
+});
+
+test("評分徽章的 tooltip 要說明門檻是淨值", () => {
+  const html = render();
+  const badge = html.match(/class="swing-rank-badge[^"]*"[^>]*title="([^"]*)"/);
+  assert.ok(badge, "找不到評分徽章的 tooltip");
+  assert.match(badge[1], /淨盈虧比/, "要講清楚是淨值，否則使用者看到毛 1.5 被剔除會困惑");
+  assert.doesNotMatch(badge[1], /\*\*/, "HTML 屬性不會渲染 markdown，不可留星號");
+});
