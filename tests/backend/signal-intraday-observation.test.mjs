@@ -12,7 +12,22 @@ const TODAY = compactToday(0);
 const SIGNAL = compactTradingDay(-1);
 // 週末／非交易日沒有「盤中」可言：引擎會正確地把前一個交易日判成 final，
 // 這個情境本身不成立。與其偽造前提讓測試假通過，不如明確跳過並說明原因。
+//
+// 但「今天是交易日」只是前提的一半——**現在必須真的在盤中**。
+// 舊守衛只檢查日期，於是這條測試在每個交易日的 00:00~09:00 與 13:35~24:00 都會失敗，
+// 也就是交易日約 85% 的時間（2026-07-27 00:01 實際踩到：週一凌晨，日期已翻但離開盤還有 9 小時）。
+// 它之所以長期沒被發現，是因為多數改動都在週末驗收，那時整條被 NON_TRADING_TODAY 跳過。
+const taipeiHm = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Taipei", hour12: false, hour: "2-digit", minute: "2-digit",
+}).format(new Date());
+const [taipeiHour, taipeiMinute] = taipeiHm.split(":").map(Number);
+const taipeiMinutes = taipeiHour * 60 + taipeiMinute;
+// 與 isTaiwanMarketSession 同一個區間：09:00–13:35（含收盤後最後一次撮合回報）。
+const IN_SESSION = taipeiMinutes >= 9 * 60 && taipeiMinutes <= 13 * 60 + 35;
 const NON_TRADING_TODAY = compactTradingDay(0) !== TODAY;
+const SKIP_REASON = NON_TRADING_TODAY
+  ? "今天不是交易日，沒有盤中觀察情境可測"
+  : IN_SESSION ? false : `現在是台北 ${taipeiHm}，不在 09:00–13:35 盤中時段，這個情境本身不成立`;
 const referenceTwse = [
   { ...stockDayAllRow({ code: "2330", name: "台積電", close: 100 }), Date: rocCompact(SIGNAL) },
   { ...stockDayAllRow({ code: "1101", name: "台泥", close: 40 }), Date: rocCompact(SIGNAL) },
@@ -46,7 +61,7 @@ after(async () => {
 });
 
 test("盤中精確日 MIS 可 provisional 驗證，缺原始 O/H/L 的檔位維持 pending", {
-  skip: NON_TRADING_TODAY ? "今天不是交易日，沒有盤中觀察情境可測" : false,
+  skip: SKIP_REASON,
 }, async () => {
   const db = await mod.loadDb();
   db.signalSnapshots = [{
