@@ -8936,11 +8936,13 @@ const SWING_MAX_DOWN_DAY = -6;     // 「站穩」要件：當日(還原後)跌�
 const SWING_MIN_RR = 1;            // 盈虧比下限：報酬至少要等於風險(RR≥1)才入選。RR<1 的設定不值得做，也順帶淘汰「離中軌過遠→停損遠→RR爛」的股
 const SWING_MIN_SCAN_COVERAGE = 0.7; // 至少 70% 候選有當日新鮮歷史，才可寫正式每日快照／驗證單。
 // 選股邏輯版本：改動後快照版本不符就重算，避免沿用舊邏輯算出的清單（也讓「更完整才覆蓋」只在同版本內比較）。
-// v17：還原權息改以交易所官方口徑為第一順位（TWT49U 計算結果表／上櫃參考價），
-// 實測候選池有 53.8% 的均線原本建立在沒還原的價格上，這確實會改變選出哪些標的。
-// 升版同時把「驗證單被同日重複列偽造公司行動」污染過的舊樣本隔離在 v16 之下——
-// buildSwingVerificationSummary 只統計當前版本，舊紀錄照規格保留不刪。
-const SWING_FORMULA_VERSION = "swing-v17-exchange-corporate-actions";
+// v18：拿掉目標價的「至少 +3%」下限（D-25）。那道下限會在上方壓力很近時把目標硬抬過壓力，
+// reward 憑空變大、RR 虛胖，讓本該被 SWING_MIN_RR 剔除的設定通過——RR≥1 這道關等於失效。
+// 實測 2026-07-24：13 檔通過 RR≥1 的標的裡，有 6 檔的目標是被這道下限抬上去的。
+// 必須升版：驗證單記錄的是建立當下的 target，混在同一個分母裡等於把「目標被膨脹過的交易」
+// 與「目標誠實的交易」當成同一組樣本統計，而兩者的觸價難度本質上不同。
+// v17 只累積了不到一天的 pending 樣本、尚未產生任何已顯示的統計，代價極小。
+const SWING_FORMULA_VERSION = "swing-v18-honest-target";
 
 // 台股普通股升降單位：策略建議價必須是交易所可申報的價格，不能只四捨五入到小數二位。
 function stockTickSize(price) {
@@ -9089,9 +9091,14 @@ function buildSwingPlan(features) {
     ? entry + (features.recentHigh - features.pullbackLow)
     : null;
   const rawTarget = overhead ?? measuredMove ?? entry + risk * 2;
-  const conservativeTarget = roundToStockTick(rawTarget, "down");
-  const minimumTarget = roundToStockTick(entry * 1.03, "up");
-  const target = Math.max(conservativeTarget, minimumTarget); // 合法檔位且至少 +3%；其餘仍向下取整避免高估報酬
+  // D-25：舊寫法是 Math.max(conservativeTarget, roundToStockTick(entry * 1.03, "up"))，
+  // 也就是「目標至少 +3%」的下限。它與同一行註解宣稱的「向下取整避免高估報酬」正好相反：
+  // 上方壓力若只在 +1%，下限會把目標硬抬到壓力之上，reward 憑空變大、RR 跟著虛胖，
+  // 於是本該被 SWING_MIN_RR 剔除的設定剛好通過。實測 2026-07-24：現行 13 檔通過 RR≥1，
+  // 其中 6 檔的目標是被這道下限抬上去的（中租-KY 1.0→1.6、興富發 1.0→1.5）。
+  // 下限的用意應該是「不要提出目標太小的交易」，但正確的回應是**拒絕這筆交易**（RR 不足），
+  // 不是把目標膨脹到通過門檻。拿掉之後 RR≥1 這道關才真的在做它宣稱的事。
+  const target = roundToStockTick(rawTarget, "down"); // 一律向下取整，不再有下限
 
   const reward = target - entry;
   const rr = risk > 0 ? roundTo(reward / risk) : null;
@@ -11890,7 +11897,7 @@ export {
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,
   buildSignalVerification, buildVerificationHistory,
   // 週/月K 聚合與波段日期 helper（history-aggregate.test）
-  aggregateHistoryByPeriod, getWeekKey, addPreviousClose, resolveMarketCloseDate, appendTodayCloseBar, fetchStockHistoryMonth,
+  aggregateHistoryByPeriod, getWeekKey, addPreviousClose, resolveMarketCloseDate, appendTodayCloseBar, fetchStockHistoryMonth, getStockHistory,
   // 法人／融資券（institutional-margin.test）
   normalizeTwseInstitutionalRow, normalizeTpexInstitutionalRow,
   normalizeTwseMarginRow, normalizeTpexMarginRow, getInstitutionalData, getMarginData,

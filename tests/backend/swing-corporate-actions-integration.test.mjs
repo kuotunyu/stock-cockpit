@@ -194,12 +194,24 @@ function scenarioWarnings(result) {
   return (result.scenarios || []).flatMap((scenario) => scenario.warns || []);
 }
 
-test("fixture control：未受公司行為污染時確實命中且 RR≥1", () => {
+// fixture control：確認未受公司行為污染時確實命中場景，讓下面的測試若失敗必定是
+// 公司行動處理的問題，而不是 fixture 本身就選不出來。
+//
+// D-25（2026-07-27）之後這條**刻意不再斷言 RR≥1**：拿掉「目標至少 +3%」的下限後，
+// 這個 fixture 的誠實盈虧比是 0.8——上方最近壓力在 105.31（僅 +2.2%），reward 只有 2.0
+// 而 risk 是 2.5。舊版的下限把目標抬到 106.1（**壓力之上**），硬湊出 RR 1.24 才通過。
+// 也就是說這個 fixture 本身就是 D-25 的活例子，斷言它 RR≥1 等於把被膨脹的行為釘成期望。
+// 真正要守的「對照檔必須通過 RR gate」由下面的 scanSwingBoard 測試直接斷言
+// （codes.includes(COMPLETE)），那條更直接、而且走的是還原後的序列。
+test("fixture control：未受公司行為污染時確實命中場景", () => {
   const features = mod.computeSwingFeatures(pristineRows, [], { allowHeuristicFallback: true });
   const scenario = mod.classifySwingScenario(features);
   const plan = mod.buildSwingPlan(features);
   assert.equal(scenario?.key, "midBandDefense");
-  assert.ok(plan.rr >= 1, `fixture RR=${plan.rr}，必須能通過 scan 的 RR gate`);
+
+  // 特徵化目前的誠實數字，日後若目標價邏輯再變動會在這裡被看見。
+  assert.equal(plan.target, 105, "目標＝上方最近壓力向下取整，不再被 +3% 下限抬過壓力");
+  assert.ok(Math.abs(plan.rr - 0.8) < 0.02, `誠實 RR 應約 0.8，實際 ${plan.rr}`);
 });
 
 test("inspectSwingStock 會載入 fundamentals 歷史，同日完整官方事件優先於價差 heuristic", async () => {

@@ -250,7 +250,7 @@ test("buildSwingPlan：停損／目標／盈虧比的結構性約束", () => {
   assert.ok(plan.structuralStop < entry, "結構停損須低於進場");
   assert.ok(plan.structuralStop >= entry * 0.82 - 0.01, "結構停損不超過 -18%");
   assert.ok(plan.structuralStop <= entry * 0.98 + 0.01, "至少留 2% 風險");
-  assert.ok(plan.target >= entry * 1.03 - 0.01, "目標至少 +3%");
+  assert.ok(plan.target > entry, "目標須高於進場（否則 reward ≤ 0，RR 會自然把它剔除）");
   assert.ok(plan.initialStop < entry && plan.trailingTrigger > entry);
   // rr 與 (target-entry)/(entry-structuralStop) 一致（容忍四捨五入）
   const recomputed = (plan.target - entry) / (entry - plan.structuralStop);
@@ -284,15 +284,39 @@ test("buildSwingPlan：所有建議價皆為可申報檔位，RR 以合法價重
   assert.ok(Math.abs(plan.rr - expectedRr) < 0.01, `rr ${plan.rr} 應以合法價位重算`);
 });
 
-test("buildSwingPlan：跨 10 元升降單位仍守住目標至少 +3%", () => {
+// D-25：舊版有一道「目標至少 +3%」的下限（Math.max(target, entry*1.03)），
+// 與同一行註解宣稱的「向下取整避免高估報酬」正好相反——上方壓力若只在 +2.1%，
+// 下限會把目標硬抬到壓力之上，reward 憑空變大、RR 虛胖，於是本該被 SWING_MIN_RR
+// 剔除的設定剛好通過。這個 fixture 過去把錯誤行為釘成期望（assert target === 10.3）。
+test("buildSwingPlan：目標取上方壓力並向下取整，不得被 +3% 下限抬過壓力", () => {
   const f = computeSwingFeatures(upRows);
   f.last.close = 9.99;
   f.ma20 = 9.8;
   f.boll = { ...f.boll, lower: 9.7 };
   f.swings = { ...f.swings, lows: [{ price: 9.8 }], highs: [{ price: 10.2 }] };
   const plan = buildSwingPlan(f);
-  assert.equal(plan.target, 10.3);
-  assert.ok(plan.target >= plan.entry * 1.03, `${plan.entry} → ${plan.target} 不足 +3%`);
+
+  assert.equal(plan.entry, 9.99);
+  assert.equal(plan.target, 10.2, "目標＝上方最近壓力 10.2，不是被抬到 10.3");
+  assert.ok(plan.target < plan.entry * 1.03, "誠實目標只有 +2.1%，本來就不該硬湊到 +3%");
+  // 誠實 RR：(10.2−9.99) / (9.99−9.79) ≈ 1.05；舊版是 (10.3−9.99)/0.2 ≈ 1.55。
+  assert.ok(Math.abs(plan.rr - 1.05) < 0.05, `誠實 RR 應約 1.05，實際 ${plan.rr}`);
+});
+
+test("buildSwingPlan：誠實目標讓 RR 低於 1 的設定真的被算出來（不再靠下限矇混）", () => {
+  const f = computeSwingFeatures(upRows);
+  f.last.close = 100;
+  f.ma20 = 97;
+  f.boll = { ...f.boll, lower: 96 };
+  // 停損 97（風險 3），上方最近壓力 102.5（reward 2.5）→ 誠實 RR 0.83，應被 SWING_MIN_RR 剔除。
+  // 舊版的 +3% 下限會把目標抬到 103，reward 湊成 3、RR 剛好 1.0 通過——這正是這條要擋的事。
+  // 壓力刻意取 102.5：它必須大於 entry×1.02 才不會被「只看 +2% 以上壓力」那道過濾吃掉
+  //（那道過濾這次刻意保留，是另一個待決的判斷題）。
+  f.swings = { ...f.swings, lows: [{ price: 97 }], highs: [{ price: 102.5 }] };
+  const plan = buildSwingPlan(f);
+  assert.equal(plan.target, 102.5, "目標就是上方壓力，不得抬到 103");
+  assert.ok(Math.abs(plan.rr - 0.83) < 0.02, `誠實 RR 應約 0.83，實際 ${plan.rr}`);
+  assert.ok(plan.rr < 1, "低於 SWING_MIN_RR，掃描端會剔除它");
 });
 
 test("scoreSwing：0–100 整數；RR 與量比單調不減", () => {
