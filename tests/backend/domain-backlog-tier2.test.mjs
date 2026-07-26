@@ -35,6 +35,9 @@ test("D-26：缺口久到不可能自行結案的驗證單要被標為卡住並�
     ],
   };
   await mod.saveDb(db);
+  // saveDb 不會動摘要快取（只有 recordSwingVerification／advanceSwingVerification 會），
+  // 不清就會拿到前一個測試留下的 10 分鐘快取值。
+  mod.invalidateSwingVerifySummaryCache();
   const summary = await mod.buildSwingVerificationSummary();
   const scenario = summary.scenarios.find((item) => item.scenario === "midBandDefense");
 
@@ -53,6 +56,45 @@ test("D-26：分母損耗必須在 notes 明講，不能只放一個數字", asy
   const note = summary.notes.join(" ");
   assert.match(note, /卡住/);
   assert.match(note, /不會進入勝率分母|永遠不會進入勝率分母/, "要說清楚它們不進分母");
+});
+
+// ---- D-01 子項 1（停等的可見性）----
+
+// 停等是自癒的暫時狀態（官方比率通常隔天到齊），但「今天沒有推進」必須跟「今天沒有變化」
+// 長得不一樣，否則使用者無從分辨。而久到不可能自癒的停等就是分母損耗，要一起算進「卡住」。
+test("D-01：公司行動停等要單獨計數，久到不自癒時併入卡住", async () => {
+  const holdEntry = (code, from) => ({
+    ...pendingEntry(code, null),
+    corporateActionPending: { from, reason: "官方公告", detectedAt: new Date().toISOString() },
+  });
+  const db = await mod.loadDb();
+  db.swingVerification = {
+    20260601: [
+      holdEntry("4444", daysAgo(1)),  // 昨天的除權息，等官方比率 → 正常停等
+      holdEntry("5555", daysAgo(60)), // 60 天還沒解開 → 不可能自癒，算卡住
+      pendingEntry("6666", null),     // 正常 pending
+    ],
+  };
+  await mod.saveDb(db);
+  // saveDb 不會動摘要快取（只有 recordSwingVerification／advanceSwingVerification 會），
+  // 不清就會拿到前一個測試留下的 10 分鐘快取值。
+  mod.invalidateSwingVerifySummaryCache();
+  const summary = await mod.buildSwingVerificationSummary();
+  const scenario = summary.scenarios.find((item) => item.scenario === "midBandDefense");
+
+  assert.equal(summary.corporateActionPendingCount, 2, "兩筆在等官方比率");
+  assert.equal(summary.dataGapCount, 0, "停等不是缺 K，不可混進 dataGap");
+  assert.equal(summary.stalledCount, 1, "只有久到不自癒的那筆算卡住");
+  assert.equal(scenario.stalled, 1);
+  assert.equal(scenario.pending, 3);
+});
+
+test("D-01：停等的處理方式要在 notes 說明，不能只給一個數字", async () => {
+  const summary = await mod.buildSwingVerificationSummary();
+  const note = summary.notes.join(" ");
+  assert.match(note, /除權息|公司行動/);
+  assert.match(note, /暫停推進|停等/, "要說明它是暫停判定而不是已經判定");
+  assert.match(note, /假停損|事件前/, "要講清楚不停等會發生什麼事");
 });
 
 // ---- D-31 ----

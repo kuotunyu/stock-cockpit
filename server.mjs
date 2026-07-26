@@ -9808,7 +9808,7 @@ function recordSwingVerification(db, body) {
     changed = true;
   }
   if (pruneSwingVerification(db.swingVerification, 90)) changed = true;
-  if (changed) swingVerifySummaryCache = { expiresAt: 0, value: null };
+  if (changed) invalidateSwingVerifySummaryCache();
   return changed;
 }
 
@@ -9893,8 +9893,17 @@ function normalizeSwingVerificationQuote(row) {
     low: row.low,
     price: row.price ?? row.close,
     // 交易所自己的昨收：除權息／減資當天它就是官方參考價（漲跌價差是相對參考價算的）。
-    // 驗證路徑刻意不經過 addPreviousClose，所以這個官方值還在，是偵測公司行動最可靠的來源。
-    previousClose: row.previousClose ?? null,
+    //
+    // 一律讀永不被覆寫的 `exchangePreviousClose`，**不可**退回 `previousClose`：
+    // Yahoo 備援序列與「用整批收盤補出來的當日 K」都會把 previousClose 填成前一列的收盤
+    // （normalizeYahooHistoryRows / appendTodayCloseBar 各自都這麼做），拿它算比率恆等於 1，
+    // 於是「算不出比率」會偽裝成「已確認這天沒有公司行動」——正是這批停等要擋的情形。
+    exchangePreviousClose: row.exchangePreviousClose ?? null,
+    // 上市在除權息日把漲跌價差欄整欄遮成 "X0.00"，交易所自己的事件標記涵蓋全部歷史，
+    // 比只從部署後累積的本機歸檔可靠。它只說「有事件」，不說比率。
+    exchangeCorporateActionMark: Boolean(row.exchangeCorporateActionMark),
+    // Yahoo 的 OHLC 已自行把配股當分割還原過，與官方逐檔歷史不是同一個座標系。
+    fromYahoo: String(row.source || "").startsWith("Yahoo"),
   };
 }
 
@@ -9904,14 +9913,54 @@ function normalizeSwingVerificationQuote(row) {
 // 這裡用「交易所官方昨收 ÷ 前一根實際收盤」推出調整比率，把 entry/stop/target 一起搬到
 // 事件後的價格尺度；因為股利已內含在比率裡，之後算出的 resultPct 就是含息總報酬。
 const CORPORATE_ACTION_RATIO_TOLERANCE = 0.002; // 0.2%：小於此視為捨入誤差，不動計畫價
-function swingVerificationActionRatio(row, previousRow) {
-  const officialPreviousClose = Number(row?.previousClose);
+
+// 一個事件日的比率有**三種**結果，呼叫端必須分得開：
+//   quantified=true  ／ ratio 有值  → 算出來了，要把計畫價搬到事件後的尺度
+//   quantified=true  ／ ratio=null → 算出來了，但幅度在容忍度內＝確認不必調
+//   quantified=false               → 算不出來。這**不等於**「沒事發生」
+// 舊寫法把後兩者都回單一個 null，於是「算不出比率」與「確認沒有事件」在呼叫端長得一模一樣，
+// 兩層來源同時失效時就靜默拿事件前的計畫價去比事件後的價格（＝假停損／假達標）。
+function swingVerificationActionRatio(row, previousRow, { adjacent = true } = {}) {
+  const unknown = { quantified: false, ratio: null };
+  // Yahoo 座標系的列不可拿來推官方比率：它沒有交易所昨收，OHLC 也已自行還原過配股。
+  if (row?.fromYahoo || previousRow?.fromYahoo) return unknown;
+  // 必須要求相鄰：逐月歷史抓取失敗會被吞成空陣列，缺口前後直接接起來之後，
+  // 「交易所昨收」講的是真正的前一個交易日、priorClose 卻是幾週前那根，硬算會把
+  // 整段正常漲跌記成一次巨大的公司行動（實測：收平盤的股票被記成 −20% 停損）。
+  if (!adjacent) return unknown;
+  const exchangePreviousClose = Number(row?.exchangePreviousClose);
   const priorClose = Number(previousRow?.price);
-  if (!Number.isFinite(officialPreviousClose) || officialPreviousClose <= 0) return null;
-  if (!Number.isFinite(priorClose) || priorClose <= 0) return null;
-  const ratio = officialPreviousClose / priorClose;
-  if (!Number.isFinite(ratio) || ratio <= 0) return null;
-  return Math.abs(ratio - 1) > CORPORATE_ACTION_RATIO_TOLERANCE ? ratio : null;
+  if (!Number.isFinite(exchangePreviousClose) || exchangePreviousClose <= 0) return unknown;
+  if (!Number.isFinite(priorClose) || priorClose <= 0) return unknown;
+  const ratio = exchangePreviousClose / priorClose;
+  if (!Number.isFinite(ratio) || ratio <= 0) return unknown;
+  return { quantified: true, ratio: Math.abs(ratio - 1) > CORPORATE_ACTION_RATIO_TOLERANCE ? ratio : null };
+}
+
+// 同一天可能同時來自「官方逐檔月歷史」與「整批收盤」（advanceSwingVerification 直接把兩者
+// 接成 [...history, ...directRows]）。OHLC 取後到的整批收盤——那是權威收盤價，與原本
+// Map 後者覆蓋前者的語意一致。但公司行動欄位**不可以**跟著被覆蓋：整批收盤補出來的當日 K
+// 沒有交易所漲跌價差欄（appendTodayCloseBar 明寫 exchangePreviousClose: null），
+// 讓它整列蓋掉官方逐檔列等於把當天唯一的比率來源丟掉，除權息那天就只剩停等。
+// 座標系不可混：任一邊來自 Yahoo 時就不繼承對方的官方欄位。
+function mergeSwingVerificationQuote(previous, row) {
+  const merged = { ...row };
+  if (!row.fromYahoo && !previous.fromYahoo) {
+    merged.exchangePreviousClose = row.exchangePreviousClose ?? previous.exchangePreviousClose ?? null;
+    merged.exchangeCorporateActionMark = Boolean(row.exchangeCorporateActionMark || previous.exchangeCorporateActionMark);
+  }
+  return merged;
+}
+
+// 「這天有公司行動」的**偵測**，與「算得出比率」的**量化**是兩件事。
+// 判準刻意與掃描端的 officialUnresolved（resolveCorporateActionAdjustments）一致：
+// 同一筆事件不該在看板上被正確還原、在驗證裡卻被當成沒事發生。
+function swingVerificationActionDetected(code, day, row) {
+  if (corporateActionHistoryForCode(code, day, day).length) return "官方公告";
+  // 上市的 X 標記涵蓋全部歷史，但**只有該月計算結果表真的抓成功過**才算數——
+  // 否則是我們沒查到，不是資料不完整，不該因為上游打嗝就讓驗證單全部停擺。
+  if (row?.exchangeCorporateActionMark && corporateActionResultMonthCovered(day)) return "上市除權息標記";
+  return "";
 }
 
 function applySwingCorporateAction(entry, ratio, day) {
@@ -9939,7 +9988,10 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
     .filter(Boolean)
     .sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   const byDate = new Map();
-  for (const row of sortedRows) byDate.set(row.rawDate, row);
+  for (const row of sortedRows) {
+    const previous = byDate.get(row.rawDate);
+    byDate.set(row.rawDate, previous ? mergeSwingVerificationQuote(previous, row) : row);
+  }
   const candidateDays = [...byDate.keys()].sort();
   const rows = candidateDays.map((date) => byDate.get(date));
   const indexByDate = new Map(candidateDays.map((date, index) => [date, index]));
@@ -9962,15 +10014,40 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
       // 硬算會把整段漲跌記成一次巨大的公司行動（實測：收平盤的股票被記成 −20% 停損）。
       const gapDays = previousRow ? compactDaysDiff(previousRow.rawDate, expected) : null;
       const adjacent = gapDays !== null && gapDays >= 1 && gapDays <= HEURISTIC_MAX_GAP_DAYS;
-      // 官方計算結果表優先：上市在除權息日的漲跌價差欄被遮成 "X0.00"，previousClose 因此是 null，
+      // 官方計算結果表優先：上市在除權息日的漲跌價差欄被遮成 "X0.00"，交易所昨收因此是 null，
       // 只靠昨收比值推比率其實**只有上櫃有效**（2026-07-26 實測）。也就是說這道除權息保護
       // 過去對上市股票從來沒有生效過，除息當天照樣被記成假停損。
       // 計算結果表給的是絕對的「前收盤價／參考價」配對，不依賴相鄰列，所以不需要相鄰性檢查。
       const resultRatio = corporateActionResultRatio(entry.code, expected);
-      const actionRatio = resultRatio !== null
-        ? (Math.abs(resultRatio - 1) > CORPORATE_ACTION_RATIO_TOLERANCE ? resultRatio : null)
-        : (adjacent ? swingVerificationActionRatio(row, previousRow) : null);
-      if (actionRatio !== null) applySwingCorporateAction(entry, actionRatio, expected);
+      const quantification = resultRatio !== null
+        ? { quantified: true, ratio: Math.abs(resultRatio - 1) > CORPORATE_ACTION_RATIO_TOLERANCE ? resultRatio : null }
+        : swingVerificationActionRatio(row, previousRow, { adjacent });
+      // 同一個事件日只能調整一次。推進失敗（當天無成交、高低價缺值）會停在同一個 expected，
+      // 下一輪重跑時若不擋，計畫價會被同一筆事件乘第二次——停等機制會讓重跑變常態，必須先擋。
+      const alreadyApplied = (entry.corporateActions || []).some((item) => item?.date === expected);
+      if (quantification.ratio !== null && !alreadyApplied) {
+        applySwingCorporateAction(entry, quantification.ratio, expected);
+      }
+      // 量不出比率時再問「到底有沒有事件」。有事件卻量不出來 → 停等，不可拿事件前的計畫價
+      // 去比事件後的價格。這是自癒狀態不是錯誤：TWT49U 約 T+1 發布、官方逐檔歷史收盤後補齊，
+      // 通常隔天就解開，而 daysHeld 不會遞增，所以 15 個交易日的觀察窗不會被停等吃掉。
+      const holdReason = quantification.quantified
+        ? ""
+        : swingVerificationActionDetected(entry.code, expected, row);
+      if (holdReason) {
+        const hold = { from: expected, reason: holdReason, detectedAt: new Date().toISOString() };
+        const previous = entry.corporateActionPending;
+        if (!previous || previous.from !== hold.from || previous.reason !== hold.reason) {
+          entry.corporateActionPending = hold;
+          changed = true;
+        }
+        // 刻意不寫 dataGap：那個欄位的語意是「官方日 K 缺漏」，兩者的處理方式與揭露文字都不同。
+        return { changed, missingDate: "" };
+      }
+      if (entry.corporateActionPending) {
+        delete entry.corporateActionPending;
+        changed = true;
+      }
     }
     if (!row || !advanceSwingVerificationEntry(entry, row)) {
       const nextGap = { from: expected, through: latest, detectedAt: new Date().toISOString() };
@@ -9990,6 +10067,12 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
 // 每個完整收盤日只跑一次；缺中間日 K 會留 dataGap，下一次重試而不是跳日。
 let lastSwingAdvanceKey = "";
 let swingVerifySummaryCache = { expiresAt: 0, value: null };
+// 摘要有 10 分鐘快取，任何改動驗證單的路徑都必須讓它失效。抽成具名函式的理由：
+// 原本兩處各自寫字面值，測試又沒有正當的把手，於是「只有第一個呼叫者拿到新鮮結果」
+// 這種順序耦合會靜靜潛伏在測試裡（實測：加新案例時才發現舊案例其實靠排在第一個才過）。
+function invalidateSwingVerifySummaryCache() {
+  swingVerifySummaryCache = { expiresAt: 0, value: null };
+}
 async function advanceSwingVerification(reference, latestDate) {
   // 單一市場／last-good／日期未對齊時不可推進，否則同日另一市場稍後補齊也會被節流漏掉。
   if (!latestDate || reference?.coverageComplete === false) return;
@@ -10054,7 +10137,7 @@ async function advanceSwingVerification(reference, latestDate) {
         return true;
       });
       if (!committed) return;
-      swingVerifySummaryCache = { expiresAt: 0, value: null };
+      invalidateSwingVerifySummaryCache();
     }
     // 只有完整流程成功後才節流；讀檔或寫檔失敗要讓下一次有機會恢復。
     lastSwingAdvanceKey = advanceKey;
@@ -10071,9 +10154,17 @@ async function advanceSwingVerification(reference, latestDate) {
 // **刻意不做**「缺 K 就跳到下一個交易日」：stock1-domain 明訂「中間日期缺 K 就停在缺口前，不可跳日」，
 // 那是為了避免「D1 先停損、D2 才達標」被錯記成勝利，屬刻意設計，不能為了衝分母而破壞。
 const SWING_VERIFY_STALLED_DAYS = 30;
+// 兩種停等都會讓 entry 留在原地：缺官方日 K（dataGap）與偵測到公司行動卻量不出比率
+// （corporateActionPending）。前者等資料補齊、後者等官方比率發布，兩者都應該在幾天內自癒；
+// 久到不可能再自行結案時，不論哪一種都是分母損耗，必須一起算進「卡住」。
+function verificationStallFrom(entry) {
+  return entry?.dataGap?.from || entry?.corporateActionPending?.from || "";
+}
 function isStalledVerificationEntry(entry, todayCompact) {
-  if (!entry || entry.status !== "pending" || !entry.dataGap?.from) return false;
-  const gap = compactDaysDiff(toCompactDate(entry.dataGap.from), todayCompact);
+  if (!entry || entry.status !== "pending") return false;
+  const from = verificationStallFrom(entry);
+  if (!from) return false;
+  const gap = compactDaysDiff(toCompactDate(from), todayCompact);
   return Number.isFinite(gap) && gap > SWING_VERIFY_STALLED_DAYS;
 }
 
@@ -10156,6 +10247,9 @@ async function buildSwingVerificationSummary() {
     recent: all.filter((entry) => entry.status !== "pending").slice(0, 20),
     pendingCount: all.filter((entry) => entry.status === "pending").length,
     dataGapCount: all.filter((entry) => entry.status === "pending" && entry.dataGap).length,
+    // 偵測到公司行動卻還算不出官方比率而停等的張數。它是自癒的暫時狀態（通常隔天解開），
+    // 但必須數得出來——否則「今天沒有推進」看起來會和「今天沒有變化」一模一樣。
+    corporateActionPendingCount: all.filter((entry) => entry.status === "pending" && entry.corporateActionPending).length,
     // 卡住＝資料缺口久到不可能再自行結案；它們永遠不會進 resolved 分母，必須讓使用者看得到。
     stalledCount: all.filter((entry) => isStalledVerificationEntry(entry, summaryToday)).length,
     // D-30：處置期間是分盤集合競價，觸價判定的前提（連續競價）在這些樣本上並不成立。
@@ -10165,6 +10259,7 @@ async function buildSwingVerificationSummary() {
       `${SWING_VERIFY_MAX_DAYS} 個實際交易日內都沒碰到 → 以第 ${SWING_VERIFY_MAX_DAYS} 日收盤結案（超時）。漏開 App 會用官方日K依日期補判；若中間日K缺漏就停在缺口前並排除結案統計。`,
       `勝率需累積 ${WIN_RATE_MIN_SAMPLES} 筆結案才顯示：分母只含已結案，而達標／停損常 1~3 天就結案、超時要等第 ${SWING_VERIFY_MAX_DAYS} 個交易日，初期分母偏向快速觸價的極端樣本。同一天選出的標的也高度共享大盤走勢，有效樣本數遠小於檔數。`,
       `因官方日 K 缺漏而停在缺口前超過 ${SWING_VERIFY_STALLED_DAYS} 天的驗證單會標為「卡住」：它們不會自行結案，也永遠不會進入勝率分母，因此分母會比實際發出的訊號數少。`,
+      "除權息／減資當天，若交易所公告說有事件但官方比率還沒發布（計算結果表約次一營業日才有），該張驗證單會暫停推進而不是拿事件前的進場／停損／目標去比事件後的價格——否則除息當天必然被記成假停損。等比率到齊後會自動接著判，觀察天數不會被停等吃掉。",
       "處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到。這些樣本仍計入上面的勝率，但會單獨標示筆數；2026-07-27 之前建立的驗證單沒有記錄撮合方式，一律當成連續競價。",
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
@@ -12425,10 +12520,13 @@ export {
   scanSwingBoard, inspectSwingStock,
   // 波段前向驗證
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,
-  buildSwingVerificationSummary, pruneSwingVerification,
+  buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,
-  corporateActionHistoryForCode,
+  // replaySwingVerificationHistory 是同步的，公司行動偵測要讀已載入的歸檔；
+  // 生產路徑由 advanceSwingVerification 先 await，測試也必須照同一個順序來，
+  // 否則偵測器會安靜地讀到空歸檔、把「沒載入」當成「沒有事件」。
+  loadFundamentalsHistory, corporateActionHistoryForCode,
   normalizeCorporateActionResultRows, loadCorporateActionResultMonth, ensureCorporateActionResults,
   corporateActionResultMonthUsable, corporateActionResultPayloadRows, corporateActionResultMonthCovered, CORPORATE_ACTION_RESULT_MAX_MONTHS,
   corporateActionResultFor, corporateActionResultRatio, CORPORATE_ACTION_RESULT_URL,

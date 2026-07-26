@@ -5754,7 +5754,7 @@ function renderSwingVerifyPanel() {
             <strong>${escapeHtml(swingScenarioName(s.scenario))}</strong>
             <span class="sv-rate ${tone}"><small>勝率</small> ${rate}</span>
           </div>
-          <small>結案 ${resolved}（達標 ${s.wins}・停損 ${s.losses}・超時 ${s.expired}）・追蹤中 ${s.pending}${s.avgResultPct != null ? `・平均 ${s.avgResultPct >= 0 ? "+" : ""}${s.avgResultPct}%${s.avgResultPctNet != null ? `（淨 ${s.avgResultPctNet >= 0 ? "+" : ""}${s.avgResultPctNet}%）` : ""}` : ""}${s.avgDaysHeld != null ? `・平均持有 ${s.avgDaysHeld} 天` : ""}</small>
+          <small>結案 ${resolved}（達標 ${s.wins}・停損 ${s.losses}・超時 ${s.expired}）・追蹤中 ${s.pending}${s.stalled ? `<span class="sv-stalled" title="這些單因官方日 K 長期缺漏而停在缺口前，不會自行結案，也永遠不會進入上面的勝率分母。">（含卡住 ${s.stalled}）</span>` : ""}${s.avgResultPct != null ? `・平均 ${s.avgResultPct >= 0 ? "+" : ""}${s.avgResultPct}%${s.avgResultPctNet != null ? `（淨 ${s.avgResultPctNet >= 0 ? "+" : ""}${s.avgResultPctNet}%）` : ""}` : ""}${s.avgDaysHeld != null ? `・平均持有 ${s.avgDaysHeld} 天` : ""}</small>
         </div>`;
     })
     .join("");
@@ -5777,7 +5777,7 @@ function renderSwingVerifyPanel() {
   panel.innerHTML = `
     <div class="sv-head">
       <strong>場景勝率（前向驗證）</strong>
-      <small title="每天的選股依官方日 K 逐日對答案：先碰目標＝達標、先碰結構停損＝停損；同一天兩邊都碰到，保守記停損。漏開 App 會按日期補判，中間缺 K 則停住、不跳日。&#10;處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到；這些樣本仍計入勝率，但會單獨標出筆數。">官方日 K 逐日補驗・雙觸保守記停損${data.dataGapCount ? `・${data.dataGapCount} 筆待補缺口` : ""}${data.periodicCallCount ? `・${data.periodicCallCount} 筆分盤撮合` : ""}${legacySamples ? `・舊版 ${legacySamples} 筆另存` : ""}</small>
+      <small title="每天的選股依官方日 K 逐日對答案：先碰目標＝達標、先碰結構停損＝停損；同一天兩邊都碰到，保守記停損。漏開 App 會按日期補判，中間缺 K 則停住、不跳日。&#10;處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到；這些樣本仍計入勝率，但會單獨標出筆數。&#10;除權息當天若官方比率還沒發布（計算結果表約次一營業日才有），該單會暫停推進而不是拿事件前的停損價去比事件後的價格；等比率到齊會自動接著判，觀察天數不會被吃掉。">官方日 K 逐日補驗・雙觸保守記停損${data.dataGapCount ? `・${data.dataGapCount} 筆待補缺口` : ""}${data.corporateActionPendingCount ? `・${data.corporateActionPendingCount} 筆等官方除權息比率` : ""}${data.periodicCallCount ? `・${data.periodicCallCount} 筆分盤撮合` : ""}${legacySamples ? `・舊版 ${legacySamples} 筆另存` : ""}</small>
     </div>
     <div class="sv-chips">${chips}</div>
     ${recentRows ? `

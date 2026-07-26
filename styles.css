@@ -9301,6 +9301,8 @@ body.is-locked .app-shell {
 .sv-rate.is-up { color: var(--up-text); }
 .sv-rate.is-down { color: var(--down-text); }
 .sv-chip small { color: #bcc6d0; font-size: 15px; line-height: 1.5; }
+/* 卡住的驗證單：它不會自行結案，也不在勝率分母裡。用黃色——這是分母損耗的資訊，不是錯誤。 */
+.sv-stalled { color: var(--yellow); }
 .sv-rate small { font-size: var(--fs-note); font-weight: 800; color: var(--muted); }
 .sv-details summary {
   cursor: pointer;
