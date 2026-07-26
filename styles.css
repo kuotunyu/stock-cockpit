@@ -6384,6 +6384,13 @@ body.is-locked .app-shell {
   padding: 4px 10px;
 }
 
+/* 「今天買不到」比其他 warns 嚴重一級：其他是「數字可能不準」，這個是「照著做不會成交」。 */
+.swing-warn.is-alert {
+  color: var(--red);
+  background: rgba(255, 90, 95, 0.14);
+  border-color: rgba(255, 90, 95, 0.46);
+}
+
 .swing-desc {
   flex: 1 1 220px;
   min-width: 180px;

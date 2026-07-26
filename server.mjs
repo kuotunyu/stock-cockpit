@@ -8995,6 +8995,27 @@ function buildAdjustedPeriodRows(dailyHistory, officialActions, {
   };
 }
 
+// 台股漲停＝前收 × 1.1，再**向下**取到合法申報價位。所以「漲幅 ≥ 9.5%」判漲停並不精確：
+// 實測前收 99.5 的漲停是 109（+9.55%）、前收 990 是 1085（+9.60%），低價股更接近 9.5 的邊界。
+// 一定要反推真實漲停價再比對。
+function stockLimitUpPrice(previousClose) {
+  if (!Number.isFinite(previousClose) || previousClose <= 0) return null;
+  return roundToStockTick(previousClose * 1.1, "down");
+}
+
+// 「收在漲停」不等於「買不到」——實測 240 檔逐日回放 3,571 個合格 pick 裡有 233 個（6.52%）
+// 收在漲停價，但其中 231 個盤中有開（high > low），整天都買得到，只是收盤剛好落在漲停。
+// 真正買不到的是**一價鎖死**：整天只有漲停這一個成交價（2 個，0.06%）。
+function isLimitUpLockedBar(row, previousRow) {
+  const limit = stockLimitUpPrice(Number(previousRow?.close));
+  if (limit === null) return false;
+  const high = Number(row?.high);
+  const low = Number(row?.low);
+  const close = Number(row?.close);
+  if (![high, low, close].every(Number.isFinite)) return false;
+  return high === low && Math.abs(close - limit) < 1e-9;
+}
+
 function computeSwingFeatures(rawRows, officialActions, options) {
   if (rawRows.length < 60) return null;
   const adjustments = resolveCorporateActionAdjustments(rawRows, officialActions, options);
@@ -9007,6 +9028,10 @@ function computeSwingFeatures(rawRows, officialActions, options) {
     ? "mixed"
     : hasRecentOfficial ? "official" : hasRecentHeuristic ? "heuristic" : "";
   const corporateActionUnresolvedIndices = adjustments.unresolvedIndices || [];
+  // 漲停鎖死：整天只有一個成交價、而且那個價就是漲停價 → 掛買單根本排不到，
+  // 而 plan.entry 取的正是當日收盤（D-23）。必須用**原始價**判斷：rows 是還原後的，
+  // 還原會把事件前的價格整段縮放，拿它比漲停價一定不準。
+  const limitUpLocked = isLimitUpLockedBar(rawRows.at(-1), rawRows.at(-2));
   const rows = backAdjustForCorporateActions(rawRows, officialActions, options);
   const lastIndex = rows.length - 1;
   const last = rows[lastIndex];
@@ -9048,11 +9073,33 @@ function computeSwingFeatures(rawRows, officialActions, options) {
     else break;
   }
 
-  // 回檔深度：近 20 日高點到「站穩前的回檔低點」。
+  // 回檔深度：近 20 日高點，到**那個高點之後**的最低價（D-11）。
+  // 舊寫法 recentHigh 取近 20 根、pullbackLow 取近 12 根——兩個視窗長度不同，而且完全沒有
+  // 要求低點發生在高點之後。算出來的是「區間振幅」，不是回檔深度；註解自稱「高點到站穩前的
+  // 回檔低點」，程式沒有實作那個「之後」。實測 240 檔逐日回放 29,616 次：46.4% 的數值會變，
+  // 例如 3481 群創 2026/05/25 由 41.65% 變成 0.00%——那 41.65% 是整段漲勢的振幅，
+  // 該股當天還在創新高，根本沒有回檔過。
+  // 視窗統一成 20 根：時序約束本身就會把搜尋範圍收斂到高點之後，不需要第二個長度。
   const window20 = rows.slice(-20);
-  const recentHigh = Math.max(...window20.map((row) => row.high).filter(Number.isFinite));
-  const pullbackLow = Math.min(...rows.slice(-12).map((row) => row.low).filter(Number.isFinite));
-  const pullbackDepthPct = Number.isFinite(recentHigh) && recentHigh > 0
+  let recentHigh = -Infinity;
+  let highIndex = -1;
+  for (let index = 0; index < window20.length; index += 1) {
+    const high = Number(window20[index].high);
+    // 用 `>` 保留**最早**出現的那根高點：同價位再次觸及時，從第一次算起才涵蓋得到中間的回檔。
+    if (Number.isFinite(high) && high > recentHigh) { recentHigh = high; highIndex = index; }
+  }
+  // 高點就是最後一根＝還在創新高，**還沒有一段完成的回檔**。這時 pullbackLow 是 null 而不是
+  // 「今天的最低價」——拿當日的上影線當回檔會憑空生出一個幅度，量測幅度也會跟著失真。
+  let pullbackLow = highIndex >= 0 && highIndex < window20.length - 1 ? Infinity : null;
+  if (pullbackLow !== null) {
+    for (let index = highIndex + 1; index < window20.length; index += 1) {
+      const low = Number(window20[index].low);
+      if (Number.isFinite(low) && low < pullbackLow) pullbackLow = low;
+    }
+    if (!Number.isFinite(pullbackLow)) pullbackLow = null;
+  }
+  if (highIndex < 0) recentHigh = NaN;
+  const pullbackDepthPct = Number.isFinite(recentHigh) && recentHigh > 0 && Number.isFinite(pullbackLow)
     ? ((recentHigh - pullbackLow) / recentHigh) * 100
     : 0;
 
@@ -9112,6 +9159,8 @@ function computeSwingFeatures(rawRows, officialActions, options) {
     // 配股／現增／減資會改變股數，成交量要按同一個倍數還原才可比。倍數推導不出來時
     // （官方結果表說有「權」但歸檔沒有那一筆，或整段只有跳空推測）沿用 1——這會讓事件前的
     // 均量偏低、量比偏高。只有落在量比視窗（前 20 根）內的才影響得到數字。
+    // 進場價（＝當日收盤）今天根本掛不到單：整天只有漲停這一個成交價。
+    limitUpLocked,
     volumeFactorUnknown: (adjustments.shareFactorUnknownIndices || [])
       .some((index) => index >= rawRows.length - 20),
     volumeFactorUnknownDates: (adjustments.shareFactorUnknownIndices || [])
@@ -9135,7 +9184,9 @@ const SWING_MIN_SCAN_COVERAGE = 0.7; // 至少 70% 候選有當日新鮮歷史�
 // 必須升版：驗證單記錄的是建立當下的 target，混在同一個分母裡等於把「目標被膨脹過的交易」
 // 與「目標誠實的交易」當成同一組樣本統計，而兩者的觸價難度本質上不同。
 // v17 只累積了不到一天的 pending 樣本、尚未產生任何已顯示的統計，代價極小。
-const SWING_FORMULA_VERSION = "swing-v18-honest-target";
+// v19：回檔深度加上「低點必須在高點之後」的時序約束（D-11）。門檻數字沒動，但
+// pullbackDepthPct 與量測幅度的算法變了，會改變哪些標的通過「曾回檔 ≥3%」與 RR≥1。
+const SWING_FORMULA_VERSION = "swing-v19-ordered-pullback";
 
 // 台股普通股升降單位：策略建議價必須是交易所可申報的價格，不能只四捨五入到小數二位。
 function stockTickSize(price) {
@@ -9282,9 +9333,16 @@ function buildSwingPlan(features) {
     .map((point) => point.price)
     .filter((price) => Number.isFinite(price) && price > entry * 1.02);
   const overhead = overheadHighs.length ? Math.min(...overheadHighs) : null;
-  const measuredMove = Number.isFinite(features.recentHigh) && Number.isFinite(features.pullbackLow)
-    ? entry + (features.recentHigh - features.pullbackLow)
+  // 量測幅度＝「本波回檔的高低差」往上投射。加上 D-11 的時序約束之後，這個幅度可能退化成 0
+  // （高點就是最後一根，還沒回檔過）——那時量測幅度是**沒有定義**，不是零。
+  // 舊寫法沒有區分，rawTarget 會等於 entry、target 取整後 reward=0、rr=0。
+  // 順帶修掉一個死碼：`entry + risk * 2` 這條兜底原本永遠到不了（measuredMove 在兩個呼叫端
+  // 都不可能是 null，因為它們已先把列過濾成 OHLC 全部有限），現在它才真的會被用到。
+  const swingRange = Number.isFinite(features.recentHigh) && Number.isFinite(features.pullbackLow)
+    ? features.recentHigh - features.pullbackLow
     : null;
+  const measuredMove = Number.isFinite(swingRange) && swingRange > 0 ? entry + swingRange : null;
+  // 結構停損至少留 2% 風險（見上面的 clamp），所以 2R 一定大於一個升降單位，不會退化成 entry。
   const rawTarget = overhead ?? measuredMove ?? entry + risk * 2;
   // D-25：舊寫法是 Math.max(conservativeTarget, roundToStockTick(entry * 1.03, "up"))，
   // 也就是「目標至少 +3%」的下限。它與同一行註解宣稱的「向下取整避免高估報酬」正好相反：
@@ -9351,6 +9409,9 @@ function buildSwingPick(quote, features, scenario, plan, score) {
     changePct: roundTo(features.changePct),
     avgVolLots: Math.round(features.avgVol20 || 0),
     volumeRatio5: roundTo(features.volumeRatio5),
+    // 今天整天只有漲停這一個成交價 → plan.entry 掛不到單。標示而不剔除：訊號本身是真的
+    //（這檔確實強勢），只是今天這個價位進不去，明天的價格也不會是這個 entry。
+    fillRisk: features.limitUpLocked ? "limit-up-locked" : null,
     plan,
     indicators: {
       ma5: roundTo(features.ma5),
@@ -9510,6 +9571,10 @@ function recordSwingVerification(db, body) {
     if (seen.has(key)) continue;
     const plan = pick.plan || {};
     if (!Number.isFinite(plan.entry) || !Number.isFinite(plan.structuralStop) || !Number.isFinite(plan.target)) continue;
+    // 漲停鎖死那天的收盤價掛不到單，這筆「交易」在真實世界不存在。建立驗證單等於憑空多一個
+    // 起跑點極度有利的樣本——隔天只要高點過目標就記一筆勝利，勝率被灌水（D-23）。
+    // 標的本身照樣留在看板上（標 fillRisk），只是不進統計分母。
+    if (pick.fillRisk === "limit-up-locked") continue;
     seen.add(key);
     perScenario.set(scenarioVersion, (perScenario.get(scenarioVersion) || 0) + 1);
     // 只留判定用得到的欄位，不整包塞進去：驗證單留 90 天，寫進去的東西就是不可回溯的歷史。
@@ -12150,6 +12215,7 @@ export {
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,
   SWING_FORMULA_VERSION, stockTickSize, roundToStockTick,
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,
+  stockLimitUpPrice, isLimitUpLockedBar,
   scanSwingBoard, inspectSwingStock,
   // 波段前向驗證
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,

@@ -5597,6 +5597,9 @@ function renderSwingCard(pick) {
           <div class="swing-tags">
           <span class="swing-scenario-badge">${pick.scenario?.name ? glossLink(pick.scenario.name) : "—"}</span>
           ${pick.surveillance ? `<span class="surv-line swing-surv">${renderSurveillanceBadge(pick.surveillance)}</span>` : ""}
+          ${pick.fillRisk === "limit-up-locked"
+            ? `<span class="swing-warn is-alert" title="今天整天只有漲停這一個成交價，掛買單排不到，下方的「進場」價位今天買不到。訊號本身仍然成立，但這檔不會列入波段驗證統計。">漲停鎖死・今天買不到</span>`
+            : ""}
           ${warns}
           </div>
           <p class="swing-desc">${escapeHtml(pick.scenario?.desc || "")}</p>
