@@ -7268,12 +7268,19 @@ async function buildOvernightSignalsUncached({
     const todayAdjustment = adjustments.get(adjustedHistory.length - 1) || null;
     const basisTag = !todayAdjustment ? "" :
       String(todayAdjustment.source || "").startsWith("heuristic") ? "疑似公司行動・漲跌為估算" : "除權息日・漲跌對參考價";
+    // 量比的兩道門檻（強勢續攻 ≥1.5、爆量高危 ≥3）拿的是「今日量 ÷ 前 N 日均量」。配股／現增
+    // 會改變股數，事件前的量要按同一個倍數放大才可比；倍數推導不出來時沿用 1，均量偏低、
+    // 量比就**偏高**——失效方向是「不該出現的標的出現了」。官方那張表分不出配股與現增
+    // （見 D-29），所以只能標示不能修正；20 根是量比視窗的長度。
+    const volumeUnknown = (adjustments.shareFactorUnknownIndices || [])
+      .some((index) => index >= history.length - 20);
     return evaluateGroups(metrics).map((groupInfo) => {
       const pick = buildPick(metrics, groupInfo, null, summarizeRecentBacktest(adjustedHistory, groupInfo.group, 30));
       if (basisTag) {
         pick.riskTags = [...pick.riskTags, basisTag];
         pick.corporateActionBasis = { source: todayAdjustment.source, referencePrice: metrics.previousClose };
       }
+      if (volumeUnknown) pick.riskTags = [...pick.riskTags, "配股比率未公告・量比偏高"];
       return pick;
     });
   });
@@ -8725,6 +8732,7 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
   const adjustments = new Map(); // row index → { ratio, source, shareFactor }
   const unresolvedIndices = [];
   const historyGapIndices = [];
+  const shareFactorUnknownIndices = [];
   for (let index = 1; index < rows.length; index += 1) {
     const row = rows[index];
     const previousRow = rows[index - 1];
@@ -8831,6 +8839,24 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
 
     if (ratio !== null) {
       let shareFactor = archiveShareFactor ?? 1;
+      // 股數倍數有三種狀態，前兩種是「知道」，第三種一直被當成「知道是 1」——那是 D-29 的核心。
+      //   確定 1     ：官方計算結果表的 kind 不含「權」＝官方認定沒有配股／現增／減資。
+      //   確定精確值 ：本機歸檔有完整且合理的配股率＋現增率（1＋r＋q）。
+      //   不知道     ：kind 含「權」但歸檔沒有那一筆；或整段只有跳空 heuristic。
+      // 第三種目前只能沿用 1（沒有更好的值），但**不可以假裝那是事實**：實測 2026-07-26 的
+      // 2,717 筆官方事件裡，256 筆含權、其中 233 筆歸檔查不到，量比在事件後 20 天內被高估。
+      // 為什麼不用「前收 ÷ 參考價」推：那個等式只對純無償配股成立。實測 6 筆有現增的事件全部
+      // 偏低，最大偏 14.7%（3149 正達：精確 1.2652、估計 1.0787）。TWT49U 的「權值＋息值」欄
+      // 恆等於「前收 − 參考價」，對兩種情形都成立，所以這張表在數學上分不出配股與現增。
+      let shareFactorKnown = archiveShareFactor !== null
+        || Boolean(resultKind && !resultKind.includes("權"));
+      // 但「不知道」不等於「該警告」。上櫃沒有 TWT49U 對應端點（實測：1065 個收錄代號裡只有
+      // 1 個上櫃），所以每一筆用 exchange-quote 認出來的上櫃事件都沒有 kind——而全市場 90.6%
+      // 的事件是純除息、股數根本沒變。對它們全部掛標籤等於在 260 檔裡標 44 檔（實測 16.9%），
+      // 那是雜訊不是訊號。只有拿得到**正面證據**說股數真的變了、卻量不出倍數時才值得說。
+      const shareChangeLikely = resultKind.includes("權")
+        || String(officialAction?.kind || "").includes("權")
+        || String(source || "").startsWith("heuristic"); // 跳空 >10.5%，純配息解釋不了
       // 同樣是「被調整的那些列在哪個座標系」的問題 → priorFromYahoo。
       if (priorFromYahoo) {
         if (rawSpace) {
@@ -8843,10 +8869,12 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
           }
           ratio = converted;
         }
-        // Yahoo 的成交量同樣已經按分割調整過，不可再乘一次。
+        // Yahoo 的成交量同樣已經按分割調整過，不可再乘一次——這是定義上的 1，不是猜的。
         shareFactor = 1;
+        shareFactorKnown = true;
       }
-      adjustments.set(index, { ratio, source, shareFactor });
+      adjustments.set(index, { ratio, source, shareFactor, shareFactorKnown });
+      if (!shareFactorKnown && shareChangeLikely) shareFactorUnknownIndices.push(index);
     }
     if (officialUnresolved) {
       unresolvedIndices.push(index);
@@ -8854,6 +8882,9 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
   }
   adjustments.unresolvedIndices = unresolvedIndices;
   adjustments.historyGapIndices = historyGapIndices;
+  // 有正面證據說股數變了、卻量不出倍數的那些天：成交量沒有按股數還原，
+  // 量比（今日量 ÷ 前 N 日均量）會被高估。
+  adjustments.shareFactorUnknownIndices = shareFactorUnknownIndices;
   return adjustments;
 }
 
@@ -9078,6 +9109,14 @@ function computeSwingFeatures(rawRows, officialActions, options) {
     historyGap: (adjustments.historyGapIndices || []).length > 0,
     historyGapDates: (adjustments.historyGapIndices || [])
       .map((index) => toCompactDate(rawRows[index]?.date)).filter(Boolean),
+    // 配股／現增／減資會改變股數，成交量要按同一個倍數還原才可比。倍數推導不出來時
+    // （官方結果表說有「權」但歸檔沒有那一筆，或整段只有跳空推測）沿用 1——這會讓事件前的
+    // 均量偏低、量比偏高。只有落在量比視窗（前 20 根）內的才影響得到數字。
+    volumeFactorUnknown: (adjustments.shareFactorUnknownIndices || [])
+      .some((index) => index >= rawRows.length - 20),
+    volumeFactorUnknownDates: (adjustments.shareFactorUnknownIndices || [])
+      .filter((index) => index >= rawRows.length - 20)
+      .map((index) => toCompactDate(rawRows[index]?.date)).filter(Boolean),
     atr: averageTrueRange(rows, 14),
     rows,
   };
@@ -9160,6 +9199,7 @@ const SWING_SCENARIOS = [
         : f.recentCorporateActionSource === "mixed" ? "近期權息含疑似跳空(官方＋估算還原)" : "近期疑似權息跳空(估算還原)");
       if (f.corporateActionUnresolved) warns.push("公司行為公式資料未完整");
       if (f.historyGap) warns.push("官方歷史有日期缺口(均線可能失真)");
+      if (f.volumeFactorUnknown) warns.push("配股比率未公告(量比可能偏高)");
       return { checks, passed, warns, desc: `回檔中軌後站穩${f.daysAboveMid}天，MACD連續${f.goldenCrossDays}天維持金叉` };
     },
     detect(f) {
@@ -9200,6 +9240,7 @@ const SWING_SCENARIOS = [
         : f.recentCorporateActionSource === "mixed" ? "近期權息含疑似跳空(官方＋估算還原)" : "近期疑似權息跳空(估算還原)");
       if (f.corporateActionUnresolved) warns.push("公司行為公式資料未完整");
       if (f.historyGap) warns.push("官方歷史有日期缺口(均線可能失真)");
+      if (f.volumeFactorUnknown) warns.push("配股比率未公告(量比可能偏高)");
       return { checks, passed, warns, desc: `沿上軌強勢，MACD連續${f.goldenCrossDays}天維持金叉${f.histRising ? "、柱狀放大" : ""}` };
     },
     detect(f) {
