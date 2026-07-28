@@ -4347,8 +4347,8 @@ const DIVIDEND_SOURCES = {
   TPEx: { url: "https://www.tpex.org.tw/openapi/v1/tpex_exright_prepost", label: "上櫃" },
 };
 const dividendMarketCache = {
-  TWSE: { value: null, expiresAt: 0, inFlight: null, lastError: "" },
-  TPEx: { value: null, expiresAt: 0, inFlight: null, lastError: "" },
+  TWSE: { value: null, expiresAt: 0, inFlight: null, lastError: "", shapeWarnings: [] },
+  TPEx: { value: null, expiresAt: 0, inFlight: null, lastError: "", shapeWarnings: [] },
 };
 
 function normalizeDividendKind(value) {
@@ -4359,10 +4359,32 @@ function normalizeDividendKind(value) {
   return text ? `除${text}` : "";
 }
 
-function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate()) {
+// 單次無償配股率／現增比率大於 1（＝配股超過 100%）本來就極罕見。真正要防的不是罕見事件，
+// 是**上游把單位從「比率」改成「每仟股股數」**：欄位名叫 Ratio，但同一份報表的網頁版是以
+// 「每仟股無償配股（股）」呈現，兩者差 100 倍。若上游改版，referencePrice 的除數會從 1.1 變成 101，
+// 整段 K 線塌陷，而且 formulaComplete 仍是 true、source 仍蓋著 official 章——不會有任何告警。
+//
+// 下游（plausibleShareFactor / officialCorporateActionRatio）已經會把 >1 當成「推導不出來」而
+// 走未定案，所以災難分支已經擋住了。這裡補的是**告警**：讓它在資料進來的當下就喊出來，
+// 而不是等使用者發現整條均線塌了才去讀 JSON。
+//
+// 2026-07-27 實測（TWSE 125 筆＋TPEx 138 筆預告）：29 筆真實配股全部落在 (0, 1)，最大 0.5；
+// 並用官方計算結果表反推驗證 7 個案例，比率單位算出的參考價與交易所公布值誤差都 ≤ 0.01
+// （7740 熙特爾：(157−2.05)/1.12782 = 137.39，官方 137.38）。單位確認是比率。
+const DIVIDEND_RATIO_MAX_PLAUSIBLE = 1;
+function implausibleDividendRatioLabel(item) {
+  const stockRatio = Number(item?.stockRatio);
+  const subscriptionRatio = Number(item?.subscriptionRatio);
+  if (Number.isFinite(stockRatio) && stockRatio > DIVIDEND_RATIO_MAX_PLAUSIBLE) return `無償配股率 ${stockRatio}`;
+  if (Number.isFinite(subscriptionRatio) && subscriptionRatio > DIVIDEND_RATIO_MAX_PLAUSIBLE) return `現增比率 ${subscriptionRatio}`;
+  return "";
+}
+
+function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate(), warnings = []) {
   if (!Array.isArray(rows) || !rows.length) throw new Error(`${DIVIDEND_SOURCES[source].label}除權息來源回傳空資料`);
   const archiveMap = new Map();
   const futureMap = new Map();
+  const implausible = [];
   for (const row of rows) {
     const code = cleanCode(source === "TWSE" ? row.Code : row.SecuritiesCompanyCode);
     if (!/^\d{4}$/.test(code)) continue;
@@ -4384,6 +4406,8 @@ function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate()
       source,
     };
     if (!item.exDate) continue;
+    const implausibleLabel = implausibleDividendRatioLabel(item);
+    if (implausibleLabel && implausible.length < 5) implausible.push(`${code} ${item.exDate} 的${implausibleLabel}`);
     const archiveList = archiveMap.get(code) || [];
     archiveList.push(item);
     archiveMap.set(code, archiveList);
@@ -4394,6 +4418,14 @@ function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate()
     }
   }
   if (!archiveMap.size) throw new Error(`${DIVIDEND_SOURCES[source].label}除權息來源沒有有效股票代號`);
+  // 不 throw：真的出現合法的 >100% 配股時，把整個市場的除權息資料丟掉會比算錯更糟。
+  // 記 warning 讓它浮到畫面上，實際的比率仍由下游判成未定案。
+  if (implausible.length) {
+    warnings.push(
+      `${DIVIDEND_SOURCES[source].label}除權息的配股／現增比率超過 100%（${implausible.join("、")}）`
+      + "，可能是上游把單位從比率改成每仟股股數；這些事件的還原會標為未定案，請查官方原文。",
+    );
+  }
   for (const map of [archiveMap, futureMap]) {
     for (const list of map.values()) list.sort((a, b) => a.exDate.localeCompare(b.exDate));
   }
@@ -4409,7 +4441,11 @@ async function loadDividendMarket(source) {
     try {
       const rows = await fetchJsonWithRetry(DIVIDEND_SOURCES[source].url, { headers: openapiHeaders });
       const today = toTaipeiCompactDate();
-      const normalized = normalizeDividendMarketRows(source, rows, today);
+      // 比率量級異常要浮到畫面上，不能只在下游默默判成未定案（見 implausibleDividendRatioLabel）。
+      const shapeWarnings = [];
+      const normalized = normalizeDividendMarketRows(source, rows, today, shapeWarnings);
+      for (const warning of shapeWarnings) console.warn(`[Stock1] ${warning}`);
+      state.shapeWarnings = shapeWarnings;
       // 成功 HTTP 不等於完整資料：若尚未到期的公告總數突然少掉四成以上，先視為上游半包。
       // 分母只算「以本次台北今日仍屬未來」的 last-good，已過除權息日的自然縮減不應被誤擋。
       const countUpcoming = (map) => [...(map?.values?.() || [])].reduce(
@@ -4447,6 +4483,12 @@ async function getDividendSchedule() {
     }
   }
   combined.sourceStatus = { TWSE: twse.status, TPEx: tpex.status };
+  // 比率量級異常（疑似上游把單位從比率改成每仟股股數）要跟著資料一起往上傳，
+  // 否則它只會留在伺服器 console 裡，使用者看不到自己的均線為什麼塌了。
+  combined.shapeWarnings = [
+    ...(dividendMarketCache.TWSE.shapeWarnings || []),
+    ...(dividendMarketCache.TPEx.shapeWarnings || []),
+  ];
   const degraded = twse.status !== "fresh" || tpex.status !== "fresh";
   fundamentalsSourceCache.set("dividends", {
     expiresAt: Date.now() + (degraded ? DIVIDEND_SCHEDULE_DEGRADED_TTL_MS : DIVIDEND_SCHEDULE_TTL_MS),
@@ -4892,6 +4934,8 @@ async function buildFundamentals(codeRaw) {
   if (!liveRevenue && storedRevenue) warnings.unshift(`月營收來源暫時抓不到，已沿用本機最後保存的 ${storedRevenue.yearMonth || storedRevenue.period} 資料。`);
   if (!liveEps && storedEps) warnings.unshift(`EPS 來源暫時抓不到，已沿用本機最後保存的 ${storedEps.period} 資料。`);
   if (!liveValuation && storedValuation) warnings.unshift(`本益比／殖利率來源暫時抓不到，已沿用本機最後保存的 ${compactToSlashDate(storedValuation.asOf || storedValuation.period)} 資料。`);
+  // 比率量級異常是「資料可能整批算錯」等級的事，優先於各來源的新鮮度警告。
+  for (const warning of dividendMap.shapeWarnings || []) warnings.unshift(warning);
   const dividendSourcesToWarn = dividendSource
     ? [dividendSource]
     : Object.keys(DIVIDEND_SOURCES).filter((source) => dividendSourceStatus[source] !== "fresh");
@@ -12583,6 +12627,7 @@ export {
   buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,
+  normalizeDividendMarketRows, DIVIDEND_RATIO_MAX_PLAUSIBLE,
   // replaySwingVerificationHistory 是同步的，公司行動偵測要讀已載入的歸檔；
   // 生產路徑由 advanceSwingVerification 先 await，測試也必須照同一個順序來，
   // 否則偵測器會安靜地讀到空歸檔、把「沒載入」當成「沒有事件」。

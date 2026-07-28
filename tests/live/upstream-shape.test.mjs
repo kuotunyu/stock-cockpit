@@ -15,13 +15,13 @@ const SOURCES = [
   { name: "TWSE 鉅額", url: "https://openapi.twse.com.tw/v1/announcement/BFIAUU", codeField: "Code", fields: ["Code", "Name", "TradeValue"] },
   { name: "TWSE 全額交割", url: "https://openapi.twse.com.tw/v1/exchangeReport/TWT85U", codeField: "Code", fields: ["Code", "Name", "PeriodicCallAuctionTrading"] },
   { name: "TWSE 整批收盤", url: "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", codeField: "Code", fields: ["Code", "Name", "ClosingPrice", "TradeVolume"] },
-  { name: "TWSE 除權息", url: "https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL", codeField: "Code", fields: ["Date", "Code", "CashDividend", "StockDividendRatio", "SubscriptionRatio", "SubscriptionPricePerShare"] },
+  { name: "TWSE 除權息", url: "https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL", codeField: "Code", fields: ["Date", "Code", "CashDividend", "StockDividendRatio", "SubscriptionRatio", "SubscriptionPricePerShare"], ratioFields: ["StockDividendRatio", "SubscriptionRatio"] },
   { name: "TPEx 處置", url: "https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", codeField: "SecuritiesCompanyCode", fields: ["SecuritiesCompanyCode", "DispositionPeriod", "DisposalCondition"] },
   { name: "TPEx 注意", url: "https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information", codeField: "SecuritiesCompanyCode", fields: ["SecuritiesCompanyCode", "TradingInformation"] },
   { name: "TPEx 鉅額", url: "https://www.tpex.org.tw/openapi/v1/tpex_daily_qutoes_block", codeField: "Code", fields: ["Code", "Name", "TradeValue", "Date"] },
   { name: "TPEx 變更交易", url: "https://www.tpex.org.tw/openapi/v1/tpex_cmode", codeField: "SecuritiesCompanyCode", fields: ["SecuritiesCompanyCode", "AlteredTrading", "Date"] },
   { name: "TPEx 整批收盤", url: "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", codeField: "SecuritiesCompanyCode", fields: ["SecuritiesCompanyCode", "CompanyName", "Close", "TradingShares"] },
-  { name: "TPEx 除權息", url: "https://www.tpex.org.tw/openapi/v1/tpex_exright_prepost", codeField: "SecuritiesCompanyCode", fields: ["ExRrightsExDividendDate", "SecuritiesCompanyCode", "CashDividend", "StockDividendRatio", "SubscriptionRatioToNewSharesIssued", "SubscriptionPricePerShare"] },
+  { name: "TPEx 除權息", url: "https://www.tpex.org.tw/openapi/v1/tpex_exright_prepost", codeField: "SecuritiesCompanyCode", fields: ["ExRrightsExDividendDate", "SecuritiesCompanyCode", "CashDividend", "StockDividendRatio", "SubscriptionRatioToNewSharesIssued", "SubscriptionPricePerShare"], ratioFields: ["StockDividendRatio", "SubscriptionRatioToNewSharesIssued"] },
   // 停牌/下市（getRiskSets 的 halted/delisted 來源）
   { name: "TWSE 暫停交易", url: "https://openapi.twse.com.tw/v1/exchangeReport/TWTAWU", codeField: "Code", fields: ["Code", "TradingHaltDate", "TradingResumptionDate"] },
   { name: "TPEx 暫停交易", url: "https://www.tpex.org.tw/openapi/v1/tpex_spendi_history", codeField: "SecuritiesCompanyCode", fields: ["SecuritiesCompanyCode", "DateOfSuspendedTrading", "DateOfResumedTrading"] },
@@ -51,6 +51,21 @@ for (const source of SOURCES) {
     const first = usable[0];
     for (const field of source.fields) {
       assert.ok(field in first, `${source.name} 缺欄位 ${field}；實際欄位：${Object.keys(first).join(", ")}`);
+    }
+    // D-41：欄位存在還不夠，**數量級也要釘住**。
+    // 除權息報表的欄位名叫 Ratio，但同一份報表的網頁版是以「每仟股無償配股（股）」呈現，
+    // 兩者差 100 倍。上游若改單位，referencePrice 的除數會從 1.1 變成 101，整段 K 線塌陷，
+    // 而且 formulaComplete 仍是 true、source 仍蓋著 official 章——只有這條斷言會喊。
+    // 2026-07-27 實測：TWSE 18 筆＋TPEx 11 筆真實配股全部落在 (0,1)，最大 0.5。
+    if (source.ratioFields) {
+      for (const field of source.ratioFields) {
+        const values = usable
+          .map((row) => Number(String(row?.[field] ?? "").replace(/,/g, "")))
+          .filter((value) => Number.isFinite(value) && value > 0);
+        for (const value of values) {
+          assert.ok(value < 1, `${source.name} 的 ${field} 出現 ${value}——比率不該 ≥1，上游可能改成每仟股股數了`);
+        }
+      }
     }
   });
 }
