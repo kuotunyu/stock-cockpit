@@ -341,9 +341,21 @@ function parseCookies(cookieHeader = "") {
     .reduce((cookies, part) => {
       const index = part.indexOf("=");
       if (index === -1) return cookies;
-      const key = decodeURIComponent(part.slice(0, index));
-      const value = decodeURIComponent(part.slice(index + 1));
-      cookies[key] = value;
+      // decodeURIComponent 對「裸 %」會丟 URIError（例如值裡有 "100%" 或 "50%off"）。
+      // 這個函式被 getAuthContext 在**每一支 API 之前**呼叫，所以一個解不開的 cookie
+      // 會讓整個 /api/* 回 500 URI malformed：畫面每一格「載入失敗」，
+      // 而且自選股與交易紀錄的 PUT 也全部失敗、資料存不進去。
+      //
+      // 更麻煩的是 cookie 綁 host 不綁 port——同一台機器上**任何其他 localhost 專案**
+      // 寫過一次這種 cookie 就會波及這裡，與本專案的 sid 完全無關，使用者不可能查得出原因。
+      //
+      // 解不開的那一筆直接跳過（等同「沒有這個 cookie」）：最壞情況是視同未登入，
+      // 遠好過整個 API 掛掉。其餘 cookie 照常解析，不會被一顆壞的拖累。
+      try {
+        cookies[decodeURIComponent(part.slice(0, index))] = decodeURIComponent(part.slice(index + 1));
+      } catch {
+        // 忽略這一筆
+      }
       return cookies;
     }, {});
 }
@@ -4388,6 +4400,9 @@ function normalizeDividendKind(value) {
 // 並用官方計算結果表反推驗證 7 個案例，比率單位算出的參考價與交易所公布值誤差都 ≤ 0.01
 // （7740 熙特爾：(157−2.05)/1.12782 = 137.39，官方 137.38）。單位確認是比率。
 const DIVIDEND_RATIO_MAX_PLAUSIBLE = 1;
+// 每檔除權息事件的歸檔上限。與官方計算結果表（corporateActionResults）的 40 對齊——
+// 月配息 ETF 兩年就累積 24 筆，舊的 12 筆會把還原需要的資料吃掉。
+const DIVIDEND_HISTORY_MAX_EVENTS_PER_CODE = 40;
 function implausibleDividendRatioLabel(item) {
   const stockRatio = Number(item?.stockRatio);
   const subscriptionRatio = Number(item?.subscriptionRatio);
@@ -4609,7 +4624,17 @@ async function appendDividendHistoryNow(map, { successfulSources = [] } = {}) {
       }
     }
     const keys = Object.keys(slot).sort();
-    while (keys.length > 12) {
+    // 每檔保留幾筆事件。40 是與官方計算結果表（corporateActionResults，下方同名上限）
+    // 對齊的數字，理由在那裡寫過：月配息 ETF 兩年就累積 24 筆，12 筆會把還原需要的資料吃掉。
+    //
+    // 這一份比結果表更不能省：**TWT48U_ALL 是滾動未來窗，除息日一過就查不到**
+    // （見 DIVIDEND_SOURCES 的註解），被淘汰掉就是永久消失、沒有任何端點補得回來；
+    // 而 TWT49U 只涵蓋上市，**上櫃的月配 ETF 只有這一份歸檔**。
+    // 消費端（corporateActionHistoryForCode）要的窗是 13 個月到 5 年，12 筆遠遠不夠。
+    //
+    // 失效時完全沒有徵兆：corporateActionHistoryForCode 對「被淘汰掉」與「那天本來就沒事件」
+    // 都回空陣列，unresolved 不會亮，補登提示（findMissingCorporateActions）也一起失效。
+    while (keys.length > DIVIDEND_HISTORY_MAX_EVENTS_PER_CODE) {
       delete slot[keys.shift()];
       dirty = true;
     }
@@ -12674,6 +12699,7 @@ export {
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,
   normalizeDividendMarketRows, DIVIDEND_RATIO_MAX_PLAUSIBLE, appendDividendHistory,
+  DIVIDEND_HISTORY_MAX_EVENTS_PER_CODE,
   // replaySwingVerificationHistory 是同步的，公司行動偵測要讀已載入的歸檔；
   // 生產路徑由 advanceSwingVerification 先 await，測試也必須照同一個順序來，
   // 否則偵測器會安靜地讀到空歸檔、把「沒載入」當成「沒有事件」。
