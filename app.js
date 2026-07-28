@@ -5876,9 +5876,24 @@ function renderStrategyBoard() {
     return;
   }
   const visiblePicks = strategyState.picks.filter((pick) => state.showSurveillance || !pick.surveillance);
-  el.strategyBoard.innerHTML = visiblePicks.length
+  // 後端一直有回 warnings（掃描覆蓋率、公司行動未定案、單一市場、last-good…），
+  // 前端也一直存進 strategyState.warnings——但**全檔沒有任何讀取點**，等於沒做。
+  // server.mjs 組裝這批 warnings 的地方自己寫著：「這個失敗模式在開發期間三天內出現三次
+  // （證交所限流），而且畫面上完全沒有跡象」。
+  //
+  // 沒有它的後果不是少一行字：證交所限流那天，看板照樣列出十幾檔、每張卡片照樣寫
+  // 「進場 X／停損 Y／目標 Z／盈虧比 2.0」，而那些均線、布林、MACD 是跑在**沒還原權息**的
+  // 價格上——與正常日完全無法分辨。
+  const boardWarnings = (strategyState.warnings || []).filter(Boolean);
+  const warningHtml = boardWarnings.length
+    ? `<div class="strategy-empty is-error" role="status">
+        <strong>這次掃描有 ${boardWarnings.length} 項資料品質問題，下面的名單可能不完整或不準確</strong>
+        <small>${escapeHtml(boardWarnings.slice(0, 3).join("；"))}${boardWarnings.length > 3 ? `（另有 ${boardWarnings.length - 3} 則）` : ""}</small>
+      </div>`
+    : "";
+  el.strategyBoard.innerHTML = warningHtml + (visiblePicks.length
     ? visiblePicks.map(renderSwingCard).join("")
-    : `<div class="strategy-empty">這個場景今天的標的都是注意/處置股，已被你隱藏。<small>到「更多 → 風險規則」可重新顯示。</small></div>`;
+    : `<div class="strategy-empty">這個場景今天的標的都是注意/處置股，已被你隱藏。<small>到「更多 → 風險規則」可重新顯示。</small></div>`);
 }
 
 // === 策略雷達：個股波段型態健檢（搜尋任意股票 → 逐條檢核 + 交易計畫）===
@@ -9833,8 +9848,28 @@ function renderFundamentalsPanel() {
     : dividendFreshness === "stale"
       ? "沿用資料中未見近期除權息"
       : "近期無除權息";
+  // 現金與配股**不是互斥的**——「除權息」本來就是兩者都有。舊寫法是三元式，
+  // 只要有現金就不顯示配股：6944 是配股 30%＋息 17 元（參考價 1030→779），
+  // 畫面卻只寫「現金 17 元」，配股 30% 完全看不到 → 使用者不會去補登除權配股紀錄
+  // → 帳本的股數就會一直少（而漏登的後果不只是假虧損，是之後想賣會被賣超檢查擋下）。
+  //
+  // 比率一律同時給百分比與「每仟股 N 股」：官方 OpenAPI 回的是比率（0.1），
+  // 但同一份報表的網頁版是以每仟股股數呈現，只印裸的 0.1 會讓人不知道單位（見 D-41）。
+  const ratioText = (ratio) => `${formatNumber(ratio * 100)}%（每仟股 ${formatNumber(ratio * 1000)} 股）`;
+  const divParts = [];
+  if (Number.isFinite(nextDiv?.cashDividend) && nextDiv.cashDividend > 0) {
+    divParts.push(`現金 ${formatNumber(nextDiv.cashDividend)} 元`);
+  }
+  if (Number.isFinite(nextDiv?.stockRatio) && nextDiv.stockRatio > 0) {
+    divParts.push(`配股 ${ratioText(nextDiv.stockRatio)}`);
+  }
+  if (Number.isFinite(nextDiv?.subscriptionRatio) && nextDiv.subscriptionRatio > 0) {
+    const price = Number.isFinite(nextDiv.subscriptionPrice) && nextDiv.subscriptionPrice > 0
+      ? `＠${formatNumber(nextDiv.subscriptionPrice)} 元` : "";
+    divParts.push(`現增 ${ratioText(nextDiv.subscriptionRatio)}${price}`);
+  }
   const divRows = nextDiv
-    ? `<div class="fund-row"><span>${escapeHtml(nextDiv.kind || "除權息")} ${nextDiv.exDate ? `${nextDiv.exDate.slice(4, 6)}/${nextDiv.exDate.slice(6, 8)}` : ""}</span><b>${Number.isFinite(nextDiv.cashDividend) && nextDiv.cashDividend > 0 ? `現金 ${formatNumber(nextDiv.cashDividend)} 元` : Number.isFinite(nextDiv.stockRatio) && nextDiv.stockRatio > 0 ? `配股 ${formatNumber(nextDiv.stockRatio)}` : "--"}</b></div>`
+    ? `<div class="fund-row"><span>${escapeHtml(nextDiv.kind || "除權息")} ${nextDiv.exDate ? `${nextDiv.exDate.slice(4, 6)}/${nextDiv.exDate.slice(6, 8)}` : ""}</span><b>${divParts.length ? escapeHtml(divParts.join("・")) : "--"}</b></div>`
     : `<div class="fund-row is-empty">${emptyDividendText}</div>`;
   const yoyDirection = signedDirection(rev?.yoy);
   const yoyBadge = Number.isFinite(rev?.yoy)
@@ -9853,7 +9888,18 @@ function renderFundamentalsPanel() {
       <strong>基本面</strong>
       <span class="fund-asof">${escapeHtml(asOfBits)}</span>
     </div>
-    ${f.warnings?.length ? `<p class="fund-hint is-warn">${escapeHtml(f.warnings[0])}</p>` : ""}
+    ${(() => {
+      // 只印第 1 則會漏掉最重要的那則。buildFundamentals 是把「比率量級異常」（疑似上游把
+      // 單位從比率改成每仟股股數，會讓整段 K 線塌陷）unshift 到最前面**之後**，
+      // 才 unshift 各來源的新鮮度警告——於是那條 D-41 的防護網被擠到 index 1，
+      // 在最需要它的時候顯示不出來。改成比照 renderDataTrustCompact：前 2 則＋剩餘則數，
+      // 完整清單放 title。
+      const warnings = f.warnings || [];
+      if (!warnings.length) return "";
+      const shown = warnings.slice(0, 2).join("；");
+      const rest = warnings.length > 2 ? `（另有 ${warnings.length - 2} 則）` : "";
+      return `<p class="fund-hint is-warn" title="${escapeHtml(warnings.join("\n"))}">${escapeHtml(shown)}${rest}</p>`;
+    })()}
     <div class="fund-grid">
       <div class="fund-block fund-block-rev">
         <header>月營收 ${yoyBadge}</header>
