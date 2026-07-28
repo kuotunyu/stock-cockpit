@@ -66,6 +66,12 @@ test("盤中精確日 MIS 可 provisional 驗證，缺原始 O/H/L 的檔位維�
   const db = await mod.loadDb();
   db.signalSnapshots = [{
     asOf: toIso(SIGNAL), savedAt: "", coverage: { complete: true },
+    // buildSignalVerification 第一步就過濾 overnightSnapshotFormulaVersion === 現行版本，
+    // 而缺這個欄位時會退回 LEGACY_OVERNIGHT_FORMULA_VERSION（v1）→ 快照被整批濾掉
+    // → available:false → 連 observationDate 都沒有。
+    // 2026-07-26 把 OVERNIGHT_FORMULA_VERSION 從 v1 升到 v2 再升到 v3 時漏了這個 fixture。
+    // 直接讀 mod 的常數，下次再升版就不會又踩一次。
+    formulaVersion: mod.OVERNIGHT_FORMULA_VERSION,
     picks: [
       { code: "2330", name: "台積電", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 },
       { code: "1101", name: "台泥", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 40 },
