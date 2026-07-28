@@ -104,3 +104,71 @@ test("合理範圍內不得誤報（實測最大 0.5，門檻 1 有兩倍餘裕�
   assert.deepEqual(warnings, [], "0.5 是實測到的真實最大值，不可誤報");
   assert.equal(DIVIDEND_RATIO_MAX_PLAUSIBLE, 1);
 });
+
+// ---- D-44 第二點：同一代號同一除權息日多列 ----
+//
+// appendDividendHistoryNow 寫的是 slot[exDate]，**後者覆蓋前者**。若上游把除權息拆成
+// 「除權一列＋除息一列」，參考價就會只用半個事件算出來，而且蓋著 formulaComplete=true
+// 與 official 章，沒有任何告警。
+// 2026-07-27 實測：TWSE 125 列＋TPEx 138 列，(代號, 除權息日) 全部唯一、0 組重複。
+// 所以這是防禦性偵測不是已觀察到的錯誤——但失效時是無聲的錯答案，值得擋。
+
+test("同一代號同一天多列 → 記 warning 並全部標成 duplicateRows", () => {
+  const warnings = [];
+  const split = [
+    // 假想的拆列：同一天、同一代號，一列只有配股、一列只有現金。
+    { Date: "1150730", Code: "1231", Name: "聯華食", Exdividend: "權", StockDividendRatio: "0.09999999", SubscriptionRatio: "", SubscriptionPricePerShare: "", CashDividend: "" },
+    { Date: "1150730", Code: "1231", Name: "聯華食", Exdividend: "息", StockDividendRatio: "", SubscriptionRatio: "", SubscriptionPricePerShare: "", CashDividend: "1.5" },
+  ];
+  const { archiveMap } = normalizeDividendMarketRows("TWSE", split, TODAY, warnings);
+  assert.equal(warnings.length, 1, "多列必須喊出來——覆蓋是靜默的");
+  assert.match(warnings[0], /1231/, "要指名是哪一檔哪一天");
+  assert.match(warnings[0], /2 列/);
+  const list = archiveMap.get("1231");
+  assert.equal(list.length, 2, "兩列都要留著，不可自己挑一列");
+  assert.ok(list.every((item) => item.duplicateRows === true), "兩列都要標記，否則覆蓋後的那筆看起來是乾淨的");
+});
+
+test("同一代號不同天的多筆事件是正常的，不得誤報", () => {
+  const warnings = [];
+  const twoDates = [
+    { Date: "1150730", Code: "1231", Name: "聯華食", Exdividend: "權息", StockDividendRatio: "0.09999999", SubscriptionRatio: "", SubscriptionPricePerShare: "", CashDividend: "1.5" },
+    { Date: "1150820", Code: "1231", Name: "聯華食", Exdividend: "息", StockDividendRatio: "", SubscriptionRatio: "", SubscriptionPricePerShare: "", CashDividend: "0.8" },
+  ];
+  const { archiveMap } = normalizeDividendMarketRows("TWSE", twoDates, TODAY, warnings);
+  assert.deepEqual(warnings, [], "一家公司一年配息兩次是常態，不是異常");
+  assert.ok(archiveMap.get("1231").every((item) => !item.duplicateRows));
+});
+
+test("實機資料不得觸發：263 列真實 payload 的 (代號, 除權息日) 全部唯一", () => {
+  const warnings = [];
+  normalizeDividendMarketRows("TWSE", twseRows, TODAY, warnings);
+  normalizeDividendMarketRows("TPEx", tpexRows, TODAY, warnings);
+  assert.deepEqual(warnings, [], "照抄自實機的 fixture 不該觸發任何告警");
+});
+
+// 這條才是真正載重的：標記要一路傳到歸檔，讓還原引擎當成算不出來。
+// 光是記 warning 沒有用——slot[exDate] 的覆蓋還是會留下一個看起來乾淨的半個事件。
+test("多列標記要傳到歸檔：該事件必須是 formulaComplete=false", async () => {
+  const split = new Map([["1231", [
+    { exDate: "20260730", kind: "除權", cashDividend: null, stockRatio: 0.1, subscriptionRatio: null, subscriptionPrice: null, source: "TWSE", duplicateRows: true },
+    { exDate: "20260730", kind: "除息", cashDividend: 1.5, stockRatio: null, subscriptionRatio: null, subscriptionPrice: null, source: "TWSE", duplicateRows: true },
+  ]]]);
+  await mod.appendDividendHistory(split, { successfulSources: ["TWSE"] });
+  const [event] = mod.corporateActionHistoryForCode("1231", "20260730", "20260730");
+  assert.ok(event, "事件要有被寫進歸檔");
+  assert.equal(event.formulaComplete, false, "多列時不可宣稱公式齊全——後者覆蓋前者已丟掉一半");
+  // officialCorporateActionRatio 對 formulaComplete=false 一律回 null，
+  // 所以還原端會走 unresolved 而不是拿半個事件算出參考價。
+  assert.equal(mod.officialCorporateActionRatio(event, 31.35), null, "算不出比率才是正確結果");
+});
+
+test("單列（正常）時 formulaComplete 照常為 true，防線不可過度收緊", async () => {
+  const single = new Map([["1232", [
+    { exDate: "20260730", kind: "除權息", cashDividend: 1.5, stockRatio: 0.1, subscriptionRatio: null, subscriptionPrice: null, source: "TWSE" },
+  ]]]);
+  await mod.appendDividendHistory(single, { successfulSources: ["TWSE"] });
+  const [event] = mod.corporateActionHistoryForCode("1232", "20260730", "20260730");
+  assert.equal(event.formulaComplete, true);
+  assert.ok(Number.isFinite(mod.officialCorporateActionRatio(event, 31.35)), "正常事件仍要算得出比率");
+});

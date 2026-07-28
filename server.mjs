@@ -4418,6 +4418,30 @@ function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate()
     }
   }
   if (!archiveMap.size) throw new Error(`${DIVIDEND_SOURCES[source].label}除權息來源沒有有效股票代號`);
+  // 同一代號同一除權息日的多列。appendDividendHistoryNow 寫的是 slot[exDate]，**後者覆蓋前者**，
+  // 所以多列會靜默丟掉一半——若上游哪天把除權息拆成「除權一列＋除息一列」，
+  // 參考價就只用半個事件算出來，而且蓋著 official 章、沒有任何告警。
+  //
+  // 2026-07-27 實測：TWSE 125 列＋TPEx 138 列，**(代號, 除權息日) 全部唯一、0 組重複**。
+  // 也就是說這是防禦性偵測，不是已觀察到的錯誤——歸檔裡 revision ≥3 的 7 筆（最高 4）
+  // 有更簡單的解釋：7 筆裡 5 筆是除權／除權息，配股條件本來就會分次定案。
+  // 刻意**不合併**：合併公式要先確認上游真的怎麼拆，猜錯比不算更糟。
+  const duplicates = [];
+  for (const [code, list] of archiveMap) {
+    const byDate = new Map();
+    for (const item of list) byDate.set(item.exDate, (byDate.get(item.exDate) || 0) + 1);
+    for (const [exDate, count] of byDate) {
+      if (count <= 1) continue;
+      for (const item of list) if (item.exDate === exDate) item.duplicateRows = true;
+      if (duplicates.length < 5) duplicates.push(`${code} ${exDate}（${count} 列）`);
+    }
+  }
+  if (duplicates.length) {
+    warnings.push(
+      `${DIVIDEND_SOURCES[source].label}除權息有同一代號同一天多列的情形（${duplicates.join("、")}）`
+      + "，資料結構無法表達同日多事件；這些事件已標為未定案，不會用半個事件算出參考價。",
+    );
+  }
   // 不 throw：真的出現合法的 >100% 配股時，把整個市場的除權息資料丟掉會比算錯更糟。
   // 記 warning 讓它浮到畫面上，實際的比率仍由下游判成未定案。
   if (implausible.length) {
@@ -4533,7 +4557,13 @@ async function appendDividendHistoryNow(map, { successfulSources = [] } = {}) {
       const hasSubscriptionRatio = hasFiniteField(item.subscriptionRatio);
       const subscriptionRatio = item.subscriptionRatio == null ? 0 : Number(item.subscriptionRatio);
       const formulaComplete = (
-        (!kind.includes("息") || hasFiniteField(item.cashDividend))
+        // 同一代號同一除權息日出現多列時，下面的 slot[item.exDate] 是**後者覆蓋前者**，
+        // 會靜默丟掉另外那一半（例如上游把除權息拆成「除權一列＋除息一列」），
+        // 於是參考價只用半個事件算出來，卻蓋著 formulaComplete=true 與 official 章。
+        // 目前實測 0 次（見 normalizeDividendMarketRows），但真的發生時是無聲的錯答案，
+        // 所以一律當成算不出來——unresolved 優於算錯。合併公式等確認上游真的拆列再做。
+        !item.duplicateRows
+        && (!kind.includes("息") || hasFiniteField(item.cashDividend))
         && (!kind.includes("權") || hasFiniteField(item.stockRatio) || hasSubscriptionRatio)
         && Number.isFinite(subscriptionRatio)
         && subscriptionRatio >= 0
@@ -12627,7 +12657,7 @@ export {
   buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,
-  normalizeDividendMarketRows, DIVIDEND_RATIO_MAX_PLAUSIBLE,
+  normalizeDividendMarketRows, DIVIDEND_RATIO_MAX_PLAUSIBLE, appendDividendHistory,
   // replaySwingVerificationHistory 是同步的，公司行動偵測要讀已載入的歸檔；
   // 生產路徑由 advanceSwingVerification 先 await，測試也必須照同一個順序來，
   // 否則偵測器會安靜地讀到空歸檔、把「沒載入」當成「沒有事件」。
