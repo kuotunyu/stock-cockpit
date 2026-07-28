@@ -12,9 +12,21 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { importServer } from "../helpers/test-server.mjs";
-import { compactToday, surveillanceRoutes, stockDayAllRow } from "../helpers/fixtures.mjs";
+import { compactToday, compactTradingDay, surveillanceRoutes, stockDayAllRow } from "../helpers/fixtures.mjs";
 
+// 這份 fixture 的前提是「**今天**是交易日，而且今天就是除權息日」——週末兩者都不成立。
+// 2026-07-27 用模擬時鐘實測：週六 4 條、週日 3 條轉紅（picks 是空的，引擎根本不產生訊號）。
+//
+// **不能改用 compactTradingDay(0) 繞過**：那會讓 fixture 的「今天」退到週五，而引擎的今天
+// 仍是週六——兩者一旦不一致，「最後一根永遠不被還原」的保護就失效，實測會看到
+// 分類從 strongContinuation 變成 pullbackReversal、成交量被 shareFactor 從 3000 砍成 1500。
+// 那是被錯誤的前提製造出來的假失敗，比原本的空 picks 更難診斷。
+// 正確做法與 signal-intraday-observation 一致：前提不成立就明確跳過並說明原因。
 const today = compactToday(0);
+const NON_TRADING_TODAY = compactTradingDay(0) !== today;
+const SKIP_NON_TRADING = NON_TRADING_TODAY
+  ? "今天不是交易日，沒有「今天除權息且引擎產生訊號」的情境可測"
+  : false;
 const roc = (compact) => `${Number(compact.slice(0, 4)) - 1911}/${compact.slice(4, 6)}/${compact.slice(6, 8)}`;
 
 // 事件日（今天）：前收 100、配息 8 → 官方參考價 92；開 92 高 99 低 91.5 收 98。
@@ -84,7 +96,7 @@ const body = await mod.buildOvernightSignals({ persistSnapshot: false });
 const allPicks = Object.values(body.groups || {}).flat();
 const tsmc = allPicks.find((pick) => pick.code === "2330");
 
-test("除權息當天的漲跌幅以官方參考價為基準，不是前一根收盤", () => {
+test("除權息當天的漲跌幅以官方參考價為基準，不是前一根收盤", { skip: SKIP_NON_TRADING }, () => {
   assert.ok(tsmc, `2330 應該入選強勢續攻（實際 picks：${JSON.stringify(allPicks.map((p) => [p.code, p.group]))}）`);
   assert.equal(tsmc.group, "strongContinuation");
   // (98 − 92) / 92 = +6.5217%；沒還原的話是 (98 − 100) / 100 = −2%，三個分群全部進不去。
@@ -93,7 +105,7 @@ test("除權息當天的漲跌幅以官方參考價為基準，不是前一根�
   assert.equal(tsmc.corporateActionBasis.source, "exchange-result", "第一順位要走官方計算結果表");
 });
 
-test("卡片上的價格與成交量仍是真實成交數字，不得被還原動到", () => {
+test("卡片上的價格與成交量仍是真實成交數字，不得被還原動到", { skip: SKIP_NON_TRADING }, () => {
   // 還原因子從最後一根往回累乘、事件當根在 factor 更新前就寫入，所以最後一根永遠是原值。
   // 這條是整個做法成立的前提：拿還原後的序列算指標，但顯示的價格必須是真的能成交的價格。
   assert.equal(tsmc.price, TODAY_BAR.close, "收盤價要是真實成交價");
@@ -104,14 +116,14 @@ test("卡片上的價格與成交量仍是真實成交數字，不得被還原�
   assert.equal(tsmc.metrics.volumeRatio5, 3, "量比＝3000 / 1000（純除息不改股數，shareFactor 為 1）");
 });
 
-test("漲跌幅基準改變了要說出來，使用者才對得起「昨天的收盤價」", () => {
+test("漲跌幅基準改變了要說出來，使用者才對得起「昨天的收盤價」", { skip: SKIP_NON_TRADING }, () => {
   assert.ok(
     tsmc.riskTags.includes("除權息日・漲跌對參考價"),
     `要標明基準（實際 ${JSON.stringify(tsmc.riskTags)}）`,
   );
 });
 
-test("交易所說有事件但查不到參考價 → 不編一個數字出來，那一檔不上榜", () => {
+test("交易所說有事件但查不到參考價 → 不編一個數字出來，那一檔不上榜", { skip: SKIP_NON_TRADING }, () => {
   // 2454 的資料與 2330 一模一樣，唯一差別是官方計算結果表沒有它。
   // 跳空只有 8%（< 10.5% heuristic 門檻）→ 推不出比率 → unresolved。
   assert.equal(allPicks.some((pick) => pick.code === "2454"), false, "算不出比率就不該給結論");

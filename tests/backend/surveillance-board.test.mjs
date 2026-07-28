@@ -14,6 +14,31 @@ import {
   stockDayAllRow, tpexDailyCloseRow,
 } from "../helpers/fixtures.mjs";
 
+// `compactToday(n)` 是**純日曆位移**，但這支檔案的多數測試需要「那一天是交易日」
+// ——getSurveillanceBoard 只在交易日落盤，落到週末就沒有快照可比對。
+// 寫死位移的結果是「測試在某些星期幾才會執行到真正的路徑」：2026-07-27 用模擬時鐘實測，
+// 週五 2 條、週六 5 條、週日 3 條轉紅，而週一到週四全綠——所以平日開發永遠看不到。
+// 這是同一個問題在這支檔案裡的第二次，所以抽成共用而不是再寫一次 inline 判斷。
+// （只處理週末；國定假日仍由各測試自行 mock holidaySchedule 決定，與 fixtures 的分工一致。）
+const weekdayOf = (compact) => new Date(Date.UTC(
+  Number(compact.slice(0, 4)), Number(compact.slice(4, 6)) - 1, Number(compact.slice(6, 8)),
+)).getUTCDay();
+const isWeekday = (compact) => weekdayOf(compact) % 6 !== 0;
+// 從 preferred 往前找第一個落在平日的位移。
+function weekdayOffset(preferred) {
+  for (let offset = preferred, guard = 0; guard < 10; offset -= 1, guard += 1) {
+    if (isWeekday(compactToday(offset))) return offset;
+  }
+  return preferred;
+}
+// 從 preferred 往前找一組「連續兩個平日」，回傳 [前, 後]。
+function adjacentWeekdayOffsets(preferred) {
+  for (let offset = preferred, guard = 0; guard < 10; offset -= 1, guard += 1) {
+    if (isWeekday(compactToday(offset)) && isWeekday(compactToday(offset - 1))) return [offset - 1, offset];
+  }
+  return [preferred - 1, preferred];
+}
+
 const o = {}; // 可變 overrides：每個測試改欄位再呼叫
 const { mod, mock, dataDir } = await importServer({ routes: surveillanceRoutes(o) });
 const { getSurveillanceBoard, survFetchRecords } = mod;
@@ -177,7 +202,7 @@ test("全額交割：TWT85U 的 * → 兼分盤；tpex_cmode 全形Ｙ＋僅當�
 //   3. 組成不一致的風險是**單向**的——對照不完整＋今天完整才會爆出假新進（必須擋）；
 //      對照完整＋今天不完整可以比（今天的代號是子集）。
 test("單源失敗：只有失敗的那一類停止比對，其他類別照常落盤", async () => {
-  const K = -5;
+  const K = weekdayOffset(-5); // 落到週末就沒有快照可比對
   const base = compactToday(K);
   resetSources();
   o.twseNotice = [twseNoticeRow({ code: "2330", count: 2 })];
@@ -227,21 +252,8 @@ test("對照名單不完整、今天完整 → 不得把整批標成「今日新
   // ⚠ 位移刻意選前面測試沒用過的（其他測試佔了 0、-1~-6）：同一個日期若早先已寫過完整快照，
   //   落盤時的 merge 會保留那一份（那是對的——同一交易日先抓到的真實資料不該因後來失敗而丟掉），
   //   會讓本測試的前提不成立，所以下面明確斷言前提。
-  // compactToday 是**純日曆位移**，而這個測試的前提是「prev 與 curr 是相鄰交易日」。
-  // 寫死 -10/-9 時，只要今天落在某些星期幾，那兩天就會是週末：
-  // 2026-07-27（週一）實測 -10 是週六、-9 是週日 → getSurveillanceBoard 不落盤
-  // → `history[prevDay]` 是 undefined，整條轉紅。它在週日跑是綠的，所以一直沒被發現。
-  // 改成往回找一組「連續兩個平日」，前提才真的成立。（國定假日仍由各測試自行 mock。）
-  const weekdayOf = (compact) => new Date(Date.UTC(
-    Number(compact.slice(0, 4)), Number(compact.slice(4, 6)) - 1, Number(compact.slice(6, 8)),
-  )).getUTCDay();
-  const isWeekday = (compact) => weekdayOf(compact) % 6 !== 0;
-  let CURR_OFF = -9;
-  for (let guard = 0; guard < 10; guard += 1) {
-    if (isWeekday(compactToday(CURR_OFF)) && isWeekday(compactToday(CURR_OFF - 1))) break;
-    CURR_OFF -= 1;
-  }
-  const PREV_OFF = CURR_OFF - 1;
+  // 見檔案上方 weekdayOffset／adjacentWeekdayOffset 的說明。
+  const [PREV_OFF, CURR_OFF] = adjacentWeekdayOffsets(-9);
   const prevDay = compactToday(PREV_OFF);
   const currDay = compactToday(CURR_OFF);
   assert.ok(isWeekday(prevDay) && isWeekday(currDay), `前提：${prevDay}／${currDay} 必須都是平日`);
