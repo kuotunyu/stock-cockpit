@@ -1963,12 +1963,7 @@ async function recoverDbFromBackup(parseError) {
   } catch {
     // 改名失敗就原地留著，仍嘗試備份
   }
-  let backups = [];
-  try {
-    backups = (await readdir(dbBackupDir)).filter((name) => /^stock1-db-\d{8}\.json$/.test(name)).sort();
-  } catch {
-    backups = [];
-  }
+  const backups = await listDbBackupNames();
   while (backups.length) {
     const name = backups.pop(); // 從最新的備份開始試
     try {
@@ -1989,9 +1984,42 @@ async function recoverDbFromBackup(parseError) {
   return createEmptyDb();
 }
 
+// 依日期排序的每日備份檔名（新的在後）。恢復路徑與「主檔不見了」的偵測共用同一份判準。
+async function listDbBackupNames() {
+  try {
+    return (await readdir(dbBackupDir)).filter((name) => /^stock1-db-\d{8}\.json$/.test(name)).sort();
+  } catch {
+    return [];
+  }
+}
+
 async function loadDbOnce() {
   await mkdir(dataDir, { recursive: true });
   let recoveredFromCorruption = false;
+  // 主檔不存在但**備份存在** ＝ 這不是第一次啟動，是主檔不見了。
+  // 舊行為是直接起一個空 DB 並在下面立刻 saveDb 落盤，畫面上唯一的線索是
+  // 「Created initial admin user "admin"」——讀起來就像第一次開機。
+  // 而隔天 backupDbDaily 會把這個空 DB 複製成當天的還原點，14 天後好備份全部被輪替掉，
+  // 交易帳本、自選股、共享備註全部永久消失。
+  //
+  // 觸發路徑不罕見：防毒隔離、OneDrive 衝突改名、使用者看到 corrupt 訊息後手動刪檔，
+  // 或 corrupt → rename → saveDb 失敗 → 重跑。
+  //
+  // **刻意 fail-closed 而不是自動還原**：要用哪一份備份、備份日之後的變更怎麼辦，
+  // 都是使用者才能決定的事；自動挑一份等於替他做了一個他不知情的選擇。
+  // 沒有備份時才是真正的第一次啟動，照舊起空 DB。
+  if (!existsSync(dbPath)) {
+    const backups = await listDbBackupNames();
+    if (backups.length) {
+      throw new Error(
+        `主資料庫 ${dbPath} 不存在，但 ${dbBackupDir} 裡有 ${backups.length} 份備份`
+        + `（最新：${backups.at(-1)}）。這代表主檔遺失而不是第一次啟動，`
+        + "為避免以空資料庫覆蓋掉備份，伺服器不會啟動。\n"
+        + `  要還原：把 ${join(dbBackupDir, backups.at(-1))} 複製成 ${dbPath} 再啟動。\n`
+        + `  確定要全新開始：先把 ${dbBackupDir} 移到別處（不要直接刪，那是你唯一的資料）。`,
+      );
+    }
+  }
   if (existsSync(dbPath)) {
     // 讀檔 I/O 錯誤（EACCES/EIO/EBUSY/EISDIR…）不是 JSON 損壞：必須原錯誤 fail-closed，
     // 絕不能把檔案／目錄改名後再靜默回退備份或空 DB。
