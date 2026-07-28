@@ -112,3 +112,72 @@ test("正規化後的公司行動紀錄不帶假的 price/shares，避免下游�
   assert.equal(record.stockRatio, 0.1);
   assert.equal(record.tradeDate, "20260701");
 });
+
+// ---- 權利股數的基準日：同日交易 ----
+//
+// 舊寫法用「重放到那一筆時的 pos.shares」算配股，而正確口徑是「除權基準日**之前**的持股」
+// （findMissingCorporateActions 的 sharesBefore 一直是對的，兩邊因此會給出不同答案）。
+// 這個分岔在同日交易上**必然**發生：compareTradeChronology 缺 executedAt 時退回 createdAt 排序，
+// 而補登配股的快速鈕填的是「按下去的當下」，必然排在同日買賣之後。
+// 既有的 8 個案例全是「買 0601 / 除權 0701」，同日組合一次都沒有——所以這個缺陷沒被守住。
+
+test("基準日當天再買進：新買的不享有配股權利", () => {
+  const portfolio = build([
+    buy(),                                                            // 06/01 買 1000
+    buy({ id: "b2", tradeDate: "20260701", price: 90, shares: 1000 }), // 07/01（除權日）再買 1000
+    action(),                                                         // 07/01 除權 0.1
+  ]);
+  assert.equal(portfolio.ok, true, portfolio.error);
+  const holding = portfolio.holdings.find((item) => item.code === "2330");
+  // 只有除權日之前的 1000 股有權利 → +100 股；舊寫法用當下的 2000 股算 → +200。
+  assert.equal(holding.shares, 2100, "基準日當天買進的那 1000 股不享有配股");
+});
+
+test("基準日當天賣出：賣掉的部分仍然享有配股權利", () => {
+  const portfolio = build([
+    buy(),                                                                                  // 06/01 買 1000
+    buy({ id: "s1", side: "sell", tradeDate: "20260701", price: 90, shares: 600 }),          // 07/01 賣 600
+    action(),                                                                               // 07/01 除權 0.1
+  ]);
+  assert.equal(portfolio.ok, true, portfolio.error);
+  const holding = portfolio.holdings.find((item) => item.code === "2330");
+  // 除權日之前持有 1000 股 → +100 股；賣掉 600 之後剩 400，加上配股 100 = 500。
+  // 舊寫法用當下的 400 股算 → 只加 40 股 → 440。
+  assert.equal(holding.shares, 500, "基準日當天賣出仍享有權利（當天的價格已是除權後參考價）");
+});
+
+test("基準日當天全部賣光：配股不得整批蒸發", () => {
+  const portfolio = build([
+    buy({ shares: 2000 }),                                                                   // 06/01 買 2000
+    buy({ id: "s1", side: "sell", tradeDate: "20260701", price: 90, shares: 2000 }),          // 07/01 全賣
+    action({ stockRatio: 0.5 }),                                                             // 07/01 除權 0.5
+  ]);
+  assert.equal(portfolio.ok, true, portfolio.error);
+  const holding = portfolio.holdings.find((item) => item.code === "2330");
+  // 舊寫法的守衛是 `if (pos.shares > 0)`，這時 pos.shares 是 0 → 整個分支被跳過
+  // → 1000 股憑空消失，而且之後想賣它會被賣超檢查擋下、錯誤訊息還叫你去檢查紀錄。
+  assert.ok(holding, "全部賣光但仍有配股，庫存不該整檔消失");
+  assert.equal(holding.shares, 1000, "除權日之前持有 2000 股 → 配股 1000 股必須留下");
+});
+
+test("提示的股數與實際加進去的股數必須一致（同一個口徑）", async () => {
+  const records = [
+    buy(),
+    buy({ id: "b2", tradeDate: "20260701", price: 90, shares: 1000 }),
+  ];
+  // findMissingCorporateActions 用 sharesBefore、buildPortfolio 用同一個函式，兩邊必須相等。
+  const before = mod.sharesHeldBeforeExDate(records, "2330", "20260701");
+  assert.equal(before, 1000, "基準日之前只有 1000 股");
+  const portfolio = build([...records, action()]);
+  const holding = portfolio.holdings.find((item) => item.code === "2330");
+  assert.equal(holding.shares - 2000, Math.floor(before * 0.1), "實際加的股數＝提示的股數");
+});
+
+// 既有的「無條件捨去」案例用的比率讓 floor 與 round 同值，所以擋不住「改成四捨五入」。
+// 台股不足一股是折現金發放，不是四捨五入給你一股——小數部分 ≥ 0.5 時兩者才分得出來。
+test("不足一股一律捨去，即使小數部分超過一半", () => {
+  const portfolio = build([buy({ shares: 1000 }), action({ stockRatio: 0.1799 })]);
+  const holding = portfolio.holdings.find((item) => item.code === "2330");
+  // 1000 × 0.1799 = 179.9 → 捨去 179（四捨五入會給 180，等於多給你一股）。
+  assert.equal(holding.shares, 1179, "179.9 股要捨成 179，不可進位");
+});

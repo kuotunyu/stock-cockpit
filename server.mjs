@@ -1505,6 +1505,28 @@ function migrateTradesPayloadToV2(input, options = {}) {
 // 快速鈕因此只有一天的視窗期。漏記的後果不只是顯示假虧損，而是之後想賣掉含配股的股數會被
 // 賣超檢查擋下。所以改由伺服器用本機歸檔回溯比對，讓使用者事後也補得回來。
 // 只回報「使用者在該事件基準日之前確實持有」的檔位——沒持股就沒有配股可言。
+// 配股／現增的權利股數，一律按「除權基準日**之前**的持股」計算——基準日當天買進不享有權利，
+// 基準日當天賣出仍然享有（那天的價格已經是除權後的參考價）。
+//
+// 這個函式刻意做成兩個呼叫端共用：buildPortfolio 真正加股數的地方，與 findMissingCorporateActions
+// 提示「你漏登了 +N 股」的地方。以前後者對、前者用「重放到那一筆時的 pos.shares」，
+// 兩邊在同日交易上會給出不同答案：畫面承諾 +100 股、實際加 40 股，而且沒有任何徵兆。
+function sharesHeldBeforeExDate(records, code, exDate) {
+  let shares = 0;
+  for (const record of records) {
+    if (record.code !== code) continue;
+    const date = toCompactDate(record.tradeDate || record.date);
+    if (!date || date >= exDate) continue;
+    if (record.side === "buy") shares += Number(record.shares) || 0;
+    else if (record.side === "sell") shares -= Number(record.shares) || 0;
+    else if (record.side === TRADE_CORPORATE_ACTION_SIDE) {
+      shares += Math.floor(shares * (Number(record.stockRatio) || 0))
+        + Math.floor(shares * (Number(record.subscriptionRatio) || 0));
+    }
+  }
+  return shares;
+}
+
 async function findMissingCorporateActions(payload) {
   const records = Array.isArray(payload?.records) ? payload.records : [];
   if (!records.length) return [];
@@ -1512,22 +1534,7 @@ async function findMissingCorporateActions(payload) {
   const logged = new Set(records
     .filter((record) => record.side === TRADE_CORPORATE_ACTION_SIDE)
     .map((record) => `${record.code}|${toCompactDate(record.tradeDate || record.date)}`));
-  // 逐檔重放到每個事件基準日之前，算出當下持股（沿用「基準日當天買進不享有權利」的規則）。
-  const sharesBefore = (code, exDate) => {
-    let shares = 0;
-    for (const record of records) {
-      if (record.code !== code) continue;
-      const date = toCompactDate(record.tradeDate || record.date);
-      if (!date || date >= exDate) continue;
-      if (record.side === "buy") shares += Number(record.shares) || 0;
-      else if (record.side === "sell") shares -= Number(record.shares) || 0;
-      else if (record.side === TRADE_CORPORATE_ACTION_SIDE) {
-        shares += Math.floor(shares * (Number(record.stockRatio) || 0))
-          + Math.floor(shares * (Number(record.subscriptionRatio) || 0));
-      }
-    }
-    return shares;
-  };
+  const sharesBefore = (code, exDate) => sharesHeldBeforeExDate(records, code, exDate);
   const missing = [];
   for (const code of new Set(records.map((record) => record.code))) {
     for (const action of corporateActionHistoryForCode(code)) {
@@ -1564,12 +1571,21 @@ function buildPortfolio(payload) {
     if (t.side === TRADE_CORPORATE_ACTION_SIDE) {
       // 會計上：無償配股＝以 0 元取得股票，現增＝以認購價取得股票。兩者都只是「加股數、加成本」，
       // 均價自然稀釋，所以這裡不需要任何特殊公式。除息不走這裡（現金股利不動持股與成本）。
-      // 手上沒有部位就沒有配股可言（例如除權基準日之前就已賣光），直接跳過。
-      if (pos.shares > 0) {
-        // 台股配股與現增都是按「除權基準日當下持股」計算，不足一股的部分不會給零股，
-        // 而是折現金髮放；帳本只追蹤股數，所以無條件捨去，寧可少算不要多算。
-        const bonusShares = Math.floor(pos.shares * (Number(t.stockRatio) || 0));
-        const subscribedShares = Math.floor(pos.shares * (Number(t.subscriptionRatio) || 0));
+      // 權利股數要按「除權基準日**之前**的持股」算，不能用重放到這一筆時的 pos.shares。
+      // 兩者在同日交易上會分岔，而且一定會分岔：compareTradeChronology 在缺 executedAt 時
+      // 退回 createdAt 排序，而補登配股的快速鈕填的是「按下去的當下」——必然排在同日買賣之後。
+      //   6/1 買 1000、7/10 再買 1000、7/10 除權 0.1 → 正確 +100 股，舊寫法給 +200
+      //   6/1 買 1000、7/10 賣 600、7/10 除權 0.1   → 正確 +100 股，舊寫法給 +40
+      //   6/1 買 2000、7/10 全賣、7/10 除權 0.5     → 正確 +1000 股，舊寫法 pos.shares 是 0
+      //                                                → 整批蒸發，之後想賣還會被賣超檢查擋下
+      // 基準日當天賣出仍然享有權利（那天的價格已經是除權後的參考價），所以守衛也要看
+      // sharesBefore 而不是 pos.shares——否則「當天賣光」這個情境會被整個跳過。
+      const entitledShares = sharesHeldBeforeExDate(records, t.code, toCompactDate(t.tradeDate || t.date));
+      if (entitledShares > 0) {
+        // 不足一股的部分不會給零股而是折現金發放；帳本只追蹤股數，所以無條件捨去，
+        // 寧可少算不要多算。
+        const bonusShares = Math.floor(entitledShares * (Number(t.stockRatio) || 0));
+        const subscribedShares = Math.floor(entitledShares * (Number(t.subscriptionRatio) || 0));
         pos.shares += bonusShares + subscribedShares;
         pos.cost += subscribedShares * (Number(t.subscriptionPrice) || 0);
         positions.set(t.code, pos);
@@ -12628,7 +12644,7 @@ export {
   // 持股損益
   TRADE_SCHEMA_VERSION, MAX_TRADE_RECORDS, isValidCompactCalendarDate, validateTradesMutationInput,
   computeTradeFee, computeTradeTax, computeTradeTaxRule,
-  normalizeTradesPayload, migrateTradesPayloadToV2, buildPortfolio,
+  normalizeTradesPayload, migrateTradesPayloadToV2, buildPortfolio, sharesHeldBeforeExDate,
   // 官方商品主檔／交易商品 provenance
   PRODUCT_DIRECTORY_RULE_VERSION, classifyOfficialEtf,
   parseTwseEtfDirectorySnapshot, parseTpexEtfCategory, parseTpexEtfDirectorySnapshot,
