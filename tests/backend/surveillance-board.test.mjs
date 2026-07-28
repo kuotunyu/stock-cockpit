@@ -227,10 +227,24 @@ test("對照名單不完整、今天完整 → 不得把整批標成「今日新
   // ⚠ 位移刻意選前面測試沒用過的（其他測試佔了 0、-1~-6）：同一個日期若早先已寫過完整快照，
   //   落盤時的 merge 會保留那一份（那是對的——同一交易日先抓到的真實資料不該因後來失敗而丟掉），
   //   會讓本測試的前提不成立，所以下面明確斷言前提。
-  const PREV_OFF = -10;  // 與 CURR_OFF 是相鄰交易日
-  const CURR_OFF = -9;
+  // compactToday 是**純日曆位移**，而這個測試的前提是「prev 與 curr 是相鄰交易日」。
+  // 寫死 -10/-9 時，只要今天落在某些星期幾，那兩天就會是週末：
+  // 2026-07-27（週一）實測 -10 是週六、-9 是週日 → getSurveillanceBoard 不落盤
+  // → `history[prevDay]` 是 undefined，整條轉紅。它在週日跑是綠的，所以一直沒被發現。
+  // 改成往回找一組「連續兩個平日」，前提才真的成立。（國定假日仍由各測試自行 mock。）
+  const weekdayOf = (compact) => new Date(Date.UTC(
+    Number(compact.slice(0, 4)), Number(compact.slice(4, 6)) - 1, Number(compact.slice(6, 8)),
+  )).getUTCDay();
+  const isWeekday = (compact) => weekdayOf(compact) % 6 !== 0;
+  let CURR_OFF = -9;
+  for (let guard = 0; guard < 10; guard += 1) {
+    if (isWeekday(compactToday(CURR_OFF)) && isWeekday(compactToday(CURR_OFF - 1))) break;
+    CURR_OFF -= 1;
+  }
+  const PREV_OFF = CURR_OFF - 1;
   const prevDay = compactToday(PREV_OFF);
   const currDay = compactToday(CURR_OFF);
+  assert.ok(isWeekday(prevDay) && isWeekday(currDay), `前提：${prevDay}／${currDay} 必須都是平日`);
 
   resetSources();
   o.twsePunish = [twsePunishRow({ code: "2603", startOff: CURR_OFF - 1, endOff: CURR_OFF + 8 })];
