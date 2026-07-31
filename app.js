@@ -6546,6 +6546,29 @@ function maybeAlertMineNewlyListed(payload) {
 
 // 依分頁產生「精簡圖例」HTML：只留當頁會出現且不自明的 2–3 個符號，
 // 完整解釋（分盤/連N天/全額交割定義…）都在「說明」彈窗 #survHelp。
+// 分頁 → 後端歷史比對欄位。三個處置分頁共用同一份 disposition 名單。
+const SURV_TAB_HISTORY_FIELD = {
+  aboutToDispose: "disposition",
+  inDisposition: "disposition",
+  aboutToRelease: "disposition",
+  attention: "attention",
+  blockTrades: "block",
+  changedTrading: "changed",
+};
+// 這一分頁的「新進／連 N 天」到底能不能比對。後端一直有算 staleHistoryFields
+// （完全比不了）與 unreliableRemovalFields（比得出新進、但「消失」不代表出關），
+// 但前端從來沒讀過——所以名單比對被關掉時，畫面照樣印「新 今日新進」，
+// 而使用者只會看到一個沒有任何「新」標籤的分頁，讀起來像「今天沒有新進的」。
+function survHistoryTrust(tab, data) {
+  const field = SURV_TAB_HISTORY_FIELD[tab];
+  if (!field || !data) return { field: "", canCompare: true, removalsUnreliable: false };
+  return {
+    field,
+    canCompare: !(data.staleHistoryFields || []).includes(field),
+    removalsUnreliable: (data.unreliableRemovalFields || []).includes(field),
+  };
+}
+
 function survLegendHtml(tab, data = null) {
   const parts = ['<span><b class="lg-star">★</b> 自選股</span>'];
   if (tab === "aboutToDispose" || tab === "inDisposition" || tab === "aboutToRelease") {
@@ -6553,9 +6576,27 @@ function survLegendHtml(tab, data = null) {
   } else if (tab === "attention") {
     parts.push('<span><b class="lg-amber">升溫</b> 較可能進入處置</span>');
   }
-  const newLabel = data?.comparisonIsPreviousTradingDay ? "今日新進" : data?.comparisonAsOf ? "較上次新增" : "新進名單";
-  parts.push(`<span><b class="lg-new">新</b> ${newLabel}</span>`);
+  // 比不了的時候不可以留著「新」的圖例：那是在解釋一個當下不存在、也不會出現的標記。
+  const trust = survHistoryTrust(tab, data);
+  if (trust.canCompare) {
+    const newLabel = data?.comparisonIsPreviousTradingDay ? "今日新進" : data?.comparisonAsOf ? "較上次新增" : "新進名單";
+    parts.push(`<span><b class="lg-new">新</b> ${newLabel}</span>`);
+  }
   return parts.join('<i class="lg-sep">·</i>');
+}
+
+// 比對狀態的一行說明。只有「比不了」與「出關不可信」才顯示，正常時完全不出現。
+function survHistoryNoteHtml(tab, data) {
+  const trust = survHistoryTrust(tab, data);
+  if (!trust.field || !data) return "";
+  if (!trust.canCompare) {
+    const since = data.comparisonAsOf ? `與 ${escapeHtml(data.comparisonAsOf)} ` : "與前一份名單";
+    return `<p class="surv-history-note">這一類今天無法${since}比對，<b>新進與連續天數暫不判定</b>（不是今天沒有新進）。</p>`;
+  }
+  if (trust.removalsUnreliable) {
+    return `<p class="surv-history-note">這一類今天的來源沒抓到完整名單，<b>代號消失不代表已出關</b>，出關數暫不判定。</p>`;
+  }
+  return "";
 }
 
 function renderSurveillanceScreen() {
@@ -6623,17 +6664,31 @@ function renderSurveillanceScreen() {
   };
   if (el.survIntro) el.survIntro.textContent = intro || "";
   const shown = survVisibleList(list, tab);
-  const emptyMsg = state.survMineOnly && list.length
-    ? "你的自選股目前沒有在這個分頁。"
+  // 本分頁有資料、但篩完是空的 → 那是**篩選條件**的結果，不是「今天沒有」。
+  // 這兩句話對使用者的意義完全相反，而舊文案一律講後者：2026-07-31 的 55 檔注意股
+  // 全部是上櫃，切到「上市」分頁會看到「今天沒有被列為注意的股票」，而上方分頁徽章
+  // 同時顯示著 55。市場／分盤／搜尋三個篩選都會踩到，只有「只看自選」有專屬文案。
+  const emptyMsg = list.length
+    ? (state.survMineOnly
+      ? `你的自選股目前沒有在這個分頁（本分頁共 ${list.length} 檔）。`
+      : `篩選後沒有符合的（本分頁共 ${list.length} 檔）。`)
     : (emptyHints[tab] || "目前沒有資料。");
   const comparisonEntered = data.comparisonIsPreviousTradingDay ? data.enteredToday : data.enteredSinceComparison;
   const comparisonReleased = data.comparisonIsPreviousTradingDay ? data.releasedToday : data.releasedSinceComparison;
   const summaryLabel = data.comparisonIsPreviousTradingDay ? "較前一交易日" : data.comparisonAsOf ? `較 ${data.comparisonAsOf}` : "";
+  // 出關不可信時，`releasedToday` 後端一律回 0（見 canTrustRemovals）——那是保守的正確做法，
+  // 但把它印成「名單移除 0 檔」就變成一句斷言。0 與「不知道」要看得出差別。
+  const removalsUnreliable = (data.unreliableRemovalFields || []).includes("disposition");
   const summary = data.hasHistory && (comparisonEntered || comparisonReleased)
-    ? `<div class="surv-summary">${escapeHtml(summaryLabel)}新增處置 <b>${comparisonEntered || 0}</b> 檔　·　名單移除 <b>${comparisonReleased || 0}</b> 檔</div>`
+    ? `<div class="surv-summary">${escapeHtml(summaryLabel)}新增處置 <b>${comparisonEntered || 0}</b> 檔　·　名單移除 ${
+      removalsUnreliable
+        ? '<b title="這一輪處置名單沒抓完整，代號消失不代表已出關">判定中</b>'
+        : `<b>${comparisonReleased || 0}</b> 檔`
+    }</div>`
     : "";
   el.survBoard.innerHTML = `
     ${summary}
+    ${survHistoryNoteHtml(tab, data)}
     ${shown.length
       ? `<div class="surv-grid">${shown.map((item) => survCard(item, tab)).join("")}</div>`
       : `<div class="surv-empty">${emptyMsg}</div>`}

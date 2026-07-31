@@ -5469,9 +5469,18 @@ async function getStockHistory(quote, dateCompact, monthsBack = 3, options = {})
   for (let offset = 0; offset > -monthsBack; offset -= 1) {
     months.push(addMonthsCompact(dateCompact, offset));
   }
+  // 逐月失敗原本被無聲吞成空陣列，於是「上游限流／逾時」與「這個月本來就沒有這檔的資料」
+  // 對呼叫端長得一模一樣。多數呼叫端（畫圖、型態計算）確實只要盡力而為，但驗證推進不行——
+  // 它會把我方的抓取失敗當成官方缺 K 寫進 dataGap 並永久停等。想分辨的呼叫端傳一個陣列進來收。
+  const failedMonths = [];
   const monthRows = await Promise.all(
-    months.map((month) => fetchStockHistoryMonth(quote.code, quote.exchange, month, quote.name).catch(() => []))
+    months.map((month) => fetchStockHistoryMonth(quote.code, quote.exchange, month, quote.name)
+      .catch((error) => {
+        failedMonths.push({ month, message: error?.message || String(error) });
+        return [];
+      }))
   );
+  if (Array.isArray(options.failedMonths)) options.failedMonths.push(...failedMonths);
   const rows = monthRows
     .flat()
     .filter((row) => row.close !== null && row.open !== null && toCompactDate(row.date) <= dateCompact)
@@ -5928,6 +5937,44 @@ function resolveSurveillanceQuoteDate(items, fallbackDate = "") {
     || toCompactDate(fallbackDate);
 }
 
+const SURVEILLANCE_HISTORY_FIELDS = [
+  { field: "disposition", match: /處置/ },
+  { field: "attention", match: /注意/ },
+  { field: "block", match: /鉅額/ },
+  { field: "changed", match: /全額交割/ },
+];
+// 同一個交易日會跑很多輪（10 分鐘快取到期、切回看板、盤中與盤後各一次）。這裡決定
+// 「這一輪要不要蓋掉先前那一份」以及「哪幾類今天仍然不完整」。
+//
+// 抽成模組層純函式的理由是測不到：getSurveillanceBoard 有 10 分鐘快取又沒有 force 參數，
+// 同一天呼叫兩次拿到的是快取，於是「早盤失敗、盤後成功」這條路徑沒有把手——
+// 而那正是 partial 旗標黏住的現場。
+function mergeSurveillanceDaySnapshot(previousToday, snapshot, failedFields) {
+  const previous = previousToday || {};
+  const previousPartial = new Set(previous.partial || []);
+  const merged = { ...snapshot };
+  const partial = [];
+  for (const { field } of SURVEILLANCE_HISTORY_FIELDS) {
+    // 同一天內若某類別先前那一輪是完整的，就別讓這一輪的殘缺名單蓋過去。
+    const wasComplete = previous[field] !== undefined && !previousPartial.has(field);
+    if (failedFields.has(field) && wasComplete) {
+      merged[field] = previous[field];   // 保留先前完整的那一份 → 這一份是完整的，不標 partial
+      continue;
+    }
+    // 只看**這一輪**的結果。原本還 or 上 previousPartial：早盤失敗、下午同一天抓成功時，
+    // snapshot[field] 明明已經是完整的整份取代，旗標卻撕不掉。後果落在隔天——
+    // canCompare 對「昨天 partial、今天完整」刻意回 false（那道保護是對的，防的是
+    // 「對照缺一半 → 今天全部看起來像新進」），於是隔天整個類別的新進與連 N 天靜默消失，
+    // 而畫面圖例還寫著「新＝今日新進」。名單暴增時早盤沒公布、盤後才有正是最常見的樣態。
+    if (failedFields.has(field)) partial.push(field);
+  }
+  // 必須明確覆寫而不是「有才展開」：`...(partial.length ? { partial } : {})` 在 partial 為空時
+  // 什麼都不寫，舊旗標會從 `...previous` 原封不動被帶回來——只修上面那行沒有用。
+  const record = { ...previous, ...merged, partial };
+  if (!partial.length) delete record.partial;
+  return record;
+}
+
 async function getSurveillanceBoard(dateCompact) {
   const today = dateCompact ? toCompactDate(dateCompact) : toTaipeiCompactDate();
   if (surveillanceBoardCache.value && surveillanceBoardCache.key === today && surveillanceBoardCache.expiresAt > Date.now()) {
@@ -6184,12 +6231,6 @@ async function getSurveillanceBoard(dateCompact) {
   // 資料其實是完整的，沒有理由陪葬。
   //   失敗的類別 → 不比對（避免把抓不到誤判成出關），也不寫進今天的快照（避免明天看到假新進）。
   //   成功的類別 → 照常比對與落盤。
-  const SURVEILLANCE_HISTORY_FIELDS = [
-    { field: "disposition", match: /處置/ },
-    { field: "attention", match: /注意/ },
-    { field: "block", match: /鉅額/ },
-    { field: "changed", match: /全額交割/ },
-  ];
   const failedFields = new Set();
   for (const warning of warnings) {
     const at = warning.indexOf("抓取失敗：");
@@ -6292,19 +6333,7 @@ async function getSurveillanceBoard(dateCompact) {
       changed: changedTrading.map((i) => i.code),
       block: blockTrades.map((i) => i.code),
     };
-    // 同一天內若某類別先前那一輪是完整的，就別讓這一輪的殘缺名單蓋過去。
-    const previousToday = history[today] || {};
-    const previousTodayPartial = new Set(previousToday.partial || []);
-    const partial = [];
-    for (const { field } of SURVEILLANCE_HISTORY_FIELDS) {
-      const wasComplete = previousToday[field] !== undefined && !previousTodayPartial.has(field);
-      if (failedFields.has(field) && wasComplete) {
-        snapshot[field] = previousToday[field];   // 保留先前完整的那一份
-        continue;
-      }
-      if (failedFields.has(field) || previousTodayPartial.has(field)) partial.push(field);
-    }
-    history[today] = { ...previousToday, ...snapshot, ...(partial.length ? { partial } : {}) };
+    history[today] = mergeSurveillanceDaySnapshot(history[today], snapshot, failedFields);
     for (const k of Object.keys(history).sort().slice(0, -45)) delete history[k];
     await saveSurveillanceHistory();
   } else {
@@ -10276,12 +10305,37 @@ let swingVerifySummaryCache = { expiresAt: 0, value: null };
 function invalidateSwingVerifySummaryCache() {
   swingVerifySummaryCache = { expiresAt: 0, value: null };
 }
+// 「可以安全推進到哪一天」與「兩個市場對今天是哪天有沒有共識」是兩件事，原本混成同一個判斷。
+//
+// coverageComplete 要求 twseDate === tpexDate（見 getReferenceData），而**上櫃例行性比上市早發布**：
+// 收盤後有一段時間上櫃已經是 D+1、上市還停在 D。那段時間 coverageComplete 為 false，整個推進被擋掉
+// ——但那個當下兩個市場對 **D** 的資料都是完整的，推進到 D 完全安全。
+//
+// 實測（2026-07-31 使用者實機資料）：106 筆 pending 有 99 筆卡在 20260716／20260727 動不了，
+// 而官方月檔那幾天的 K 一直都在；把這道閘門讓開之後，2.3 秒內 88 筆結案、卡住歸零。
+//
+// 原註解擔心的「同日另一市場稍後補齊也會被節流漏掉」仍然成立且必須保留，所以這裡取的是
+// **兩市場都已涵蓋的最後一天**（較早的那個資料日）——推進到那天不需要任何補齊。落後市場追上來時
+// advanceKey 會變，節流自然失效並接著推進，不會漏。
+function swingAdvanceTargetDate(reference, latestDate) {
+  const requested = toCompactDate(latestDate);
+  if (!requested) return "";
+  if (reference?.coverageComplete !== false) return requested;
+  // 以下都是 coverageComplete === false：可能只是資料日未對齊，也可能是某個市場降級。
+  // last-good（stale）或整個市場抓不到時一律不推進——那是原本就正確的保護。
+  if (reference?.markets?.twse?.status !== "fresh" || reference?.markets?.tpex?.status !== "fresh") return "";
+  const twseCompact = toCompactDate(reference.markets.twse.asOf || "");
+  const tpexCompact = toCompactDate(reference.markets.tpex.asOf || "");
+  if (!twseCompact || !tpexCompact) return "";
+  const common = twseCompact < tpexCompact ? twseCompact : tpexCompact;
+  return common < requested ? common : requested;
+}
 async function advanceSwingVerification(reference, latestDate) {
-  // 單一市場／last-good／日期未對齊時不可推進，否則同日另一市場稍後補齊也會被節流漏掉。
-  if (!latestDate || reference?.coverageComplete === false) return;
+  const targetDate = swingAdvanceTargetDate(reference, latestDate);
+  if (!targetDate) return;
   const twseDate = reference?.markets?.twse?.asOf || "";
   const tpexDate = reference?.markets?.tpex?.asOf || "";
-  const advanceKey = twseDate && tpexDate ? `${twseDate}|${tpexDate}` : latestDate;
+  const advanceKey = twseDate && tpexDate ? `${twseDate}|${tpexDate}` : targetDate;
   if (lastSwingAdvanceKey === advanceKey) return;
   try {
     const db = await loadDb();
@@ -10297,7 +10351,7 @@ async function advanceSwingVerification(reference, latestDate) {
     const calendar = await getTradingCalendarEvidence();
     await Promise.all([
       loadFundamentalsHistory(),
-      ensureCorporateActionResults(compactMonthsBefore(latestDate, 4), latestDate),
+      ensureCorporateActionResults(compactMonthsBefore(targetDate, 4), targetDate),
     ]);
     const pendingByCode = new Map();
     for (const entries of Object.values(store)) {
@@ -10308,6 +10362,7 @@ async function advanceSwingVerification(reference, latestDate) {
       }
     }
     let changed = false;
+    let historyUnavailable = 0;
     await mapLimit([...pendingByCode.entries()], 4, async ([code, entries]) => {
       const quote = reference.byCode.get(code);
       const quoteDay = toCompactDate(quote?.rawDate || quote?.asOf);
@@ -10318,15 +10373,29 @@ async function advanceSwingVerification(reference, latestDate) {
           holidayRows: calendar.holidayRows || [],
           candidateDays: quoteDay ? [quoteDay] : [],
         }).date;
-        return !expected || expected < latestDate || quoteDay !== latestDate;
+        return !expected || expected < targetDate || quoteDay !== targetDate;
       });
       let rows = directRows;
       if (needsHistory && quote?.exchange) {
-        const history = await getStockHistory(quote, latestDate, 4);
+        // 「抓不到歷史」與「官方真的缺這一天」必須分得開。分不開的後果是實測出來的：
+        // 逐月抓取失敗被 getStockHistory 的 .catch(() => []) 吞掉之後，rows 只剩整批收盤那一根，
+        // 中間每一個交易日都變成「查無 K」→ 寫進 dataGap → 而 replay 依設計不跳日，於是**永久停等**。
+        // 停等本身是對的（D-26／stock1-domain：中間缺 K 不可跳日），錯的是把我方的抓取失敗
+        // 當成官方缺漏餵給它。抓不到就整檔跳過，這一輪什麼都不寫，下一輪重試。
+        const failedMonths = [];
+        const history = await getStockHistory(quote, targetDate, 4, { failedMonths });
+        const historyLatest = history.length ? toCompactDate(history[history.length - 1].date) : "";
+        // 逐檔月歷史的當月資料偶爾比整批收盤晚一天更新（appendTodayCloseBar 就是為此存在），
+        // 所以容忍到 5 個日曆日；再舊就是抓取殘缺，不是上游只慢了一步。
+        const historyStale = !historyLatest || historyLatest < addDaysCompact(targetDate, -5);
+        if (failedMonths.length || historyStale) {
+          historyUnavailable += 1;
+          return;
+        }
         rows = [...history, ...directRows];
       }
       for (const entry of entries) {
-        const result = replaySwingVerificationHistory(entry, rows, latestDate, calendar);
+        const result = replaySwingVerificationHistory(entry, rows, targetDate, calendar);
         if (result.changed) changed = true;
       }
     });
@@ -10341,6 +10410,12 @@ async function advanceSwingVerification(reference, latestDate) {
       });
       if (!committed) return;
       invalidateSwingVerifySummaryCache();
+    }
+    // 有檔案因為抓不到歷史而被跳過 → 不節流，讓下一次看板重算時重試。
+    // 節流的用意是「這個收盤日已經處理完了」，被跳過的檔案顯然還沒處理完。
+    if (historyUnavailable) {
+      console.warn(`[Stock1] 波段驗證推進：${historyUnavailable} 檔官方歷史抓取殘缺，這一輪跳過不寫缺口，下次重試。`);
+      return;
     }
     // 只有完整流程成功後才節流；讀檔或寫檔失敗要讓下一次有機會恢復。
     lastSwingAdvanceKey = advanceKey;
@@ -12705,6 +12780,7 @@ export {
   tradeMoneyEstimateFingerprint, canonicalizeTradeMoneyProvenance,
   // 處置／監視
   SURVEILLANCE_RANK, classifySurveillance, parseDispositionPeriod, parseDispositionInterval, latestUpstreamDate,
+  SURVEILLANCE_HISTORY_FIELDS, mergeSurveillanceDaySnapshot,
   VERIFY_ROUND_TRIP_COST_PCT, VERIFY_COST_NOTE, netReturnPct,
   findMissingCorporateActions, corporateActionErrors, TRADE_CORPORATE_ACTION_SIDE,
   WIN_RATE_MIN_SAMPLES,
@@ -12723,6 +12799,7 @@ export {
   scanSwingBoard, inspectSwingStock,
   // 波段前向驗證
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,
+  swingAdvanceTargetDate,
   buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,

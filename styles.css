@@ -8294,6 +8294,18 @@ body.is-locked .app-shell {
 }
 .surv-summary b { color: #fff; font-family: var(--mono); font-weight: 700; }
 
+/* 名單比對狀態：「這一類今天比不了」與「今天沒有新進」是相反的兩件事，必須說得出口。
+   刻意用琥珀而不是紅：這是資料可信度提醒，不是風險等級，與注意股的琥珀語意也一致。 */
+.surv-history-note {
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  background: rgba(255, 176, 32, 0.07);
+  border-left: 3px solid var(--yellow);
+  font-size: var(--fs-body);
+  color: #ccd3da;
+}
+.surv-history-note b { color: #fff; font-weight: 700; }
+
 /* 精簡圖例：併在 meta 列內行內顯示（完整解釋在「說明」彈窗） */
 .surv-legend {
   display: inline-flex;
