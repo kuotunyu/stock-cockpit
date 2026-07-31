@@ -2709,7 +2709,15 @@ function isValidTradeDateInput(value, todayIso = getTaiwanClockParts().isoDate) 
 }
 
 // 現金股利權利以「除息日前一交易日收盤持有」為準：除息日賣出仍有權利，
-// 除息日才買進則沒有。因此只重放 date < exDate 的買賣，不能使用現在庫存。
+// 除息日才買進則沒有。因此只重放 date < exDate 的紀錄，不能使用現在庫存。
+//
+// **配股／現增取得的股數同樣有領息權利**，所以 corporateAction 紀錄必須一起重放。
+// 少了這一條，配過股的持股每年除息都少記：買 10,000 股、之後連兩年各配股 10%，
+// 正確權利股數是 12,100（10000 → 11000 → 12100），漏算會停在 10,000——少 17.4%。
+// 而除息日那顆快速鈕**只有當天出現**，按下去就把少掉的金額寫進帳本。
+//
+// 判準必須與後端 `sharesHeldBeforeExDate` 逐字一致（含兩次各自 Math.floor 而不是先加總再取整：
+// 零股不足一股捨去是分開計算的）。這是同一條規則的第二份實作，走岔過一次了。
 function dividendEntitlementShares(records, code, exDate) {
   const cleanCode = String(code || "").trim().toUpperCase();
   const cutoff = compactTradeDate(exDate);
@@ -2720,7 +2728,11 @@ function dividendEntitlementShares(records, code, exDate) {
     const recordDate = tradeDateOf(record);
     if (!recordDate || recordDate >= cutoff) continue;
     if (record.side === "buy") shares += Number(record.shares) || 0;
-    if (record.side === "sell") shares -= Number(record.shares) || 0;
+    else if (record.side === "sell") shares -= Number(record.shares) || 0;
+    else if (record.side === "corporateAction") {
+      shares += Math.floor(shares * (Number(record.stockRatio) || 0))
+        + Math.floor(shares * (Number(record.subscriptionRatio) || 0));
+    }
   }
   return Math.max(0, Math.round(shares));
 }

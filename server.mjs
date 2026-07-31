@@ -1483,6 +1483,8 @@ function normalizeTradesPayload(input, options = {}) {
   });
   records.sort(compareTradeChronology);
   records.forEach((record) => { delete record.__inputOrder; });
+  // 權利股數要看全部紀錄，所以只能在逐筆正規化完、排序好之後再算。
+  recomputeDividendEntitlements(records);
   const existingMigration = src.migration && typeof src.migration === "object" ? src.migration : null;
   const migration = existingMigration
     ? {
@@ -1537,6 +1539,37 @@ function sharesHeldBeforeExDate(records, code, exDate) {
     }
   }
   return shares;
+}
+
+// 官方除息事件的權利股數由**伺服器覆算**，不採信客戶端送來的數字。
+// 理由與 D-09 同一條：規格上由伺服器管理的欄位不能由客戶端決定。
+//
+// 實際咬到的現場：前端的 `dividendEntitlementShares` 少了 corporateAction 分支，配過股的持股
+// 每年除息都少記——買 10,000 股、之後連兩年各配股 10%，正確權利股數是 12,100，前端算 10,000，
+// 少 17.4%。而後端明明有正確的 `sharesHeldBeforeExDate`，卻只用在 findMissingCorporateActions
+// 與 buildPortfolio，收到股利紀錄時是 `normalizedRecord.entitledShares = shares` 照單全收。
+// 兩份實作走岔，錯的那份正好是寫進帳本的那份；前端已一併修好，這裡是不讓它再岔開的鎖。
+//
+// 只覆算**尚未入帳**的官方事件：
+//   已入帳（received）的實收金額以券商對帳單為準，不可回頭改；
+//   手動新增的股利沒有 eventId，使用者自己填的數字就是他要的，不能覆寫。
+// 每次 PUT 都重算是刻意的：使用者事後補登除息日之前的買賣或配股時，應收金額要跟著修正。
+function recomputeDividendEntitlements(records) {
+  for (const record of records) {
+    if (record.side !== "dividend" || !record.eventId || record.status !== "receivable") continue;
+    const exDate = toCompactDate(record.exDate || record.tradeDate || record.date);
+    if (!exDate) continue;
+    const entitled = sharesHeldBeforeExDate(records, record.code, exDate);
+    // **重放不出股數時保留客戶端的值，不可覆寫成 0。** 帳本裡沒有除息日之前的買賣時
+    // （只記股利不記買進、或匯入了不完整的歷史），正確答案是「算不出來」而不是「0」。
+    // 覆寫成 0 會直接摧毀一筆真實的應收，而且下一關的 validateTradesMutationInput
+    // 會以「股數必須是大於 0 的整數」擋下**整包** PUT，使用者連別的紀錄都存不進去。
+    // 實測：既有的兩支 trades 測試（股利紀錄沒有配買進）就是這樣紅的。
+    if (!Number.isFinite(entitled) || entitled <= 0) continue;
+    // shares 同時是金額基準（buildPortfolio 的 `gross = price * shares`），兩個欄位要一起更新。
+    record.shares = entitled;
+    record.entitledShares = entitled;
+  }
 }
 
 async function findMissingCorporateActions(payload) {
