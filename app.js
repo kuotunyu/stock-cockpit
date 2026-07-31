@@ -332,7 +332,12 @@ const dataState = {
   // 隔日沖與策略雷達都有渲染，唯獨主報價畫面以前連欄位都沒有 → 使用者不知道自己在看舊價。
   warnings: [],
   degraded: false,
+  // `error` 被兩種嚴重度共用：整輪失敗（catch）與「資料到了、只是部分即時源失敗」（成功路徑）。
+  // 兩者對使用者的意義完全不同，所以另外記「從什麼時候開始整輪失敗」。
   error: "",
+  // 整輪更新失敗的起始時刻（成功一次就清空）。有值＝畫面上的價格已經停在 lastUpdated，
+  // 而且到價提醒也停擺了——這兩件事以前完全沒有出口。
+  failedSince: "",
   loadedOnce: false,
 };
 
@@ -3954,30 +3959,58 @@ function renderDataStatus() {
   const refreshStatus = document.getElementById("refreshStatus");
   const sourceStateEl = document.getElementById("sourceState");
   if (refreshStatus) {
-    if (getSelectedSource() === "official" && dataState.mode === "official") {
+    // 整輪更新失敗要**排在所有來源分支之前**。原本的順序是
+    //   if (official && mode === "official") { …從不提失敗… } else if (broker) … else if (error) …
+    // 而 dataState.mode 就是跟著選定來源走的（loadMarketData 成功與失敗都會設成 source），
+    // 所以第一個分支永遠命中，後面那兩條 `else if (dataState.error)` / `else` 是**死碼**
+    // ——「官方行情更新失敗」這句話寫在程式裡，但一次都沒有機會顯示出來。
+    //
+    // 使用者實際看到的是「官方行情 ・ 即時 0 檔 ・ 10:12:33 更新」：時間戳停在最後一次成功，
+    // 「即時 0 檔」讀起來像今天比較冷清，tooltip 還寫著「盤中每 10 秒自動更新」。
+    // 筆電睡一下醒來、不小心關掉跑 npm start 的視窗都會踩到，而且每 10 秒重算一次同一句謊。
+    if (dataState.failedSince) {
+      const frozen = dataState.lastUpdated
+        ? `畫面停在 ${dataState.lastUpdated} 的價格`
+        : "尚未取得任何行情";
+      refreshStatus.textContent = `${getSelectedSourceLabel()}更新失敗 ・ ${frozen}`;
+      // title 是純文字屬性，不吃 markdown——寫 ** 只會變成字面上的星號。
+      refreshStatus.title = `從 ${dataState.failedSince} 起連續更新失敗：${dataState.error || "原因不明"}。`
+        + (dataState.lastUpdated
+          // 有舊價可看：重點是「這些數字不是現在的」。
+          ? `\n畫面上的價格與漲跌都停在 ${dataState.lastUpdated}，不是現在的行情。`
+          // 從頭到尾沒成功過：畫面上根本沒有價格，不能說「停在某個時間」。
+          : "\n這次連線之後一直沒有取得行情，畫面上沒有可用的價格。")
+        + "\n這段期間到價提醒也不會觸發。"
+        + "\n請確認跑 npm start 的視窗還開著、網路正常，然後按「重新整理」。";
+    } else if (getSelectedSource() === "official" && dataState.mode === "official") {
       const today = getTaiwanClockParts().isoDate;
       const closedToday = marketSessionState.stock?.date === today && marketSessionState.stock?.tradingDay === false;
       const closedLabel = closedToday
         ? `今日休市${marketSessionState.stock.holidayName ? `（${marketSessionState.stock.holidayName}）` : ""}`
         : "";
       const fallbackText = dataState.fallbackCount ? `（${dataState.fallbackCount} 檔為收盤價）` : "";
+      // 資料到了、但部分即時源失敗（realtimeError）也要有出口：以前這句話只存在於 payload 裡，
+      // 狀態列從頭到尾不提，使用者只會看到「即時 N 檔」比平常少。
+      const partialText = dataState.error ? " ・ 部分即時源失敗" : "";
       refreshStatus.textContent = closedToday
         ? `${closedLabel} ・ 最近行情 ${dataState.lastUpdated || "載入中"}`
         : dataState.lastUpdated
-          ? `官方行情 ・ 即時 ${dataState.realtimeCount || 0} 檔${fallbackText} ・ ${dataState.lastUpdated} 更新`
+          ? `官方行情 ・ 即時 ${dataState.realtimeCount || 0} 檔${fallbackText}${partialText} ・ ${dataState.lastUpdated} 更新`
           : "官方行情 ・ 載入中…";
       refreshStatus.title = closedToday
         ? `${closedLabel}；個股不做 10 秒輪詢，畫面顯示最近交易日行情。期貨夜盤另依期交所行情判定。`
-        : `來源：${dataState.source || "官方資料"}。盤中每 10 秒自動更新；策略與選股欄位為本機推估，價格以官方行情為準。`;
+        : `來源：${dataState.source || "官方資料"}。盤中每 10 秒自動更新；策略與選股欄位為本機推估，價格以官方行情為準。`
+          + (dataState.error ? `\n${dataState.error}（其餘檔位仍是這一輪取得的）` : "");
     } else if (getSelectedSource() === "broker") {
       refreshStatus.textContent = `券商行情 ・ ${dataState.error || (dataState.lastUpdated ? `${dataState.lastUpdated} 更新` : "等待更新")}`;
       refreshStatus.title = "個股報價來自富邦行情；指數與歷史資料仍使用官方來源。";
-    } else if (dataState.error) {
-      refreshStatus.textContent = `官方行情更新失敗 ・ ${dataState.error}`;
-      refreshStatus.title = "請按「重新整理」再試；連續失敗時請確認網路。";
     } else {
-      refreshStatus.textContent = "官方行情 ・ 等待更新";
-      refreshStatus.title = "";
+      // 剩下的只有「剛切換來源、這個來源還沒有資料」這個過渡狀態
+      // ——真正的失敗已經被最上面那條接走了。原本這裡有一條 `else if (dataState.error)`
+      // 會印「官方行情更新失敗」，但它永遠輪不到（第一個分支必定命中），是死碼；
+      // 而在切換來源的過渡窗口裡，dataState.error 可能還是**前一個來源**留下的，印出來反而誤導。
+      refreshStatus.textContent = `${getSelectedSourceLabel()} ・ 等待更新`;
+      refreshStatus.title = "正在切換資料來源。";
     }
   }
   if (sourceStateEl) {
@@ -4884,6 +4917,8 @@ async function loadMarketData({ notify = false, renderNow = true } = {}) {
     dataState.degraded = payloads.some((payload) => payload.dataQuality?.degraded === true);
     const realtimeErrors = [...new Set(payloads.map((payload) => payload.realtimeError).filter(Boolean))];
     dataState.error = realtimeErrors.length ? `即時源部分失敗：${realtimeErrors.join("；")}` : "";
+    // 這一輪拿到資料了（即使部分即時源失敗），就不是「畫面停住」的狀態。
+    dataState.failedSince = "";
     // 到價狀態和本輪行情一起提交，避免同一批資料先畫一次、觸價後又立刻畫第二次。
     if (!document.hidden) checkPriceAlerts(eligibleAlertQuoteCodes(quotes), { renderNow: false });
     if (renderNow) render();
@@ -4908,6 +4943,10 @@ async function loadMarketData({ notify = false, renderNow = true } = {}) {
     dataState.warnings = [];
     dataState.degraded = false;
     dataState.error = error.message;
+    // 保留**第一次**失敗的時刻：連續失敗時使用者要知道「已經多久沒更新了」，
+    // 每輪覆寫成現在時間的話反而永遠看起來像剛剛才失敗。
+    // 刻意不清掉 lastUpdated——畫面上的價格確實還是那個時間點的，那個數字要留著給使用者對照。
+    dataState.failedSince ||= formatLocalTime(new Date().toISOString());
     if (renderNow) render();
     if (notify) showToast(`${getSelectedSourceLabel()}更新失敗`);
     return true;
