@@ -312,8 +312,14 @@ test("survFetchRecords：同日 last-good 沿用；跨日失敗 → 空＋硬失
 // 上櫃股來說，「它前一份快照在不在」是查得到的事實，連續天數是真的；
 // 但「代號從名單消失」可能只是這一輪抓不到，所以出關不可信。
 test("來源抓不到時：新進與連 N 天仍計算，只有「出關」歸零", async () => {
-  const PREV_OFF = -6;
-  const CURR_OFF = -5;
+  // 見檔案上方 weekdayOffset／adjacentWeekdayOffsets 的說明：寫死 -6／-5 會在今天是週五時
+  // 落到週六與週日（實測 2026-07-31：前提斷言直接失敗，因為週末不落盤、沒有前一份快照）。
+  // 位移刻意選遠一點，避開 0、-1~-6 與上一個測試的 -10／-9。
+  const [PREV_OFF, CURR_OFF] = adjacentWeekdayOffsets(-13);
+  assert.ok(
+    isWeekday(compactToday(PREV_OFF)) && isWeekday(compactToday(CURR_OFF)),
+    `前提：${compactToday(PREV_OFF)}／${compactToday(CURR_OFF)} 必須都是平日`,
+  );
   resetSources();
   // 前一個交易日：兩檔處置股都抓得到，正常落盤
   o.twsePunish = [
