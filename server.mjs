@@ -32,6 +32,20 @@ const unsafeExampleSecrets = new Set([
 const configuredAdminPassword = String(process.env.ADMIN_PASSWORD || "");
 const configuredAppSecret = String(process.env.APP_SECRET || process.env.ENCRYPTION_KEY || "");
 const usingDefaultAdminPassword = !configuredAdminPassword || unsafeExampleSecrets.has(configuredAdminPassword);
+// 空 DB 第一次啟動時自動種下去的密碼。README 明文寫著它，而 repo 是公開的。
+const SEEDED_ADMIN_PASSWORD = "admin1234";
+// `usingDefaultAdminPassword` 回答的是「**這個行程**的環境變數設定安不安全」，
+// 那是 validateStartupSecurity 的 fail-closed 判準，不能動。
+// 但「**這個帳號現在的密碼**是不是系統種的那一組」是另一個問題，答案只存在於 DB 裡。
+// 兩件事被混成同一個布林值，造成畫面上那顆燈永遠說錯話（見 AUDIT.md P1-02 的未完成部分）：
+//   在 UI 改完密碼 → 燈還是說「仍是預設密碼」（env 沒變）
+//   在既有 DB 上設 ADMIN_PASSWORD → 燈變綠，但種 admin 只在空 DB 生效，hash 根本沒換
+// 所以改用 user.passwordSource 這個持久化欄位回答第二個問題。
+const PASSWORD_SOURCE_SEEDED = "seed-default";
+const PASSWORD_SOURCE_USER = "user-set";
+function usesSeededPassword(user) {
+  return user?.passwordSource === PASSWORD_SOURCE_SEEDED;
+}
 const usingDefaultAppSecret = !configuredAppSecret || unsafeExampleSecrets.has(configuredAppSecret);
 const appSecret = usingDefaultAppSecret ? "stock1-local-development-secret" : configuredAppSecret;
 const encryptionKey = scryptSync(appSecret, "stock1-broker-credentials-v1", 32);
@@ -2081,6 +2095,20 @@ async function loadDbOnce() {
   dbCache.swingVerification ||= {};
 
   let changed = recoveredFromCorruption;
+  // 既有 DB 補標 passwordSource：這個欄位是 2026-07-31 才加的，在那之前建立的帳號沒有。
+  // 唯一可靠的判準就是實際驗一次 hash——不能用 createdAt === updatedAt 這種啟發式，
+  // 那只說明「沒改過任何欄位」，不代表密碼是哪一組。
+  // 成本：pbkdf2 210,000 輪約 0.1 秒／帳號，而且**只有沒標記過的帳號才算**，
+  // 算完就落盤，之後每次啟動都是 O(1) 的字串比對。
+  for (const user of dbCache.users) {
+    if (user.passwordSource === PASSWORD_SOURCE_SEEDED || user.passwordSource === PASSWORD_SOURCE_USER) continue;
+    user.passwordSource = verifyPassword(SEEDED_ADMIN_PASSWORD, user.passwordHash)
+      ? PASSWORD_SOURCE_SEEDED
+      : PASSWORD_SOURCE_USER;
+    // **刻意不動 updatedAt**：密碼沒有被改，只是把一個既有事實記下來。
+    // 動了它會把「這個帳號從建立以來沒被改過」這個訊號抹掉。
+    changed = true;
+  }
   const migrationStamp = new Date().toISOString();
   for (const [userId, tradePayload] of Object.entries(dbCache.trades)) {
     if (!tradePayload || typeof tradePayload !== "object" || Array.isArray(tradePayload)) continue;
@@ -2093,13 +2121,15 @@ async function loadDbOnce() {
   if (!dbCache.users.length) {
     const now = new Date().toISOString();
     const username = process.env.ADMIN_USERNAME || "admin";
-    const password = usingDefaultAdminPassword ? "admin1234" : configuredAdminPassword;
+    const password = usingDefaultAdminPassword ? SEEDED_ADMIN_PASSWORD : configuredAdminPassword;
     const admin = {
       id: `u_${randomBytes(8).toString("hex")}`,
       username,
       displayName: "管理者",
       role: "admin",
       passwordHash: hashPassword(password),
+      // 這一組密碼是系統自己種的還是有人刻意設的——之後只有這個欄位答得出來。
+      passwordSource: usingDefaultAdminPassword ? PASSWORD_SOURCE_SEEDED : PASSWORD_SOURCE_USER,
       createdAt: now,
       updatedAt: now,
     };
@@ -3465,7 +3495,10 @@ function buildStockMarketCalendarStatus(evidence, dateCompact = toTaipeiCompactD
   } else if (holiday) {
     stockTradingDay = false;
     confidence = "official-holiday";
-  } else if (holidaysUsable) {
+  } else if (holidaysUsable && holidayCalendarCoversYear(holidayRows, day)) {
+    // 只有在這份表確實講到那一年時，「不在表裡」才等於「有開盤」。
+    // 涵蓋範圍外會自然掉到下面的 weekend-fallback（週末→休市）或維持 unknown（平日→不知道），
+    // 兩者都比用 official-schedule 講一句錯話好。
     stockTradingDay = isScheduledTradingDate(day, holidayRows);
     confidence = "official-schedule";
   } else if (weekend) {
@@ -6031,7 +6064,26 @@ async function getSurveillanceBoard(dateCompact) {
   }
   const nextTradingDate = resolveNextTradingDate(today, tradingCalendar).date
     || nextScheduledTradingDate(today, tradingCalendar.holidayRows);
-  const todayIsTradingDay = isScheduledTradingDate(today, tradingCalendar.holidayRows);
+  // 開休市表沒涵蓋今年時不可硬判：判錯的方向是「把休市日當成交易日」，
+  // 那會替一個沒有交易的日子寫入每日快照，讓下一個真實交易日的「連續 N 天」多算一天，
+  // 45 天的保留額度也少掉一格。寧可那天不落盤（少一天比較基準），也不要塞一天假的。
+  //
+  // **「完全沒有表」與「有表但沒講到今年」要分開處理**：
+  //   前者＝上游掛了。getTradingCalendarEvidence 已經推過警語，而且我們手上還有整批收盤這個
+  //     間接證據（拿得到今天的行情本身就強烈暗示有開盤）。維持既有的週末推定，不改。
+  //   後者＝表是新鮮的、只是還沒換年份（證交所一次只給一個民國年）。這時「不在表裡」
+  //     完全不能當成「有開盤」，否則會替一個沒有交易的日子寫入每日快照，讓下一個真實交易日的
+  //     「連續 N 天」多算一天，45 天的保留額度也少掉一格。
+  const holidayRows = tradingCalendar.holidayRows || [];
+  const holidayYearUncovered = holidayRows.length > 0 && !holidayCalendarCoversYear(holidayRows, today);
+  const todayIsTradingDay = !holidayYearUncovered && isScheduledTradingDate(today, holidayRows);
+  if (holidayYearUncovered) {
+    warnings.push(
+      `官方開休市表尚未涵蓋 ${today.slice(0, 4)} 年（目前只到 ${
+        holidayRows.map((row) => toCompactDate(row.date)).filter(Boolean).sort().at(-1) || "不明"
+      }），今天是否為交易日無法確認，本次不新增每日快照。`,
+    );
+  }
   // 先用整批收盤行情補上名稱與價量；名單完成後再批次用 MIS 覆蓋同日或較新的逐檔行情。
   const enrich = (code) => {
     const q = reference.byCode.get(code);
@@ -6369,7 +6421,9 @@ async function getSurveillanceBoard(dateCompact) {
     history[today] = mergeSurveillanceDaySnapshot(history[today], snapshot, failedFields);
     for (const k of Object.keys(history).sort().slice(0, -45)) delete history[k];
     await saveSurveillanceHistory();
-  } else {
+  } else if (!holidayYearUncovered) {
+    // 只有在「表確實涵蓋今年」時才敢說今天不是交易日；涵蓋範圍外的情形上面已經推過
+    // 一條講「無法確認」的警語，不可再補一句斷言（那正是這條要修掉的說話方式）。
     warnings.push("今天不是排定交易日，本次只顯示公告，不新增每日快照或連續日數。");
   }
 
@@ -7864,6 +7918,25 @@ async function getTradingCalendarEvidence() {
 
 function isCalendarOpenOverride(row) {
   return /開始交易|最後交易日/.test(`${row?.name || ""}${row?.description || ""}`);
+}
+
+// `isScheduledTradingDate` 的判準是「不在休市表裡且不是週末 ＝ 有開盤」，但**沒有人檢查
+// 這份表涵不涵蓋你問的那一天**。證交所的 holidaySchedule 一次只給一個民國年
+// （2026-07-31 實測：27 列全部民國 115，範圍 1150101~1151225，一筆 2027 年的都沒有），
+// 所以進入 2027、證交所還沒換資料集之前，**元旦會被判成交易日**——而且是用
+// `confidence: "official-schedule"` 這個最高信心等級、`degraded: false`、零警語說出來的。
+//
+// 「表裡沒有」有兩種意思：這一天要開盤、或這份表根本沒講到這一年。分不開就會拿後者當前者。
+// 涵蓋範圍直接從資料本身推導，不必另外傳狀態進來。
+// ⚠ `toCompactDate(value = new Date())` 的預設參數是**今天**——傳 undefined 會拿到今天的日期，
+// 不是空字串。所以這裡每個輸入都要先自己擋掉空值，否則「沒有 date 欄位的列」會被算成
+// 「涵蓋今年」，這道檢查就永遠不會觸發（實測：測試第一版就是這樣綠的）。
+function holidayCalendarCoversYear(holidayRows, dateCompact) {
+  if (!dateCompact) return false;
+  const year = String(toCompactDate(dateCompact) || "").slice(0, 4);
+  if (year.length !== 4) return false;
+  return (Array.isArray(holidayRows) ? holidayRows : [])
+    .some((row) => Boolean(row?.date) && String(toCompactDate(row.date) || "").slice(0, 4) === year);
 }
 
 function nextScheduledTradingDate(signalDate, holidayRows = []) {
@@ -11072,7 +11145,9 @@ async function handleApi(request, requestUrl, response) {
         ok: true,
         user: sanitizeUser(committed.user),
         warnings: {
-          defaultAdminPassword: usingDefaultAdminPassword && user.username === (process.env.ADMIN_USERNAME || "admin"),
+          // 以帳號自己的 passwordSource 為準，不再看環境變數，也不再比對使用者名稱
+          // ——朋友那台若把 ADMIN_USERNAME 改掉，舊寫法連警告都不會出現。
+          defaultAdminPassword: usesSeededPassword(committed.user),
           defaultAppSecret: usingDefaultAppSecret,
         },
       });
@@ -11108,7 +11183,7 @@ async function handleApi(request, requestUrl, response) {
       ok: true,
       user: sanitizeUser(auth.user),
       warnings: {
-        defaultAdminPassword: usingDefaultAdminPassword && auth.user.username === (process.env.ADMIN_USERNAME || "admin"),
+        defaultAdminPassword: usesSeededPassword(auth.user),
         defaultAppSecret: usingDefaultAppSecret,
       },
     });
@@ -11140,6 +11215,7 @@ async function handleApi(request, requestUrl, response) {
           throw new Error("目前密碼不正確");
         }
         user.passwordHash = hashPassword(newPassword);
+        user.passwordSource = PASSWORD_SOURCE_USER;
         user.updatedAt = new Date().toISOString();
         // 換密碼後把這個人其他裝置的 session 全登出，只留目前操作中的這個。
         db.sessions = db.sessions.filter((s) => s.userId !== user.id || s.id === session.id);
@@ -11266,6 +11342,8 @@ async function handleApi(request, requestUrl, response) {
             displayName,
             role,
             passwordHash: hashPassword(password),
+            // 管理者手動建立的帳號，密碼是他自己輸入的，不是系統種的。
+            passwordSource: PASSWORD_SOURCE_USER,
             createdAt: now,
             updatedAt: now,
           };
@@ -11296,6 +11374,7 @@ async function handleApi(request, requestUrl, response) {
             throw Object.assign(new Error("找不到這個帳號"), { status: 404 });
           }
           currentTarget.passwordHash = hashPassword(password);
+          currentTarget.passwordSource = PASSWORD_SOURCE_USER;
           currentTarget.updatedAt = new Date().toISOString();
           // 重設後強制該帳號所有裝置重新登入。
           currentDb.sessions = currentDb.sessions.filter((s) => s.userId !== currentTarget.id);
@@ -12708,8 +12787,17 @@ async function performStart(listenPort, listenHost) {
     const address = server.address();
     const actualPort = typeof address === "object" && address ? address.port : listenPort;
     console.log(`Stock1 server: http://${listenHost}:${actualPort}/`);
-    if (usingDefaultAdminPassword) {
-      console.warn("[Stock1] ADMIN_PASSWORD is not set. Do not deploy with the default admin password.");
+    // 原本只看環境變數：使用者在 UI 改完密碼之後，每次啟動還是照噴這一行；
+    // 反過來在既有 DB 上設了 ADMIN_PASSWORD 就不噴了，但 hash 根本沒換。改看 DB 的實際狀態。
+    // 全新安裝時這行必定出現，那正是它該做的事——把「密碼是公開的預設值」講出來，
+    // 並告訴使用者去哪裡改（原訊息只說「不要這樣部署」，沒說怎麼辦）。
+    const seededAccounts = (dbCache?.users || []).filter(usesSeededPassword);
+    if (seededAccounts.length) {
+      console.warn(
+        `[Stock1] 帳號「${seededAccounts.map((item) => item.username).join("、")}」`
+        + "仍在使用系統自動產生的預設密碼（README 公開寫著這組密碼，而這個 repo 是公開的）。"
+        + "\n           請登入後到「更多 → 帳號管理」修改密碼。",
+      );
     }
     if (usingDefaultAppSecret) {
       console.warn("[Stock1] APP_SECRET is not set. Broker credentials use a development encryption key.");
@@ -12787,6 +12875,7 @@ export {
   // 前向驗證（signal-verify.test）
   OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, overnightSnapshotFormulaVersion,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
+  holidayCalendarCoversYear,
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,
   buildSignalVerification, buildVerificationHistory,
   // 週/月K 聚合與波段日期 helper（history-aggregate.test）
