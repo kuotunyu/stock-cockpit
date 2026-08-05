@@ -14,6 +14,8 @@
 
 ## 系統介面
 
+### 桌面版看盤終端
+
 | 隔日沖訊號與前向驗證 | 策略雷達 (波段選股) |
 |---|---|
 | ![隔日沖](docs/assets/screen-overnight.png) | ![策略雷達](docs/assets/screen-strategy.png) |
@@ -22,9 +24,19 @@
 |---|---|
 | ![技術分析](docs/assets/screen-technical.png) | ![處置看板](docs/assets/screen-surveillance.png) |
 
-| 盤中動態篩選 | 手機版介面 (PWA) |
-|---|---|
-| ![盤中選股](docs/assets/screen-screener.png) | <img src="docs/assets/screen-mobile.png" width="280" alt="手機版"> |
+| 盤中動態篩選 |
+|---|
+| ![盤中選股](docs/assets/screen-screener.png) |
+
+### 行動裝置 PWA 介面
+
+<div align="center">
+
+| PWA 行動裝置即時看盤 (390px 響應式介面) |
+|:---:|
+| <img src="docs/assets/screen-mobile.png" width="460" alt="PWA 行動版介面"> |
+
+</div>
 
 ---
 
@@ -43,9 +55,9 @@
 
 ---
 
-## 系統架構與資料流
+## 系統架構與流程
 
-### 系統整體元件圖
+### 系統架構
 
 ```mermaid
 %%{init: {'themeVariables': {'fontSize': '22px'}}}%%
@@ -61,7 +73,7 @@ flowchart TD
     style Q fill:#fff9db,stroke:#f59f00,stroke-width:2px
 ```
 
-### 持久化佇列與寫入時序
+### 交易佇列與寫入時序
 
 ```mermaid
 %%{init: {'themeVariables': {'fontSize': '22px', 'actorFontSize': '20px', 'messageFontSize': '18px', 'noteFontSize': '18px'}}}%%
