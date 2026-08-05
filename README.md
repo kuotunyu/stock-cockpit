@@ -28,12 +28,12 @@
 
 ---
 
-## 核心技術特性
+## 系統核心機制
 
 1. **選股訊號每日前向驗證 (Forward Validation)**：
    隔日沖與波段選股訊號每日與官方收盤數據對齊後自動凍結正式快照；盤中即時計算結果明確標示為暫定，確保策略檢驗數據不被回溯竄改。
 2. **交易帳本 v2 (Tax & Ledger Engine)**：
-   商品與交易型態獨立建模，依成交日期自動套用有效日期化證交稅規則（估算值與券商實際值分離），歷史損益一經凍結維持不可變性 (Immutability)。
+   商品與交易型態獨立建模，依成交日期自動套用有效日期化證交稅規則（估算值與券商實際值分離），歷史損益一經凍結維護不可變性 (Immutability)。
 3. **Copy-on-Write 交易佇列與原子落盤**：
    持久化讀寫採用 Copy-on-Write Transaction Queue 進行隔離與寫入租約 (Writer Lease) 互斥，確保 JSON 資料庫落盤安全性，失敗自動回傳 `503`。
 4. **誠實降級與資料品質警告 (Honest Degradation)**：
@@ -43,7 +43,9 @@
 
 ---
 
-## 系統架構
+## 系統架構與資料流
+
+### 系統整體元件圖
 
 ```mermaid
 %%{init: {'themeVariables': {'fontSize': '22px'}}}%%
@@ -59,6 +61,49 @@ flowchart TD
     style Q fill:#fff9db,stroke:#f59f00,stroke-width:2px
 ```
 
+### 持久化佇列與寫入時序
+
+```mermaid
+%%{init: {'themeVariables': {'fontSize': '22px', 'actorFontSize': '20px', 'messageFontSize': '18px', 'noteFontSize': '18px'}}}%%
+sequenceDiagram
+    autonumber
+    participant UI as 前端 Web / PWA
+    participant API as Node.js HTTP 網關
+    participant Queue as Copy-on-Write Queue
+    participant DB as JSON 主資料庫 / 備份
+
+    UI->>API: 1. 提交交易/帳本異動 (如: 新增買進紀錄)
+    API->>Queue: 2. 派送寫入佇列 (取得 Writer Lease)
+    Queue->>Queue: 3. 建立隔離 Draft 記憶體快照
+    Queue->>DB: 4. 原子落盤 (.data/stock1-db.json & 14日Rolling備份)
+    DB-->>Queue: 5. 寫入確認 (fsync)
+    Note over Queue,DB: 確保資料庫寫入原子性<br/>若寫入失敗自動回滾並回傳 503
+    Queue-->>API: 6. 發布新版資料庫快取
+    API-->>UI: 7. 回應 200 OK 與更新後帳本損益
+```
+
+---
+
+## 策略驗證與選股引擎
+
+系統內建兩套獨立策略引擎，均配備官方數據對齊與歷史績效追蹤機制：
+
+| 策略引擎模組 | 選股特徵與演算法 | 驗證機制與對答案邏輯 |
+|---|---|---|
+| **隔日沖選股引擎 (Overnight)** | 鎖定尾盤強勢動能、高周轉率與法人買超標的 | 每日收盤後自動抓取 TWSE/TPEx 正式數據對齊，凍結對答案成績單 |
+| **波段選股雷達 (Swing Strategy)** | 均線多頭排列、量能突破、籌碼集中度與基本面篩選 | 支援自訂參數雷達掃描，歷史數據嚴格隔離不回溯修正 |
+| **注意/處置股票看板** | 實時同步官方公告之注意股票、處置股票與全額交割股 | 自動識別處置期間與交易限制（如人工管制撮合時間） |
+
+---
+
+## 交易帳本 v2 稅則與損益試算
+
+交易帳本引擎將商品與交易型態分開建模，並具備完整之台股費稅稽核機制：
+
+- **有效日期化稅則**：依成交日期自動帶入台股證交稅率（普通股 `0.3%`、現股當沖 `0.15%`）。
+- **券商手續費折讓**：支援手續費預設 `0.1425%` 與個自訂折扣設定（如 2.8 折、6 折）。
+- **估算與實際值隔離**：將預估損益與券商實際對帳單分開存儲，歷史已結算筆數一旦凍結即不可變動。
+
 ---
 
 ## API 規格與模組分類
@@ -68,7 +113,7 @@ flowchart TD
 | 模組分類 | 主要 API 端點 | 功能說明 |
 |---|---|---|
 | **服務健康** | `GET /api/health` | 系統狀態、上游資料品質警告與數據源連線稽核 |
-| **身分驗證** | `/api/auth/*`、`/api/admin/users` | 管理者帳號登入、Session Session 管理與權限控制 |
+| **身分驗證** | `/api/auth/*`、`/api/admin/users` | 管理者帳號登入、Session 管理與權限控制 |
 | **行情與大盤** | `/api/quotes`、`/api/markets`、`/api/technical-analysis` | 即時大盤、三大法人、融資融券與技術分析 K 線 |
 | **選股引擎** | `/api/overnight*`、`/api/swing*` | 隔日沖、波段選股訊號與每日歷史前向驗證成績單 |
 | **注意處置** | `/api/surveillance-board` | 官方注意股票、處置股票與全額交割即時看板 |
