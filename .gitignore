@@ -10,6 +10,12 @@ log/
 npm-debug.log*
 .impeccable/
 
-# AI 開發輔助文件與 skills：本機保留，不進版本庫
+# 私人面試筆記與本機開發輔助文檔
+interview*.md
+INTERVIEW_PREP.md
+*.private.md
 .agents/
 .claude/
+CLAUDE.md
+PLAN.md
+PROGRESS.md
