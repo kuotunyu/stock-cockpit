@@ -38,6 +38,22 @@ const TODAY_BAR = { open: 92, high: 99, low: 91.5, close: 98, lots: 3000 };
 
 // 逐月歷史：事件日之前一律平盤 100／量 1000，方便手算 MA 與量比。
 // 事件日的漲跌價差欄用 "X0.00"——上市在除權息日就是這樣遮的（2026-07-26 實測 28/28）。
+//
+// computeMetrics 要求至少 21 個交易日（算 MA20），getStockHistory 會回溯查詢當月＋前 3 個月
+// （monthsBack=4）、不足 fallbackMinRows=60 筆就退去查 Yahoo。原本這裡只有「今天」所在月份
+// 有資料、前面月份全回空陣列——若「今天」落在月初 1~20 號，當月天數不到 21 天，
+// computeMetrics 直接回 null，整檔股票在 preselectQuotes 之後、沒有任何 warning 的情況下
+// 悄悄消失（不是「除權息有事件查不到參考價」那個有 warning 的分支，是更早的資料不足分支）。
+// 這個 bug 從測試檔第一版就在，只是從未在真正的自動化 CI 裡跑過（2026-08-05 才第一次跑，
+// 而且是月初），本機手動驗證時湊巧多半挑在月中之後跑，所以一直沒被抓到。
+// 修法：不管查哪個月，只要是這兩檔代號，一律回傳「那個月的完整天數」的平盤資料
+// （事件日除外），讓 history 長度不受「今天是幾號」影響，回溯 3 個月即可穩定超過 60 筆，
+// 不會誤觸 Yahoo 備援（Yahoo mock 本身是空的）。
+function daysInMonth(yearMonth) {
+  const year = Number(yearMonth.slice(0, 4));
+  const month = Number(yearMonth.slice(4, 6));
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
 function monthRoute(codes) {
   return {
     match: /www\.twse\.com\.tw\/exchangeReport\/STOCK_DAY\?/,
@@ -45,10 +61,11 @@ function monthRoute(codes) {
       const code = String(url.searchParams.get("stockNo") || "");
       if (!codes.includes(code)) return { stat: "OK", data: [] };
       const month = String(url.searchParams.get("date") || "").slice(0, 6);
-      if (month !== today.slice(0, 6)) return { stat: "OK", data: [] };
+      const isCurrentMonth = month === today.slice(0, 6);
+      const lastDay = isCurrentMonth ? Number(today.slice(6, 8)) : daysInMonth(month);
       const rows = [];
-      for (let day = 1; day <= Number(today.slice(6, 8)); day += 1) {
-        const compact = `${today.slice(0, 6)}${String(day).padStart(2, "0")}`;
+      for (let day = 1; day <= lastDay; day += 1) {
+        const compact = `${month}${String(day).padStart(2, "0")}`;
         const isEventDay = compact === today;
         const bar = isEventDay
           ? TODAY_BAR
