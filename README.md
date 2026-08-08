@@ -1,7 +1,7 @@
 # stock-cockpit
 
 [![CI](https://github.com/kuotunyu/stock-cockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/kuotunyu/stock-cockpit/actions/workflows/ci.yml)
-![Node.js 20.19+](https://img.shields.io/badge/Node.js-20.19%2B-339933?logo=nodedotjs&logoColor=white)
+![Node.js 20.19/22.13/24+](https://img.shields.io/badge/Node.js-20.19%20%7C%2022.13%20%7C%2024%2B-339933?logo=nodedotjs&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/Runtime%20Deps-1-purple)
 ![PWA](https://img.shields.io/badge/PWA-Offline%20Shell-orange)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

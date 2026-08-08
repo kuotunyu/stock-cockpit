@@ -14,7 +14,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["20.x", "22.x"]
+        # package.json 的 engines 與 README 都宣稱支援 20.19+／22+／24+ 三條線，
+        # matrix 原本只測前兩個——24.x 從未被驗證過，而恰好是本機的預設版本。
+        # 這次修的 fetch-timeout bug 只在 20.x／22.x 出現、24.x 完全正常，
+        # 反過來也可能有只在 24.x 出現的問題被本機開發蓋掉，CI 卻測不到。
+        node-version: ["20.x", "22.x", "24.x"]
 
     steps:
       - name: Check out repository
