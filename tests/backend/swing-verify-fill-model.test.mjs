@@ -7,8 +7,16 @@ import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { importServer } from "../helpers/test-server.mjs";
+import { compactTradingDay } from "../helpers/fixtures.mjs";
 
 const { mod, mock, dataDir } = await importServer({ routes: [] });
+
+// asOf 一定要相對今天算（tests/README.md 鐵則 1）。原本寫死 "2026-07-24"：
+// recordSwingVerification 最後會呼叫 pruneSwingVerification(store, 90)，把「今天往前 90 天」
+// 以外的 key 直接刪掉——所以 2026-10-23 起，這裡剛寫進去的那筆會被同一次呼叫當場刪掉，
+// list 變 undefined，測試在沒有人動過任何一行程式的情況下自己轉紅。
+const AS_OF = compactTradingDay(0);
+const AS_OF_ISO = `${AS_OF.slice(0, 4)}-${AS_OF.slice(4, 6)}-${AS_OF.slice(6, 8)}`;
 after(async () => {
   mock.restore();
   await rm(dataDir, { recursive: true, force: true }).catch(() => {});
@@ -24,7 +32,7 @@ const pick = (code, surveillance) => ({
 });
 
 const body = (picks) => ({
-  asOf: "2026-07-24",
+  asOf: AS_OF_ISO,
   formulaVersion: mod.SWING_FORMULA_VERSION,
   picks,
   provisional: false,
@@ -49,7 +57,7 @@ test("建立驗證單時保存 surveillance 與 fillModel", async () => {
     pick("2222", { kind: "disposition", label: "處置", interval: 20 }),
     pick("3333", { kind: "attention", label: "注意" }),
   ]));
-  const list = db.swingVerification["20260724"];
+  const list = db.swingVerification[AS_OF];
   assert.equal(list.length, 3);
   const byCode = Object.fromEntries(list.map((entry) => [entry.code, entry]));
 
@@ -68,7 +76,7 @@ test("只保存判定用得到的欄位，不整包塞進不可回溯的歷史�
   mod.recordSwingVerification(db, body([
     pick("4444", { kind: "disposition", label: "處置", interval: 5, note: "分盤・預收", startSlash: "07/01", 巨大欄位: "x".repeat(500) }),
   ]));
-  const entry = db.swingVerification["20260724"][0];
+  const entry = db.swingVerification[AS_OF][0];
   assert.deepEqual(Object.keys(entry.surveillance).sort(), ["interval", "kind", "label"]);
 });
 

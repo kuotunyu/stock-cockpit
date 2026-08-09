@@ -24,7 +24,12 @@ const [taipeiHour, taipeiMinute] = taipeiHm.split(":").map(Number);
 const taipeiMinutes = taipeiHour * 60 + taipeiMinute;
 // 與 isTaiwanMarketSession 同一個區間：09:00–13:35（含收盤後最後一次撮合回報）。
 const IN_SESSION = taipeiMinutes >= 9 * 60 && taipeiMinutes <= 13 * 60 + 35;
-const NON_TRADING_TODAY = compactTradingDay(0) !== TODAY;
+// 前提的另一半：compactTradingDay 只跳週末、**不跳國定假日**（fixtures 刻意不猜假日），
+// 但本檔自己 mock 了一個假日（元旦）餵給引擎。當「今天」剛好就是 1/1 時，引擎會正確地
+// 把今天判成非交易日、把觀察日推到下一個工作日（實測 2027-01-01：期待 2027-01-01、
+// 實得 2027-01-04），這個盤中情境同樣不成立 → 與週末一視同仁地明確跳過。
+const MOCK_HOLIDAY = `${TODAY.slice(0, 4)}0101`;
+const NON_TRADING_TODAY = compactTradingDay(0) !== TODAY || TODAY === MOCK_HOLIDAY;
 const SKIP_REASON = NON_TRADING_TODAY
   ? "今天不是交易日，沒有盤中觀察情境可測"
   : IN_SESSION ? false : `現在是台北 ${taipeiHm}，不在 09:00–13:35 盤中時段，這個情境本身不成立`;
@@ -39,7 +44,8 @@ const { mod, mock, dataDir } = await importServer({
     { match: /openapi\.twse\.com\.tw\/v1\/exchangeReport\/STOCK_DAY_ALL/, reply: referenceTwse },
     { match: /tpex\.org\.tw\/openapi\/v1\/tpex_mainboard_daily_close_quotes/, reply: referenceTpex },
     { match: /openapi\.twse\.com\.tw\/v1\/exchangeReport\/FMTQIK/, reply: [{ Date: rocCompact(SIGNAL) }] },
-    { match: /openapi\.twse\.com\.tw\/v1\/holidaySchedule\/holidaySchedule/, reply: [{ Name: "元旦", Date: `${TODAY.slice(0, 4) - 1911}0101`, Description: "依規定放假" }] },
+    // 日期由 MOCK_HOLIDAY 推導，確保上面的跳過守衛與這裡餵給引擎的假日永遠是同一天。
+    { match: /openapi\.twse\.com\.tw\/v1\/holidaySchedule\/holidaySchedule/, reply: [{ Name: "元旦", Date: `${Number(MOCK_HOLIDAY.slice(0, 4)) - 1911}0101`, Description: "依規定放假" }] },
     {
       match: /mis\.twse\.com\.tw\/stock\/api\/getStockInfo/,
       reply: {

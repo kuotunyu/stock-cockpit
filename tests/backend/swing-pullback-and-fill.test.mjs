@@ -11,8 +11,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { importServer } from "../helpers/test-server.mjs";
+import { compactTradingDay } from "../helpers/fixtures.mjs";
 
 const { mod } = await importServer({ routes: [] });
+
+// asOf 一定要相對今天算（tests/README.md 鐵則 1）。原本寫死 "2026-07-24"，
+// 會被 recordSwingVerification 收尾的 pruneSwingVerification(store, 90) 當場刪掉——
+// 2026-10-23 起這個測試會在沒有任何程式改動的情況下自己轉紅。
+const AS_OF = compactTradingDay(0);
+const AS_OF_ISO = `${AS_OF.slice(0, 4)}-${AS_OF.slice(4, 6)}-${AS_OF.slice(6, 8)}`;
 
 // computeSwingFeatures 需要 ≥60 根。前 40 根固定在 100 當暖身，後面才是要測的形狀。
 const build = (tail) => {
@@ -107,10 +114,10 @@ test("漲停鎖死的標的不建立驗證單（否則勝率被灌水），但�
     plan: { entry: 110, structuralStop: 99, target: 121 }, ...over,
   });
   mod.recordSwingVerification(db, {
-    asOf: "2026-07-24", formulaVersion: "test-v1", coverage: { complete: true },
+    asOf: AS_OF_ISO, formulaVersion: "test-v1", coverage: { complete: true },
     picks: [pick({ fillRisk: "limit-up-locked" }), pick({ code: "2317", name: "鴻海" })],
   });
-  const list = db.swingVerification?.["20260724"] || [];
+  const list = db.swingVerification?.[AS_OF] || [];
   assert.equal(list.length, 1, "只有買得到的那一檔可以建立驗證單");
   assert.equal(list[0].code, "2317");
 });

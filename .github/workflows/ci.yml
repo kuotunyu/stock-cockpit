@@ -21,11 +21,17 @@ jobs:
         node-version: ["20.x", "22.x", "24.x"]
 
     steps:
+      # v4 的 action 本體跑在 Node 20 runtime 上，已被 GitHub 標為 deprecated、目前是被
+      # 強制改用 Node 24 執行並每跑必噴警告（見 2025-09-19 changelog）。等 runner 撤掉這層
+      # 相容墊片就會直接變成紅 X，所以先升到 action 本體即為 node24 的 v7。
+      # 對本 workflow 的行為差異：checkout v7 只多擋 pull_request_target／workflow_run 的
+      # fork PR checkout（我們只用 push／pull_request，無影響）；setup-node v6 把自動快取
+      # 限縮到 npm（我們本來就明寫 cache: npm，無影響）。
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: "npm"

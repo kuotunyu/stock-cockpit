@@ -7,8 +7,17 @@ import { importServer } from "../helpers/test-server.mjs";
 import { stockDayAllRow, compactToday, compactTradingDay, rocCompact } from "../helpers/fixtures.mjs";
 
 const iso = (compact) => `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
-const TODAY = compactTradingDay(0);
-const YESTERDAY = compactTradingDay(-1);
+// compactTradingDay 只跳週末、**不跳國定假日**（fixtures 刻意不猜假日），但本檔自己 mock 了
+// 元旦餵給引擎：當「今天」剛好是 1/1 時，引擎會正確地把今天判成非交易日、把觀察日推到下一個
+// 工作日，於是「昨日訊號＋今日行情」這組前提整個不成立（實測 2027-01-01：期待觀察日
+// 2027-01-01、實得 2027-01-04，本檔轉紅 3 項）。把整個情境往前挪一個交易日，前提重新成立；
+// 其他日子 DAY_SHIFT 為 0，行為與原本完全相同。
+const DAY_SHIFT = compactTradingDay(0).slice(4) === "0101" ? -1 : 0;
+const TODAY = compactTradingDay(DAY_SHIFT);
+const YESTERDAY = compactTradingDay(DAY_SHIFT - 1);
+// 假日本身要釘在**真實日曆年**而不是挪動後的 TODAY——否則 1/1 挪到去年 12/31 時，
+// 餵給引擎的假日表會整個退回前一年、蓋不到當下這個年度。
+const MOCK_HOLIDAY_ROC_YEAR = Number(compactToday(0).slice(0, 4)) - 1911;
 
 // 觀察日行情（今天）：開 103 高 104 低 97 收 102 → 對 100 的訊號價：
 // open +3%、high +4%（達標）、low −3%（破線）、現價 +2%。
@@ -29,7 +38,7 @@ before(async () => {
       { match: /mis\.twse\.com\.tw\/stock\/api\/getStockInfo/, reply: () => ({ msgArray: [] }) },
       { match: /openapi\.twse\.com\.tw\/v1\/exchangeReport\/FMTQIK/, reply: () => [{ Date: rocCompact(TODAY) }] },
       { match: /openapi\.twse\.com\.tw\/v1\/holidaySchedule\/holidaySchedule/, reply: () => [{
-        Name: "中華民國開國紀念日", Date: `${TODAY.slice(0, 4) - 1911}0101`, Weekday: "四", Description: "依規定放假1日。",
+        Name: "中華民國開國紀念日", Date: `${MOCK_HOLIDAY_ROC_YEAR}0101`, Weekday: "四", Description: "依規定放假1日。",
       }] },
       // 逐檔月歷史：只有「本月」有今天這一根，其他月份回空。
       { match: /www\.twse\.com\.tw\/exchangeReport\/STOCK_DAY\?/, reply: (url) => {
@@ -173,14 +182,14 @@ test("buildSignalVerification：個別股票行情未前進時不可混入驗證
 // 放最後：buildVerificationHistory 有 10 分鐘模組級快取，本行程只能算一次。
 test("buildVerificationHistory：已驗證日＋今日 pending、totals 用驗證檔數加權", async () => {
   const currentSnapshots = Array.from({ length: 15 }, (_, index) => {
-    const day = compactTradingDay(index - 14);
+    const day = compactTradingDay(DAY_SHIFT + index - 14);
     return {
       asOf: iso(day), savedAt: "", formulaVersion: mod.OVERNIGHT_FORMULA_VERSION,
       picks: [pickOf(day === TODAY ? 102 : 100)],
     };
   });
   await resetSnapshots([
-    { asOf: iso(compactTradingDay(-15)), savedAt: "", formulaVersion: "overnight-v0-test", picks: [pickOf(50)] },
+    { asOf: iso(compactTradingDay(DAY_SHIFT - 15)), savedAt: "", formulaVersion: "overnight-v0-test", picks: [pickOf(50)] },
     ...currentSnapshots,
   ]);
   const body = await mod.buildVerificationHistory();
