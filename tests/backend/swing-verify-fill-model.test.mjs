@@ -17,6 +17,7 @@ const { mod, mock, dataDir } = await importServer({ routes: [] });
 // list 變 undefined，測試在沒有人動過任何一行程式的情況下自己轉紅。
 const AS_OF = compactTradingDay(0);
 const AS_OF_ISO = `${AS_OF.slice(0, 4)}-${AS_OF.slice(4, 6)}-${AS_OF.slice(6, 8)}`;
+
 after(async () => {
   mock.restore();
   await rm(dataDir, { recursive: true, force: true }).catch(() => {});

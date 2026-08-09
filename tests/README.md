@@ -9,6 +9,7 @@ npm test              # 後端 + 前端（全離線、臨時埠，絕不碰 5174
 npm run test:backend  # 只跑後端
 npm run test:frontend # 只跑前端（jsdom）
 npm run test:coverage # 覆蓋率（見下方「覆蓋率說明」）
+npm run test:dates    # 【選跑】把時鐘平移到各種風險日期各跑一次全套（見下方「日期體檢」）
 npm run test:live     # 【選跑】真打 TWSE/TPEx 驗證上游欄位形狀（偵測 fixture 漂移）
 ```
 
@@ -68,7 +69,7 @@ tests/
 
 ## 重要慣例（改測試前先讀）
 
-1. **一般日期永遠用相對位移**：處置期間等時間性 fixture 由 `fixtures.mjs` 以「相對今天」產生（`compactToday(offset)`），任何日期執行都確定。**不要**在一般 fixture 裡寫死絕對日期。唯一必要例外是法規 effective-date 邊界測試：法定起訖日本身就是契約，必須固定寫出絕對日期。
+1. **一般日期永遠用相對位移**：處置期間等時間性 fixture 由 `fixtures.mjs` 以「相對今天」產生（`compactToday(offset)`），任何日期執行都確定。**不要**在一般 fixture 裡寫死絕對日期。唯一必要例外是法規 effective-date 邊界測試：法定起訖日本身就是契約，必須固定寫出絕對日期。違反這條的代價是**測試會在某天自己轉紅、而且沒有任何 commit 碰過它**（實例見下方「日期體檢」）；改完日期相關的測試請跑 `npm run test:dates` 驗一次。
 2. **surveillance-board 測試的日期策略**：同檔內每個測試用「遞減」基準日（today、-1、-2…），快取（以日期為 key）不互撞、先前寫入的歷史快照也不會被誤當「昨天」。歷史 diff 測試獨立成 `surveillance-history.test.mjs`（要在 import server.mjs **之前**預埋快照檔）。
 3. **前端 harness**：app.js 必須以 `<script>` 元素注入（classic script 頂層 `const` 才會進 global lexical scope、之後 `evalIn` 才讀得到 `state`）；**不要**改成 `win.eval(整份 app.js)`。跨 realm 比對物件請先 `JSON.stringify` 再 parse（避免 deepStrictEqual 的跨 realm prototype 問題）。
 4. **測試檔務必 `after(() => app.cleanup())`**：app.js 載入尾端有 10 秒 `setInterval`，不關 window 行程會掛住。npm scripts 刻意不用 `--test-force-exit`；Node 24／Windows 在仍有 child-process pipe 時強制退場可能觸發 libuv assertion，因此測試必須自行完整清理。
@@ -88,6 +89,26 @@ tests/
 - 現況（2026-07-15）：最新 `npm test` 共 **543/543 項離線測試**（後端 339、前端 204；後續仍以最新 TAP 為準）；`npm run test:live` 共 **25 項 opt-in 契約**。`server.mjs` 覆蓋率為**行 89.29%／分支 77.30%／函式 89.53%**。
 - Node 24 原生 coverage 無法正確合併「同一 ESM 加 query-string cache bust」的多份來源。`scripts/test-coverage.mjs` 會先正常跑 **7/7** 項 cache-bust 契約（不納入原生 coverage 合併），再把其餘 **511/511** 項 measurable tests 用 `--test-concurrency=1` 收集可信聯集；不要把它改回單一 glob coverage 指令，否則報表會假降到約 16%。
 - `app.js` 在 jsdom 內以 script 注入執行 → **拿不到覆蓋率歸屬**（eval 類執行的既知限制；c8 亦同）。前端品質由測試清單保證，不看百分比。
+
+## 日期體檢（`npm run test:dates`）
+
+`scripts/date-sweep.mjs` 把系統時鐘平移到一組**相對今天算出來的風險日**，每個日子跑一次全套測試。
+
+為什麼需要：fixture 幾乎都以「相對今天」產生，於是有一整類 bug 只在特定日子現形——平常怎麼跑都綠，時間一到自己轉紅，沒有任何 commit 碰過它。已經踩過兩次：
+
+- `007e164`：fixture 只餵「本月」的歷史，今天落在 1~20 號時 MA20 資料不足 → 整檔股票悄悄消失。
+- `efc12de`：測試寫死 `asOf "2026-07-24"`，而 `recordSwingVerification` 收尾會 prune 掉 90 天前的資料 → 2026-10-23 起那筆會被同一次呼叫當場刪掉。同一次掃描也抓到 `signal-verify` 每年 1/1 會壞（測試自己 mock 元旦，卻用只跳週末的 `compactTradingDay` 假設「今天是交易日」）。
+
+掃的日期：下個月 1／3／最後一天、年末 12/31、元旦、閏日、下個週六日、**+100／+200／+400 天**（保留期／prune 類炸彈只有推夠遠才現形），以及同一個平日的 02:00／10:00／14:30／23:50 四個時段。日期一律相對今天產生——寫死清單的話這支腳本自己就會過期。
+
+```powershell
+npm run test:dates                       # 掃預設風險日（約 5–7 分鐘）
+node scripts/date-sweep.mjs 2027-01-01   # 只掃指定日期，用來重現回報的災情
+```
+
+實作上兩個關鍵：時鐘用**平移**不是凍結（否則量測經過時間的斷言會失去意義）；jsdom 是**獨立 realm**、有自己的 `Date`，必須另外 patch，否則前端測試會出現「測試檔用假今天、app.js 用真今天」的假失敗。
+
+刻意**不進 CI**：跑一輪好幾分鐘，掛在每次 push 上不划算。它證明的是「這些日子當下是綠的」，不是「永遠不會紅」。
 
 ## server.mjs 的測試掛鉤（唯一產品碼改動）
 

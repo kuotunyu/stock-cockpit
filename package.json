@@ -12,7 +12,8 @@
     "test:backend": "node --test tests/backend/*.test.mjs",
     "test:frontend": "node --test tests/frontend/*.test.mjs",
     "test:live": "node --test tests/live/*.test.mjs",
-    "test:coverage": "node scripts/test-coverage.mjs"
+    "test:coverage": "node scripts/test-coverage.mjs",
+    "test:dates": "node scripts/date-sweep.mjs"
   },
   "dependencies": {
     "fubon-neo": "^2.2.2"
