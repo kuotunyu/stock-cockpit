@@ -265,3 +265,66 @@ test("各類 DB mutation 在 atomic write 失敗時皆 fail-closed 並可恢復"
   assert.equal(persisted.brokerCredentials?.[adminId], undefined);
   assert.equal(persisted.stockNotes["2330"].some((note) => note.text === "不應留在 RAM"), false);
 });
+
+// 寫入失敗原本只有兩個出口：回 503 給當次 caller、印一行 log。磁碟滿了或權限壞掉時，
+// 之後每一筆寫入都會失敗，而 /api/health 仍然一路 ok:true——探針說「健康」，
+// 使用者卻存不了任何東西。這條釘住 health 會說實話，也釘住它**只**說 operational metadata。
+test("health 要說得出「現在還寫不寫得進去」，且不得洩漏路徑或訊息", async (t) => {
+  t.after(async () => {
+    if (blockerActive) {
+      await rm(blockerPath, { recursive: true, force: true });
+      blockerActive = false;
+    }
+  });
+
+  const healthy = await (await srv.raw("/api/health")).json();
+  assert.equal(healthy.persistence.writable, true, "前提：現在寫得進去");
+  assert.equal(healthy.persistence.lastFailureCode, undefined);
+  assert.equal(healthy.persistence.lastFailureAt, undefined);
+
+  await mkdir(blockerPath);
+  blockerActive = true;
+
+  const watchBefore = await (await srv.api("/api/watchlists")).json();
+  const blocked = await srv.api("/api/watchlists", {
+    method: "PUT",
+    body: JSON.stringify({ rev: watchBefore.rev, lists: { ...watchBefore.lists, 1: ["1101"] } }),
+  });
+  assert.equal(blocked.status, 503, await blocked.text());
+
+  const degradedResponse = await srv.raw("/api/health");
+  // 磁碟寫不進去不是「服務沒起來」——讀行情仍然正常，重啟行程也修不好磁碟，
+  // 所以 status／HTTP 碼刻意維持不變，只有 persistence 欄位如實反映。
+  assert.equal(degradedResponse.status, 200);
+  const degradedText = await degradedResponse.text();
+  const degraded = JSON.parse(degradedText);
+  assert.equal(degraded.status, "ready");
+  assert.equal(degraded.persistence.writable, false, "寫入失敗後必須誠實說寫不進去");
+  assert.match(
+    degraded.persistence.lastFailureCode,
+    /^[A-Z][A-Z_]{1,31}$/,
+    "只能回 coarse 的 errno 代碼",
+  );
+  assert.match(degraded.persistence.lastFailureAt, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+
+  // health 是公開免登入端點：不可以夾帶檔案路徑、錯誤訊息或任何個資。
+  assert.equal(degradedText.includes(srv.dataDir), false, "不得洩漏 DATA_DIR 路徑");
+  assert.equal(degradedText.includes("stock1-db.json"), false, "不得洩漏資料庫檔名");
+  assert.equal(degradedText.includes("無法安全儲存"), false, "不得把使用者錯誤訊息塞進探針");
+  assert.equal(degradedText.includes("admin"), false, "不得夾帶帳號");
+
+  await rm(blockerPath, { recursive: true, force: true });
+  blockerActive = false;
+
+  const currentWatch = await (await srv.api("/api/watchlists")).json();
+  const recovered = await srv.api("/api/watchlists", {
+    method: "PUT",
+    body: JSON.stringify({ rev: currentWatch.rev, lists: { ...currentWatch.lists, 1: ["2412"] } }),
+  });
+  assert.equal(recovered.status, 200, await recovered.text());
+
+  const restored = await (await srv.raw("/api/health")).json();
+  assert.equal(restored.persistence.writable, true, "寫成功就要自己恢復，不必重啟");
+  assert.equal(restored.persistence.lastFailureCode, undefined);
+  assert.equal(restored.persistence.lastFailureAt, undefined);
+});

@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
-import { lstat, mkdir, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
 import { constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -1803,9 +1803,34 @@ function getDbMutationEpochForTest() {
   return dbMutationEpoch;
 }
 
+// 寫入失敗原本只有兩個出口：回 503 給當次 caller、印一行 log。但磁碟滿了或權限壞掉時，
+// 之後每一筆寫入都會失敗，而 `/api/health` 仍然一路回 ok:true——探針說「健康」，
+// 使用者卻存不了任何東西。這裡把最後一次失敗留下來，讓 health 說得出「現在還能不能寫」。
+// 只留 coarse code（ENOSPC／EACCES…），不留訊息與路徑：health 是公開免登入端點。
+let lastPersistenceFailure = null;
+
+const FS_ERROR_CODE_PATTERN = /^[A-Z][A-Z_]{1,31}$/;
+
+function coarsePersistenceErrorCode(error) {
+  for (const candidate of [error?.code, error?.cause?.code]) {
+    const code = String(candidate || "");
+    if (FS_ERROR_CODE_PATTERN.test(code)) return code;
+  }
+  return "UNKNOWN";
+}
+
+function recordPersistenceFailure(error) {
+  lastPersistenceFailure = { at: new Date().toISOString(), code: coarsePersistenceErrorCode(error) };
+}
+
+function clearPersistenceFailure() {
+  lastPersistenceFailure = null;
+}
+
 function persistenceFailure(error) {
   if (error?.code === "PERSISTENCE_FAILED") return error;
   console.error("[Stock1] 主資料庫寫入失敗，未發布的記憶體草稿已丟棄：", error?.message || error);
+  recordPersistenceFailure(error);
   return Object.assign(new Error("資料暫時無法安全儲存，請稍後再試。"), {
     code: "PERSISTENCE_FAILED",
     status: 503,
@@ -1894,8 +1919,32 @@ async function renameAtomicTemp(tmpPath, targetPath) {
   }
 }
 
-// 原子寫入：先寫 .tmp 再 rename（Node 的 rename 在 Windows 也會覆蓋既有檔）。
-// 寫到一半被殺（Ctrl+C／斷電）最多留下 .tmp 殘檔，原檔永遠是完整 JSON。
+// POSIX 上「rename 本身」要真正 durable，必須再 fsync 父目錄——否則斷電後可能回到
+// 舊的 directory entry。Windows 沒有這個概念（對目錄開 handle 會 EISDIR／EPERM），
+// 拿不到就是拿不到：這裡吞掉錯誤，並在 writeFileAtomic 的註解裡誠實界定邊界，不假裝有。
+async function syncDirectory(directoryPath) {
+  let handle = null;
+  try {
+    handle = await open(directoryPath, "r");
+    await handle.sync();
+  } catch {
+    // 不支援 directory fsync 的平台／檔案系統：略過。
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+// 原子寫入：先寫 .tmp、fsync、再 rename（Node 的 rename 在 Windows 也會覆蓋既有檔）。
+//
+// **durability 邊界（不要再擴大宣稱）**：
+//   • 行程層級崩潰（Ctrl+C、kill -9、未捕捉例外）→ 安全。資料已在 page cache，
+//     rename 是原子的，原檔永遠是完整 JSON，最多留下一個 .tmp 殘檔。
+//   • 斷電／OS 崩潰 → 這裡 fsync 過 temp 檔內容才 rename，所以不會出現
+//     「檔名換好了、內容卻是空的或半截」這個經典視窗（POSIX 上沒有 fsync 就會）。
+//     父目錄的 fsync 是 best-effort：**Windows 上做不到**，所以在 Windows 斷電時
+//     rename 本身仍可能沒落地（結果是回到舊版本，不是壞檔）。
+//   • 磁碟本身謊報 flush（消費級 SSD 的 write cache）→ 任何使用者空間程式都無解。
+// 真正的最後一道防線是 backups/ 的每日還原點與 loadDb 的壞檔回復，不是這個函式。
 function writeFileAtomic(path, data) {
   const previousWrite = atomicWriteQueues.get(path) || Promise.resolve();
   const pendingWrite = previousWrite
@@ -1907,8 +1956,17 @@ function writeFileAtomic(path, data) {
       await unlink(tmpPath).catch((error) => {
         if (error?.code !== "ENOENT") throw error;
       });
-      await writeFile(tmpPath, data, { encoding: "utf8", flag: "wx" });
+      const handle = await open(tmpPath, "wx");
+      try {
+        await handle.writeFile(data, { encoding: "utf8" });
+        // fsync 失敗要往外丟：那代表「內容可能沒落地」，此時**絕不能** rename，
+        // 否則就是拿一份不確定的資料蓋掉一份確定完整的資料。舊檔留著才是對的。
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       await renameAtomicTemp(tmpPath, path);
+      await syncDirectory(dirname(path));
     });
 
   atomicWriteQueues.set(path, pendingWrite);
@@ -1961,7 +2019,16 @@ async function saveDb(db) {
   // 和 mutation queue 一樣，供後續排隊／shutdown 等待的 tail 必須永遠 fulfilled；
   // 本次 caller 仍會從 tracked 收到原始寫入錯誤。
   dbSaveQueue = tracked.then(() => undefined, () => undefined);
-  await tracked;
+  try {
+    await tracked;
+  } catch (error) {
+    // 啟動遷移／初始 admin 走的是直接 saveDb()，不經過 commitDbMutation 的
+    // persistenceFailure()，所以那條路徑的失敗要在這裡記，否則 health 看不見。
+    recordPersistenceFailure(error);
+    throw error;
+  }
+  // 寫成功＝磁碟又能寫了，把警示收掉（不需要重啟才恢復）。
+  clearPersistenceFailure();
 }
 
 function pendingPersistenceCount() {
@@ -11276,7 +11343,16 @@ async function handleApi(request, requestUrl, response) {
       startedAt: serverStartedAt || null,
       uptimeSeconds: Number.isFinite(startedAtMs) ? Math.max(0, Math.floor((now - startedAtMs) / 1000)) : 0,
       generatedAt: new Date(now).toISOString(),
-      persistence: { pendingWrites: pendingPersistenceCount() },
+      persistence: {
+        pendingWrites: pendingPersistenceCount(),
+        // 「現在還寫得進去嗎」是探針唯一問得出、而 UI 問不到的東西。
+        // 刻意不改 status／HTTP 碼：磁碟滿了不是「服務沒起來」，讀行情仍然正常，
+        // 而且重啟行程也修不好磁碟。這裡只如實報告，讓看的人自己判斷。
+        writable: !lastPersistenceFailure,
+        ...(lastPersistenceFailure
+          ? { lastFailureAt: lastPersistenceFailure.at, lastFailureCode: lastPersistenceFailure.code }
+          : {}),
+      },
     });
     return true;
   }

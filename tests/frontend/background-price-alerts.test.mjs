@@ -9,13 +9,20 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createAppWindow } from "../helpers/dom-harness.mjs";
+import { compactToday } from "../helpers/fixtures.mjs";
 
 let app;
 
 const USER = { id: "alert-user", username: "admin", displayName: "管理者", role: "admin" };
 
+// **必須用台北日期，不可以用 `new Date().toISOString()`（那是 UTC）**：
+// 台北 00:00–08:00 之間 UTC 還停在前一天，quote 的 asOf 會比 eligibleAlertQuoteCodes
+// 拿來比對的 getTaiwanClockParts().isoDate 早一天 → 報價被判定為不新鮮 → 提醒不觸發。
+// 2026-08-21 由 `npm run test:dates` 在「平日 02:00 盤前」抓到，這一檔 7 支測試全紅；
+// 平常在白天跑永遠是綠的，時間到了才會自己炸。
 function quote(overrides = {}) {
-  const today = new Date().toISOString().slice(0, 10);
+  const compact = compactToday(0);
+  const today = `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`;
   return {
     code: "2330",
     name: "台積電",
