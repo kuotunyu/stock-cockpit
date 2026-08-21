@@ -4733,7 +4733,31 @@ function normalizeDividendKind(value) {
 // 2026-07-27 實測（TWSE 125 筆＋TPEx 138 筆預告）：29 筆真實配股全部落在 (0, 1)，最大 0.5；
 // 並用官方計算結果表反推驗證 7 個案例，比率單位算出的參考價與交易所公布值誤差都 ≤ 0.01
 // （7740 熙特爾：(157−2.05)/1.12782 = 137.39，官方 137.38）。單位確認是比率。
-const DIVIDEND_RATIO_MAX_PLAUSIBLE = 1;
+// 2026-08-21 重新校準：**1 是錯的**。它是 2026-07-27 那次量測的樣本上限（29 筆最大 0.5）
+// 被當成了領域性質，但真實市場會出現超過 100% 的無償配股。實測三筆：
+//   TWSE 6669 緯穎 1.9827946、TPEx 5314 世紀* 3.15702936、TPEx 8084 巨虹（現增）1.51393639。
+// 用官方參考價反推驗證過 5314（除權日 2026-08-14 已過，官方數字已存在）：
+//   前收 61.30 ÷ (1 + 3.15702936) = 14.746，官方參考價 14.75（8/14 收 16.20 − 漲跌 1.45）。
+//   誤差 0.004——比率確實是比率，公式在 >1 完全成立，1 這個位置沒有任何不連續。
+// 新的 10 是「單筆絕對不可能是比率」的線（＝1000% 配股）。單位改版的偵測改由
+// dividendRatioUnitLooksShifted() 的分佈檢查負責，見下方註解。
+const DIVIDEND_RATIO_MAX_PLAUSIBLE = 10;
+
+// 單筆超標＝罕見但合法的大額配股；**整份分佈一起位移＝上游換了單位**。
+// 這是兩件事，用同一個閾值兩邊都會做錯：
+//   閾值設 1 → 把真實的 315% 配股誤報成單位改版（2026-08-21 實際發生，test:live 轉紅）。
+//   閾值放寬 → 單位改版會從底下溜過去（0.0089 的比率換成每仟股股數只有 8.9，小於 10）。
+// 中位數對離群值免疫，正好是這裡要的：比率單位下中位數必然遠小於 1
+// （實測 TWSE 26 筆非零、TPEx 25 筆非零，主體都落在 0.0089～0.5），
+// 每仟股股數單位下則會整個跳到數十以上。
+function dividendRatioUnitLooksShifted(ratios) {
+  const values = ratios.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  // 樣本太少時中位數沒有意義（單一筆大額配股就會讓它超過 1）——那種情況交給單筆門檻。
+  if (values.length < 8) return false;
+  const middle = Math.floor(values.length / 2);
+  const median = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+  return median >= 1;
+}
 // 每檔除權息事件的歸檔上限。與官方計算結果表（corporateActionResults）的 40 對齊——
 // 月配息 ETF 兩年就累積 24 筆，舊的 12 筆會把還原需要的資料吃掉。
 const DIVIDEND_HISTORY_MAX_EVENTS_PER_CODE = 40;
@@ -4750,6 +4774,7 @@ function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate()
   const archiveMap = new Map();
   const futureMap = new Map();
   const implausible = [];
+  const observedRatios = [];
   for (const row of rows) {
     const code = cleanCode(source === "TWSE" ? row.Code : row.SecuritiesCompanyCode);
     if (!/^\d{4}$/.test(code)) continue;
@@ -4771,6 +4796,7 @@ function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate()
       source,
     };
     if (!item.exDate) continue;
+    observedRatios.push(Number(item.stockRatio), Number(item.subscriptionRatio));
     const implausibleLabel = implausibleDividendRatioLabel(item);
     if (implausibleLabel && implausible.length < 5) implausible.push(`${code} ${item.exDate} 的${implausibleLabel}`);
     const archiveList = archiveMap.get(code) || [];
@@ -4809,10 +4835,20 @@ function normalizeDividendMarketRows(source, rows, today = toTaipeiCompactDate()
   }
   // 不 throw：真的出現合法的 >100% 配股時，把整個市場的除權息資料丟掉會比算錯更糟。
   // 記 warning 讓它浮到畫面上，實際的比率仍由下游判成未定案。
+  // 分佈整體位移＝上游換單位。這是真正的災難情境（整段 K 線會塌陷卻仍蓋著 official 章），
+  // 所以擺在單筆告警之前，而且措辭要明確指向單位，不要跟「罕見大額配股」混為一談。
+  if (dividendRatioUnitLooksShifted(observedRatios)) {
+    warnings.push(
+      `${DIVIDEND_SOURCES[source].label}除權息的配股／現增比率**整份分佈**都大於 1`
+      + "，極可能是上游把單位從比率改成每仟股股數（差 1000 倍）。這會讓還原倍數整個算錯，"
+      + "請先查官方原文再採信任何還原後的價格。",
+    );
+  }
   if (implausible.length) {
     warnings.push(
-      `${DIVIDEND_SOURCES[source].label}除權息的配股／現增比率超過 100%（${implausible.join("、")}）`
-      + "，可能是上游把單位從比率改成每仟股股數；這些事件的還原會標為未定案，請查官方原文。",
+      `${DIVIDEND_SOURCES[source].label}除權息有單筆配股／現增比率超過 1000%（${implausible.join("、")}）`
+      + "，這在真實市場幾乎不可能出現（若整份資料都是這種量級，那就是上游把單位從比率改成每仟股股數）；"
+      + "這些事件的還原會標為未定案，請查官方原文。",
     );
   }
   for (const map of [archiveMap, futureMap]) {
@@ -9371,7 +9407,13 @@ function corporateActionGapRatio(row, previousClose, thresholdPct = 10.5) {
 // 證交所／櫃買中心公告公式：
 // 除權息參考價＝[(前收－息值)＋(現增認購價×現增配股率)]／(1＋無償配股率＋現增配股率)。
 // 回傳「參考價／前收」作為事件前所有價格的回溯調整因子。
-const CORPORATE_ACTION_MAX_PLAUSIBLE_RATIO = 1;
+// 2026-08-21 從 1 調到 10，與 DIVIDEND_RATIO_MAX_PLAUSIBLE 一致（兩者必須同步，
+// 否則價格那條與股數倍數那條會對同一筆事件給出不同的可信度判斷——那正是這個常數
+// 當初被抽出來的理由）。校準證據見 DIVIDEND_RATIO_MAX_PLAUSIBLE 的註解：
+// 已用官方參考價反推驗證 ratio=3.157 的真實案例，誤差 0.004。
+// 下方註解 (b) 描述的「真正合法的 >100% 無償配股會被擋成未定案」在 2026-08-21 實際發生了
+// 三次（6669／5314／8084），這次調整就是為了它。
+const CORPORATE_ACTION_MAX_PLAUSIBLE_RATIO = 10;
 
 // 量級檢查要由價格公式與股數倍數**共用**，否則同一筆事件會被兩條路判出相反的結論。
 // 舊寫法只把上限寫在 officialCorporateActionRatio 裡，於是：

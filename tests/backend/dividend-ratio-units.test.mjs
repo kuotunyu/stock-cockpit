@@ -84,25 +84,94 @@ test("兩個市場表達「沒有這件事」的方式不同，不可被抹平�
   assert.notEqual(twse.get("2412")[0].stockRatio, tpex.get("2640")[0].stockRatio);
 });
 
-test("比率超過 100% 要記 warning（上游改單位時的唯一告警）", () => {
+test("單筆超過 1000% 要記 warning（真實市場幾乎不可能）", () => {
   const warnings = [];
   const rows = [
     // 上游若改成「每仟股 100 股」，這個欄位會回 100 而不是 0.1。
     { Date: "1150730", Code: "1231", Name: "聯華食", Exdividend: "權息", StockDividendRatio: "100", SubscriptionRatio: "", SubscriptionPricePerShare: "", CashDividend: "1.5" },
   ];
   const { archiveMap } = normalizeDividendMarketRows("TWSE", rows, TODAY, warnings);
-  assert.equal(warnings.length, 1, "必須要有告警——這是上游改單位時唯一會喊出來的地方");
+  assert.equal(warnings.length, 1, "必須要有告警");
   assert.match(warnings[0], /1231/, "要指名是哪一檔");
   assert.match(warnings[0], /每仟股/, "要講出最可能的原因，否則使用者不知道該查什麼");
-  // 刻意**不** throw：真的出現合法的 >100% 配股時，把整個市場的資料丟掉比算錯更糟。
+  // 刻意**不** throw：真的出現合法的大額配股時，把整個市場的資料丟掉比算錯更糟。
   assert.equal(archiveMap.get("1231")[0].stockRatio, 100, "值照樣留著，由下游判成未定案");
 });
 
-test("合理範圍內不得誤報（實測最大 0.5，門檻 1 有兩倍餘裕）", () => {
+// ===== 2026-08-21 重新校準（D-53）=====
+// 門檻 1 是 2026-07-27 那次量測的**樣本上限**（29 筆最大 0.5）被當成了領域性質。
+// 真實市場會出現超過 100% 的無償配股，2026-08-21 由 `npm run test:live` 抓到三筆，
+// 並用官方參考價反推驗證過其中一筆（TPEx 5314 世紀*，除權日 2026-08-14 已過）：
+//   前收 61.30 ÷ (1 + 3.15702936) = 14.746，官方參考價 14.75（8/14 收 16.20 − 漲跌 1.45）。
+// 誤差 0.004 → 比率確實是比率，公式在 >1 完全成立，1 這個位置沒有任何不連續。
+test("真實的大額配股（實測 3.157）不得被判成不可信", () => {
+  const warnings = [];
+  const rows = [
+    // 值與代號取自 TPEx tpex_exright_prepost 的 2026-08-21 實際回傳。
+    { ExRrightsExDividendDate: "1150814", SecuritiesCompanyCode: "5314", CompanyName: "世紀*", ExRrightsExDividend: "除權", StockDividendRatio: "3.15702936", SubscriptionRatioToNewSharesIssued: "0.00000000", SubscriptionPricePerShare: "0.00", CashDividend: "0.00000000" },
+  ];
+  const { archiveMap } = normalizeDividendMarketRows("TPEx", rows, TODAY, warnings);
+  assert.deepEqual(warnings, [], "已用官方參考價驗證過的真實事件不可觸發告警");
+  const event = { ...archiveMap.get("5314")[0], formulaComplete: true };
+
+  // 股數倍數：1 + 3.157 = 4.157。這是舊門檻真正擋掉的東西（成交量還原與 Yahoo 座標換算）。
+  assert.ok(Math.abs(mod.plausibleShareFactor(event) - 4.15702936) < 1e-6, "股數倍數要算得出來");
+
+  // 價格因子：拿官方數字反推。前收 61.30、官方參考價 14.75 → 因子 14.75/61.30。
+  const ratio = mod.officialCorporateActionRatio(event, 61.30);
+  assert.ok(ratio !== null, "公式要算得出比率");
+  assert.ok(
+    Math.abs(61.30 * ratio - 14.75) < 0.01,
+    `套公式算出的參考價 ${(61.30 * ratio).toFixed(3)} 必須對得上官方公布的 14.75`,
+  );
+});
+
+test("合理範圍內不得誤報（含 2026-08 實測的 3.157，門檻 10）", () => {
   const warnings = [];
   normalizeDividendMarketRows("TPEx", tpexRows, TODAY, warnings);
-  assert.deepEqual(warnings, [], "0.5 是實測到的真實最大值，不可誤報");
-  assert.equal(DIVIDEND_RATIO_MAX_PLAUSIBLE, 1);
+  assert.deepEqual(warnings, [], "0.5 是常見量級，不可誤報");
+  assert.equal(DIVIDEND_RATIO_MAX_PLAUSIBLE, 10);
+});
+
+// 單筆超標＝罕見但合法；整份分佈一起位移＝上游換單位。這是兩件事，需要兩個偵測器。
+// 舊設計用同一個閾值兼差，於是把 315% 的真實配股誤報成單位改版。
+test("分佈整體位移才是單位改版：中位數 ≥ 1 要喊出來", () => {
+  const warnings = [];
+  // 模擬上游把比率換成每仟股股數：每個值都乘 1000。
+  const shifted = Array.from({ length: 10 }, (_, index) => ({
+    Date: "1150730",
+    Code: String(1200 + index),
+    Name: `測試${index}`,
+    Exdividend: "權",
+    StockDividendRatio: String((0.01 + index * 0.05) * 1000),
+    SubscriptionRatio: "",
+    SubscriptionPricePerShare: "",
+    CashDividend: "0",
+  }));
+  normalizeDividendMarketRows("TWSE", shifted, TODAY, warnings);
+  assert.ok(warnings.some((w) => /整份分佈/.test(w)), `分佈位移必須有專屬告警：${JSON.stringify(warnings)}`);
+  assert.ok(warnings.some((w) => /每仟股/.test(w)), "要指向單位這個原因");
+});
+
+test("一筆離群值不算單位改版：主體仍是比率量級就不得誤報分佈告警", () => {
+  const warnings = [];
+  // 照 2026-08-21 TWSE 的真實形狀：25 筆小值 ＋ 1 筆 1.98。
+  const realistic = Array.from({ length: 9 }, (_, index) => ({
+    Date: "1150730",
+    Code: String(1300 + index),
+    Name: `測試${index}`,
+    Exdividend: "權",
+    StockDividendRatio: String(0.01 + index * 0.05),
+    SubscriptionRatio: "",
+    SubscriptionPricePerShare: "",
+    CashDividend: "0",
+  }));
+  realistic.push({
+    Date: "1150902", Code: "6669", Name: "緯穎", Exdividend: "權",
+    StockDividendRatio: "1.98279460", SubscriptionRatio: "", SubscriptionPricePerShare: "", CashDividend: "0",
+  });
+  normalizeDividendMarketRows("TWSE", realistic, TODAY, warnings);
+  assert.deepEqual(warnings, [], `一筆離群值不是單位改版：${JSON.stringify(warnings)}`);
 });
 
 // ---- D-44 第二點：同一代號同一除權息日多列 ----

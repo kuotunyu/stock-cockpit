@@ -52,18 +52,40 @@ for (const source of SOURCES) {
     for (const field of source.fields) {
       assert.ok(field in first, `${source.name} 缺欄位 ${field}；實際欄位：${Object.keys(first).join(", ")}`);
     }
-    // D-41：欄位存在還不夠，**數量級也要釘住**。
+    // D-41／D-53：欄位存在還不夠，**數量級也要釘住**。
     // 除權息報表的欄位名叫 Ratio，但同一份報表的網頁版是以「每仟股無償配股（股）」呈現，
-    // 兩者差 100 倍。上游若改單位，referencePrice 的除數會從 1.1 變成 101，整段 K 線塌陷，
+    // 兩者差 1000 倍。上游若改單位，referencePrice 的除數會從 1.1 變成 101，整段 K 線塌陷，
     // 而且 formulaComplete 仍是 true、source 仍蓋著 official 章——只有這條斷言會喊。
-    // 2026-07-27 實測：TWSE 18 筆＋TPEx 11 筆真實配股全部落在 (0,1)，最大 0.5。
+    //
+    // **2026-08-21 修正判準（D-53）**：原本逐筆斷言 `value < 1`，但那是把 2026-07-27
+    // 的樣本上限（29 筆最大 0.5）當成了領域性質。真實市場會出現超過 100% 的無償配股，
+    // 這條斷言因此在 2026-08-21 對三筆合法事件誤報（TWSE 6669 1.98、TPEx 5314 3.16、
+    // TPEx 8084 現增 1.51），其中 5314 已用官方參考價反推驗證過比率是對的。
+    //
+    // 要偵測的「單位改版」本來就是**整份分佈一起位移**，不是單筆離群值：
+    // 換成每仟股股數後每個值都會乘約 1000，中位數必然遠大於 1。中位數對離群值免疫，
+    // 正是這裡要的判準；單筆的絕對上限則放在 1000%（＝伺服器端的
+    // DIVIDEND_RATIO_MAX_PLAUSIBLE，兩邊要一起改）。
     if (source.ratioFields) {
       for (const field of source.ratioFields) {
         const values = usable
           .map((row) => Number(String(row?.[field] ?? "").replace(/,/g, "")))
-          .filter((value) => Number.isFinite(value) && value > 0);
+          .filter((value) => Number.isFinite(value) && value > 0)
+          .sort((a, b) => a - b);
         for (const value of values) {
-          assert.ok(value < 1, `${source.name} 的 ${field} 出現 ${value}——比率不該 ≥1，上游可能改成每仟股股數了`);
+          assert.ok(
+            value < 1000,
+            `${source.name} 的 ${field} 出現 ${value}——單筆超過 100000%，不可能是比率`,
+          );
+        }
+        // 樣本太少時中位數沒有意義（一筆大額配股就會讓它超過 1）。
+        if (values.length >= 8) {
+          const middle = Math.floor(values.length / 2);
+          const median = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+          assert.ok(
+            median < 1,
+            `${source.name} 的 ${field} 中位數是 ${median}——整份分佈都 ≥1，上游極可能改成每仟股股數了`,
+          );
         }
       }
     }
