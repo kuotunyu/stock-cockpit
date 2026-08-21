@@ -269,6 +269,17 @@ const sourceState = {
   error: "",
 };
 
+// 版本與更新檢查：三個人各自 git pull、各自 npm start，畫面上要看得到「我跑的是哪一份」。
+// 只在「更多 → 版本與更新」被打開時抓一次，刻意不進 10 秒輪詢——這不是行情資料。
+const appVersionState = {
+  loading: false,
+  loaded: false,
+  version: "",
+  build: null,
+  update: null,
+  error: "",
+};
+
 const authState = {
   checked: false,
   user: null,
@@ -2401,6 +2412,9 @@ function addPriceAlert(code, op, price) {
   });
   scheduleAlertSync();
   showToast(`已設定 ${clean} 到價提醒`);
+  // 設定提醒是要求通知權限最自然的時機：使用者剛剛才表達「這件事發生時要通知我」。
+  // 不在開啟頁面時就問——那種時機瀏覽器會懲罰，使用者也搞不懂為什麼要問。
+  void requestPriceAlertNotifications({ silent: true });
   return true;
 }
 
@@ -2461,7 +2475,10 @@ function checkPriceAlerts(eligibleCodes = null, { renderNow = true } = {}) {
     fired += 1;
     // 除息日的下跌含除息缺口，加註提醒使用者別把息盤當崩盤（只加註、不抑制提醒）。
     const exDivNote = stock.dividend?.isToday ? `（今日除息 ${formatNumber(stock.dividend.cash)} 元，跌幅含除息缺口）` : "";
-    showToast(`🔔 ${stock.name || alert.code} ${alert.code} 到價：現價 ${formatNumber(price)}（${alert.op === "<=" ? "跌破" : "站上"} ${formatNumber(alert.price)}）${exDivNote}`, 8000);
+    const headline = `${stock.name || alert.code} ${alert.code} 到價`;
+    const detail = `現價 ${formatNumber(price)}（${alert.op === "<=" ? "跌破" : "站上"} ${formatNumber(alert.price)}）${exDivNote}`;
+    showToast(`🔔 ${headline}：${detail}`, 8000);
+    notifyPriceAlert(alert, `🔔 ${headline}`, detail);
   }
   if (fired) {
     playAlertBeep();
@@ -2469,6 +2486,115 @@ function checkPriceAlerts(eligibleCodes = null, { renderNow = true } = {}) {
     if (renderNow) render();
   }
   return fired;
+}
+
+// ===== 背景到價監看 =====
+// 前景的到價判斷搭在 10 秒行情輪詢（refreshLiveData）上，而那條路第一行就是
+// `if (document.hidden) return`——分頁切走、視窗最小化就完全不判斷了。
+// 但「整天盯著這個分頁」正是使用者最不想做的事，所以補一條背景路徑：
+//   • 只抓「有等待中提醒」的那幾檔報價，不是整個市場（沒有提醒就完全不連網）。
+//   • 只在台股盤中跑，且最快 30 秒一輪——瀏覽器對隱藏分頁的計時器本來就會節流到
+//     大約每分鐘一次，這裡明講「背景就是低頻」，不假裝即時。
+//   • 到價判斷完全重用 checkPriceAlerts＋eligibleAlertQuoteCodes，
+//     新鮮度門檻與前景一模一樣，不會因為走背景就放寬成用昨收誤觸發。
+// 桌面通知仍需要使用者授權；沒授權時背景判斷照跑（回到前景會看到已觸發狀態），只是不會跳通知。
+const BACKGROUND_ALERT_MIN_INTERVAL_MS = 30 * 1000;
+let backgroundAlertInFlight = false;
+let backgroundAlertLastRunAt = 0;
+
+function notificationsSupported() {
+  // 動態判斷而非模組載入時取值：jsdom 沒有 Notification，測試要能事後注入假物件。
+  return typeof window.Notification === "function";
+}
+
+function priceAlertNotificationPermission() {
+  if (!notificationsSupported()) return "unsupported";
+  return String(window.Notification.permission || "default");
+}
+
+async function requestPriceAlertNotifications({ silent = false } = {}) {
+  if (!notificationsSupported()) {
+    if (!silent) showToast("這個瀏覽器不支援桌面通知，到價提醒只會在頁面內顯示");
+    return "unsupported";
+  }
+  const current = priceAlertNotificationPermission();
+  // 已拒絕就不要再問——瀏覽器會直接忽略，重複呼叫只是讓使用者以為按了沒反應。
+  if (current !== "default") return current;
+  try {
+    const result = String(await window.Notification.requestPermission());
+    if (!silent) {
+      showToast(result === "granted"
+        ? "已開啟桌面通知：分頁切走時到價也會通知你"
+        : "沒有取得通知權限，到價提醒只會在頁面內顯示");
+    }
+    return result;
+  } catch {
+    return priceAlertNotificationPermission();
+  }
+}
+
+function notifyPriceAlert(alert, title, body) {
+  if (priceAlertNotificationPermission() !== "granted") return false;
+  // 使用者正在看這個畫面時，toast＋音效就夠了；再跳一個系統通知只是重複吵人。
+  // hasFocus() 一起看，是為了涵蓋「分頁沒隱藏、但視窗被別的視窗蓋住」的情況。
+  if (!document.hidden && document.hasFocus?.() !== false) return false;
+  try {
+    // tag 用 alert id：同一筆提醒重複觸發會取代舊通知，不同筆則各自顯示，不會被併成一則。
+    const notification = new window.Notification(title, {
+      body,
+      tag: `stock1-alert-${alert?.id || "unknown"}`,
+      icon: "/icon.svg",
+    });
+    notification.onclick = () => {
+      window.focus();
+      notification.close();
+    };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pendingAlertCodes() {
+  return [...new Set(priceAlertsState.alerts
+    .filter((alert) => alert.active && !alert.triggeredAt)
+    .map((alert) => normalizeStockCodeInput(alert.code))
+    .filter(Boolean))];
+}
+
+async function refreshBackgroundPriceAlerts() {
+  if (!document.hidden) return; // 前景由 refreshLiveData 那條負責，不要兩邊各打一次
+  if (backgroundAlertInFlight) return;
+  if (getSelectedSource() !== "official") return;
+  const codes = pendingAlertCodes();
+  if (!codes.length) return; // 沒有等待中的提醒 → 一個 request 都不發
+  const startedAt = Date.now();
+  if (startedAt - backgroundAlertLastRunAt < BACKGROUND_ALERT_MIN_INTERVAL_MS) return;
+  backgroundAlertInFlight = true;
+  backgroundAlertLastRunAt = startedAt;
+  try {
+    await ensureMarketSessionStatus();
+    // 等日曆的期間頁面可能已被切回前景；重驗後再決定要不要繼續。
+    if (!document.hidden || getSelectedSource() !== "official") return;
+    if (!isTaiwanMarketSession()) return; // 夜盤個股不動，沒有判斷的意義
+    const batch = codes.slice(0, 100); // 後端單次上限 100 檔
+    const payload = await fetchApi(`/api/quotes?codes=${encodeURIComponent(batch.join(","))}&${getSourceQuery()}`);
+    if (!payload?.ok || !Array.isArray(payload.quotes)) return;
+    const byCode = new Map(stocks.map((stock) => [stock.code, stock]));
+    payload.quotes.forEach((quote) => {
+      const existing = byCode.get(quote.code);
+      if (existing) mergeOfficialQuote(existing, quote);
+      else upsertStockFromQuote(quote);
+    });
+    // 刻意不動 dataState：這是「只抓幾檔」的部分更新，寫進去會讓資料可信度面板
+    // 把幾檔講成整個市場的即時檔數，也會讓「最後更新時間」蓋掉真正的全市場時間。
+    checkPriceAlerts(eligibleAlertQuoteCodes(payload.quotes), { renderNow: false });
+  } catch {
+    // 背景失敗保持安靜：使用者看不到這個分頁，跳 toast 沒有意義；
+    // 回到前景時 refreshLiveData 會用同一套門檻重新判斷一次。
+  } finally {
+    backgroundAlertInFlight = false;
+  }
 }
 
 // ===== 持股損益（完整交易紀錄）=====
@@ -4628,6 +4754,81 @@ function renderPersonalBackupPanel() {
   `;
 }
 
+async function loadAppVersion({ force = false } = {}) {
+  if (appVersionState.loading) return;
+  if (appVersionState.loaded && !force) return;
+  appVersionState.loading = true;
+  appVersionState.error = "";
+  try {
+    const payload = await fetchApi("/api/app-version");
+    appVersionState.version = String(payload?.version || "");
+    appVersionState.build = payload?.build || null;
+    appVersionState.update = payload?.update || null;
+    appVersionState.loaded = true;
+  } catch (error) {
+    appVersionState.error = error?.message || "版本資訊讀取失敗";
+  } finally {
+    appVersionState.loading = false;
+    // 背景重繪一律走受保護提交，避免清掉正在輸入的密碼／券商金鑰。
+    renderLiveDataUpdate();
+  }
+}
+
+// 把 /api/app-version 的 update.state 翻成畫面文案。
+// 刻意把「不知道」跟「已是最新」分開講：更新檢查連不上 GitHub 是常態（離線、限流、
+// 還沒 push），那時候說「已是最新」就是在騙人。
+function appVersionSummary() {
+  const build = appVersionState.build;
+  const update = appVersionState.update;
+  const stamp = build?.available
+    ? `${build.branch ? `${build.branch}@` : ""}${build.commit}`
+    : "無法辨識";
+  if (appVersionState.error) return { badge: "讀取失敗", tone: "is-warn", headline: appVersionState.error, hint: "", stamp };
+  if (!appVersionState.loaded) {
+    return { badge: appVersionState.loading ? "查詢中" : "查看", tone: "", headline: "", hint: "", stamp };
+  }
+  const behindBy = Number(update?.behindBy) || 0;
+  const localAhead = Number(update?.localAhead) || 0;
+  switch (String(update?.state || "")) {
+    case "current":
+      return { badge: "最新", tone: "is-good", headline: "已是 GitHub 上的最新版本。", hint: "", stamp };
+    case "behind":
+      return {
+        badge: `落後 ${behindBy}`,
+        tone: "is-warn",
+        headline: `GitHub 上有 ${behindBy} 個新 commit，這台還沒更新。`,
+        hint: "在專案資料夾執行 git pull，然後重新啟動伺服器（Node 不熱載），瀏覽器再 Ctrl+F5。",
+        stamp,
+      };
+    case "ahead":
+      return {
+        badge: "本機較新",
+        tone: "",
+        headline: `這台有 ${localAhead} 個 commit 還沒推上 GitHub。`,
+        hint: "朋友的機器要拿到這些修改，得先 git push。",
+        stamp,
+      };
+    case "diverged":
+      return {
+        badge: "已分岔",
+        tone: "is-warn",
+        headline: `與 GitHub 分岔了：上游有 ${behindBy} 個新 commit，本機有 ${localAhead} 個沒推上去。`,
+        hint: "先確認本機的修改要不要保留，再決定 git pull --rebase 或捨棄。",
+        stamp,
+      };
+    case "disabled":
+      return { badge: "已關閉", tone: "", headline: "更新檢查已用 UPDATE_CHECK=off 關閉。", hint: "", stamp };
+    default:
+      return {
+        badge: "無法確認",
+        tone: "",
+        headline: `目前無法跟 GitHub 對版：${update?.reason || "未知原因"}`,
+        hint: "這不影響任何看盤功能，本機版本資訊仍然是準的。",
+        stamp,
+      };
+  }
+}
+
 function renderMorePanel() {
   const screen = document.querySelector('[data-screen-panel="more"]');
   const panel = screen?.querySelector(".settings-panel");
@@ -4662,6 +4863,15 @@ function renderMorePanel() {
     ? dataState.source || officialInfo?.description || "TWSE MIS + official daily close fallback"
     : brokerInfo?.description || "券商 API 抽象介面已預留";
   const alertStatus = signalCount ? `${signalCount} 檔訊號` : "尚未產生";
+  const notificationPermission = priceAlertNotificationPermission();
+  const notificationLabel = {
+    granted: "已開啟",
+    denied: "已被瀏覽器封鎖",
+    unsupported: "此瀏覽器不支援",
+    default: "尚未開啟",
+  }[notificationPermission] || "尚未開啟";
+  const notificationTone = notificationPermission === "granted" ? "is-good" : notificationPermission === "denied" ? "is-warn" : "";
+  const versionSummary = appVersionSummary();
   const activePanel = state.morePanel || "source";
   const items = [
     {
@@ -4720,6 +4930,13 @@ function renderMorePanel() {
       desc: "本機提示，不是手機推播",
       status: alertStatus,
     },
+    {
+      key: "version",
+      icon: "git-branch",
+      title: "版本與更新",
+      desc: "確認三台機器跑同一份 code",
+      status: versionSummary.badge,
+    },
   ];
 
   summary.innerHTML = `
@@ -4777,7 +4994,8 @@ function renderMorePanel() {
         <span class="more-kicker">提醒中心</span>
         <h2>訊號提醒</h2>
       </header>
-      <p><strong>到價提醒</strong>：在個股明細的價格下方設定「漲到／跌到某價」。頁面開著時每 10 秒對照現價，一觸價就跳畫面提示＋音效（觸發一次即停，不重複吵）。沒有背景監控與手機推播——頁面關了就收不到。</p>
+      <p><strong>到價提醒</strong>：在個股明細的價格下方設定「漲到／跌到某價」。分頁在前景時每 10 秒對照現價，一觸價就跳畫面提示＋音效（觸發一次即停，不重複吵）。</p>
+      <p>分頁切走或視窗最小化時改走背景監看：只抓有提醒的那幾檔、盤中最快 30 秒一輪（瀏覽器對隱藏分頁還會再節流），到價時發桌面通知。<strong>瀏覽器整個關掉就收不到</strong>——這個 App 沒有伺服器推播。</p>
       ${priceAlertsState.alerts.length
         ? `<div class="alert-manage">${priceAlertsState.alerts
             .map((alert) => {
@@ -4794,8 +5012,30 @@ function renderMorePanel() {
       <dl>
         <div><dt>隔日沖訊號</dt><dd>${signalCount ? `${signalCount} 檔` : "尚未產生"}</dd></div>
         <div><dt>到價提醒</dt><dd>${priceAlertsState.alerts.filter((alert) => alert.active).length} 筆等待中</dd></div>
-        <div><dt>推播</dt><dd>尚未接入（要等部署上線）</dd></div>
+        <div><dt>桌面通知</dt><dd class="${notificationTone}">${escapeHtml(notificationLabel)}</dd></div>
       </dl>
+      ${notificationPermission === "default"
+        ? `<button class="more-primary" data-action="enable-alert-notifications" type="button">開啟桌面通知</button>`
+        : ""}
+      ${notificationPermission === "denied"
+        ? `<p class="more-note">瀏覽器已封鎖這個網站的通知權限，App 這邊無法自己打開；要恢復請到瀏覽器網址列左側的鎖頭圖示 → 網站設定 → 通知，改成「允許」。</p>`
+        : ""}
+    `,
+    version: `
+      <header>
+        <span class="more-kicker">這台機器</span>
+        <h2>版本與更新</h2>
+      </header>
+      <p>三個人各自 <code>git pull</code>、各自 <code>npm start</code>，畫面對不上時第一件事是確認彼此跑的是不是同一份 code。下面的 commit 就是這台伺服器實際載入的版本。</p>
+      <dl>
+        <div><dt>版本號</dt><dd>${escapeHtml(appVersionState.version || "—")}</dd></div>
+        <div><dt>本機 commit</dt><dd>${escapeHtml(versionSummary.stamp)}</dd></div>
+        <div><dt>更新狀態</dt><dd class="${versionSummary.tone}">${escapeHtml(versionSummary.badge)}</dd></div>
+      </dl>
+      ${versionSummary.headline ? `<p>${escapeHtml(versionSummary.headline)}</p>` : ""}
+      ${versionSummary.hint ? `<p>${escapeHtml(versionSummary.hint)}</p>` : ""}
+      <p class="more-note">上游：${escapeHtml(appVersionState.build?.repo || "沒有 GitHub origin，無法比對")}。更新檢查每 6 小時最多向 GitHub 問一次比對結果，除此之外不送出任何資料；要完全關掉就在 .env 設 <code>UPDATE_CHECK=off</code> 再重啟伺服器。</p>
+      <button class="more-primary" data-action="refresh-app-version" type="button"${appVersionState.loading ? " disabled" : ""}>${appVersionState.loading ? "查詢中…" : "重新檢查"}</button>
     `,
     risk: `
       <header>
@@ -6981,6 +7221,18 @@ function drawDetailHistoryChart(context, stock, candles, width, height) {
   });
 }
 
+// CSS 規範：`border-style` 是 none／hidden 時，used border-width 一律為 0——瀏覽器的
+// getComputedStyle 早就回 0px，所以在真實環境這個函式等同於直接讀 borderWidth。
+// 之所以要自己再判一次，是因為這條規則我們一直「借環境幫忙算」，而環境不一定照做：
+// jsdom 30 對沒有邊框的 canvas 仍回 `borderLeftWidth:"16px"`（borderLeftStyle 是 "none"），
+// 四邊扣下去技術圖與 zoom 圖會憑空少 32px。
+// 拿不到 border-style 時寧可不扣：扣錯會把整張畫布縮小，不扣最多差幾 px。
+function usedBorderWidth(style, side) {
+  const lineStyle = String(style[`border${side}Style`] || "");
+  if (!lineStyle || lineStyle === "none" || lineStyle === "hidden") return 0;
+  return parseFloat(style[`border${side}Width`]) || 0;
+}
+
 // Canvas 一律以「實際可見的 CSS content box」配置 backing store。
 // 隱藏頁面的 rect 會是 0；此時不可退回 canvas.width（那是 device px），否則高 DPR 下
 // 每重畫一次都會再乘一次 DPR，造成 backing store 指數膨脹。
@@ -6992,8 +7244,8 @@ function prepareCanvas(canvas) {
   if (canvas.nodeType === 1 && width > 0 && height > 0) {
     const style = window.getComputedStyle?.(canvas);
     if (style) {
-      width -= (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.borderRightWidth) || 0);
-      height -= (parseFloat(style.borderTopWidth) || 0) + (parseFloat(style.borderBottomWidth) || 0);
+      width -= usedBorderWidth(style, "Left") + usedBorderWidth(style, "Right");
+      height -= usedBorderWidth(style, "Top") + usedBorderWidth(style, "Bottom");
     }
   }
   if (width <= 1 || height <= 1) return null;
@@ -11111,12 +11363,23 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const moreAction = event.target.closest('[data-action="refresh-data"], [data-action="open-filter"], [data-action="test-broker"], [data-action="delete-broker"], [data-action="reload-users"], [data-action="logout"], [data-action="toggle-surveillance"]');
+  const moreAction = event.target.closest('[data-action="refresh-data"], [data-action="refresh-app-version"], [data-action="enable-alert-notifications"], [data-action="open-filter"], [data-action="test-broker"], [data-action="delete-broker"], [data-action="reload-users"], [data-action="logout"], [data-action="toggle-surveillance"]');
   if (moreAction) {
     if (moreAction.dataset.action === "refresh-data") {
       loadMarketSummary({ notify: true });
       loadMarketData({ notify: true });
       loadOvernightSignals({ notify: true });
+    }
+    if (moreAction.dataset.action === "enable-alert-notifications") {
+      moreAction.blur();
+      void requestPriceAlertNotifications().then(() => render());
+    }
+    if (moreAction.dataset.action === "refresh-app-version") {
+      // 伺服器端有 6 小時快取，這裡按下去多半拿到同一份結果——刻意不做前端強制重查，
+      // 免得變成對 GitHub 的手動洪水閘門。
+      moreAction.blur();
+      loadAppVersion({ force: true });
+      render();
     }
     if (moreAction.dataset.action === "toggle-surveillance") {
       setShowSurveillance(!state.showSurveillance);
@@ -11222,6 +11485,11 @@ document.addEventListener("click", async (event) => {
       return;
     }
     state.morePanel = settingName;
+    if (settingName === "version") {
+      loadAppVersion();
+      render();
+      return;
+    }
     if (settingName === "backup" && !authState.user) {
       setLoginGateVisible(true, "登入後才能備份或復原個人資料");
       render();
@@ -11701,7 +11969,11 @@ async function refreshLiveData() {
   }
 }
 
-window.setInterval(refreshLiveData, 10 * 1000);
+// 兩條路互斥：refreshLiveData 只在前景跑，refreshBackgroundPriceAlerts 只在背景跑。
+window.setInterval(() => {
+  void refreshLiveData();
+  void refreshBackgroundPriceAlerts();
+}, 10 * 1000);
 
 document.addEventListener("visibilitychange", () => {
   // 瀏覽器回到前景時立即補一次；in-flight guard 會合併和 10 秒 timer 撞在一起的情況。

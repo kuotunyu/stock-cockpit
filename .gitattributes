@@ -1,4 +1,6 @@
 * text=auto eol=lf
+# cmd.exe 對只有 LF 的批次檔會誤剖 label 與多行區塊，這個檔必須是 CRLF。
+*.bat text eol=crlf
 *.woff2 binary
 *.png binary
 *.gif binary

@@ -1,6 +1,6 @@
 # Stock1 測試套件
 
-零框架：Node 內建 `node --test`（Node ≥ 20；本專案用 Node 24）＋ `jsdom`（唯一 devDependency，前端用）。
+零框架：Node 內建 `node --test`＋ `jsdom`（唯一 devDependency，前端用）。**跑測試需要 Node ≥ 22.22.2 或 ≥ 24.15**（jsdom 30 的 engines 比 app 本身嚴格；本專案用 Node 24）。
 
 ## 怎麼跑
 

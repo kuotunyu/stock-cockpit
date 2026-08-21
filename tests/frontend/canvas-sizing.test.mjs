@@ -332,3 +332,78 @@ test("ResizeObserver 與 window resize 在同一 frame 合併為每種可見圖�
     app.cleanup();
   }
 });
+
+// prepareCanvas 從 rect（border box）扣掉邊框換算 content box，但「沒有邊框」這件事
+// 一直是靠環境回 0px 幫我們算的：CSS 規範說 border-style: none 時 used border-width 為 0，
+// 瀏覽器照做，jsdom 30 沒有（borderStyle "none" 但 borderWidth 回 "16px"）→ 圖表四邊憑空
+// 少 32px。這兩個案例把規則本身釘在產品碼裡，不再依賴 getComputedStyle 的實作品質。
+test("border-style: none 不扣邊框寬度，即使 getComputedStyle 回了非 0 的 borderWidth", async () => {
+  const app = await createAppWindow({ beforeApp: setDpr2 });
+  try {
+    seedTechnicalData(app);
+    const result = JSON.parse(app.evalIn(`JSON.stringify((() => {
+      const canvas = document.getElementById("technicalChart");
+      window.__instrumentDomCanvas(canvas, 320, 180);
+      canvas.style.borderStyle = "none";
+      canvas.style.borderWidth = "16px";
+      const computed = window.getComputedStyle(canvas);
+      const prepared = prepareCanvas(canvas);
+      return {
+        computedStyle: computed.borderLeftStyle,
+        computedWidth: computed.borderLeftWidth,
+        width: prepared.width,
+        height: prepared.height,
+        pixelWidth: prepared.pixelWidth,
+        pixelHeight: prepared.pixelHeight,
+      };
+    })())`));
+
+    assert.equal(result.computedStyle, "none", "前提：這個 canvas 沒有可見邊框");
+    assert.deepEqual(
+      { width: result.width, height: result.height },
+      { width: 320, height: 180 },
+      `borderWidth 回報 ${result.computedWidth} 也不該被扣掉`,
+    );
+    assert.deepEqual(
+      { pixelWidth: result.pixelWidth, pixelHeight: result.pixelHeight },
+      { pixelWidth: 640, pixelHeight: 360 },
+    );
+  } finally {
+    app.cleanup();
+  }
+});
+
+test("真的有邊框時仍從 border box 扣回 content box", async () => {
+  const app = await createAppWindow({ beforeApp: setDpr2 });
+  try {
+    seedTechnicalData(app);
+    const result = JSON.parse(app.evalIn(`JSON.stringify((() => {
+      const canvas = document.getElementById("technicalChart");
+      window.__instrumentDomCanvas(canvas, 320, 180);
+      canvas.style.borderStyle = "solid";
+      canvas.style.borderWidth = "4px";
+      const computed = window.getComputedStyle(canvas);
+      const prepared = prepareCanvas(canvas);
+      return {
+        computedStyle: computed.borderLeftStyle,
+        width: prepared.width,
+        height: prepared.height,
+        pixelWidth: prepared.pixelWidth,
+        pixelHeight: prepared.pixelHeight,
+      };
+    })())`));
+
+    assert.equal(result.computedStyle, "solid", "前提：這個 canvas 真的有邊框");
+    assert.deepEqual(
+      { width: result.width, height: result.height },
+      { width: 312, height: 172 },
+      "四邊各 4px 要扣掉",
+    );
+    assert.deepEqual(
+      { pixelWidth: result.pixelWidth, pixelHeight: result.pixelHeight },
+      { pixelWidth: 624, pixelHeight: 344 },
+    );
+  } finally {
+    app.cleanup();
+  }
+});

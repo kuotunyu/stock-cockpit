@@ -4175,6 +4175,22 @@ button.today-focus-card:focus-visible {
   white-space: nowrap;
 }
 
+/* 版本與更新的狀態色沿用更多頁既有語意：綠＝沒事、橘＝要處理。
+   刻意不用紅——紅在台股語彙是「漲」，拿來當警示會誤讀。 */
+.more-detail dd.is-good {
+  color: var(--green);
+}
+
+.more-detail dd.is-warn {
+  color: var(--orange);
+}
+
+/* 次要說明（隱私揭露、操作提示）：備註級字級，仍在 --fs-note 下限之上。 */
+.more-detail p.more-note {
+  color: var(--muted-2);
+  font-size: var(--fs-note);
+}
+
 .api-provider-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -3,6 +3,9 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bootServer } from "../helpers/test-server.mjs";
 import {
   compactToday, surveillanceRoutes, fundamentalsRoutes, stockDayAllRow, tpexDailyCloseRow,
@@ -165,11 +168,56 @@ test("market-session：免登入、日曆來源失敗仍固定 200；錯誤 meth
   assert.equal(wrongMethod.status, 405);
 });
 
+test("app-version：免登入；GitHub 連不到只降級成 unavailable，不得變成錯誤", async () => {
+  // 這支測試整個是離線的（fetch-mock 對未接路由直接 throw），所以它同時就是
+  // 「GitHub 掛掉／沒網路」的情境：更新檢查失敗絕不能讓端點回非 200，
+  // 更不能讓使用者在看盤畫面上看到一個跟行情無關的紅字。
+  const marketCallsBefore = srv.mock.callsFor(/twse|tpex|taifex|yahoo/i).length;
+  const response = await srv.raw("/api/app-version"); // 不帶 cookie ＝ 未登入
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(typeof body.version, "string");
+  assert.ok(body.version.length > 0, "版本號不可是空字串");
+  assert.equal(typeof body.build.available, "boolean");
+  if (body.build.available) {
+    assert.match(body.build.commit, /^[0-9a-f]{7}$/, "顯示用短碼固定 7 碼");
+  } else {
+    assert.equal(body.build.commit, "");
+  }
+  assert.ok(
+    ["unavailable", "disabled"].includes(body.update.state),
+    `離線時只能是 unavailable／disabled，實際拿到 ${body.update.state}`,
+  );
+  assert.ok(body.update.reason, "降級要說得出原因");
+  if (body.build.available && body.build.repo) {
+    // 有 .git＋GitHub origin 時要真的去問過（否則這條路線等於沒接上）；
+    // 問的對象只能是 GitHub 的 compare API，且必須帶上本機 commit 當 base。
+    const githubCalls = srv.mock.callsFor(/api\.github\.com/);
+    assert.equal(githubCalls.length, 1, "同一輪只該問一次 GitHub");
+    assert.match(githubCalls[0].url, /\/compare\/[0-9a-f]{40}\.\.\./);
+  }
+  // health 也要看得到同一份 build（curl 一下就能對版本，不必開瀏覽器），但它是探針，
+  // 不可以因此打任何上游。
+  const healthGithubBefore = srv.mock.callsFor(/api\.github\.com/).length;
+  const health = await srv.raw("/api/health");
+  assert.equal(health.status, 200);
+  const healthBody = await health.json();
+  assert.equal(healthBody.build.commit, body.build.commit);
+  assert.equal(srv.mock.callsFor(/api\.github\.com/).length, healthGithubBefore, "探針不得觸發更新檢查");
+  assert.equal(
+    srv.mock.callsFor(/twse|tpex|taifex|yahoo/i).length,
+    marketCallsBefore,
+    "版本端點與探針都不得觸發行情類上游",
+  );
+});
+
 test("純讀 API：非 GET 必須在任何上游或重型計算前回 405", async () => {
   const paths = [
     "/api/markets",
     "/api/auth/me",
     "/api/sources",
+    "/api/app-version",
     "/api/overnight",
     "/api/backtest/overnight",
   ];
@@ -638,4 +686,70 @@ test("靜態檔：app shell 有安全標頭且只公開 allowlist，後端源碼
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
   assert.equal((await srv.raw("/app.js", { method: "POST" })).status, 405);
+});
+
+test("靜態檔：ETag 讓沒變的資產回 304、文字類走 gzip、字型不重複壓縮", async () => {
+  // app shell 每次載入約 1.2MB，而且 cache-control 是 no-cache（每次都要回來問）。
+  // 「問」不該等於「整包重傳」——這條釘住 ETag／304 與 gzip 都真的生效，
+  // 也釘住已經是壓縮格式的 woff2 不要再被壓一次（純浪費 CPU）。
+  const first = await srv.raw("/app.js");
+  assert.equal(first.status, 200);
+  const etag = first.headers.get("etag");
+  assert.ok(etag, "靜態資產要有 ETag，否則沒有東西可以拿來比對");
+  assert.equal(first.headers.get("vary"), "accept-encoding");
+  assert.equal(first.headers.get("cache-control"), "no-cache");
+  const body = await first.text();
+  assert.ok(body.includes("function prepareCanvas"), "拿到的要是真的 app.js");
+
+  const revalidated = await srv.raw("/app.js", { headers: { "if-none-match": etag } });
+  assert.equal(revalidated.status, 304, "內容沒變就該回 304");
+  assert.equal(await revalidated.text(), "", "304 不得帶 body");
+  assert.ok(revalidated.headers.get("content-security-policy"), "304 也要維持安全標頭");
+
+  // 弱驗證器前綴（部分 proxy 會加上 W/）與多值 If-None-Match 都要能命中。
+  const weak = await srv.raw("/app.js", { headers: { "if-none-match": `W/${etag}` } });
+  assert.equal(weak.status, 304);
+  await weak.text();
+  const multi = await srv.raw("/app.js", { headers: { "if-none-match": `"other", ${etag}` } });
+  assert.equal(multi.status, 304);
+  await multi.text();
+
+  const stale = await srv.raw("/app.js", { headers: { "if-none-match": '"not-the-current-one"' } });
+  assert.equal(stale.status, 200, "對不上就要回完整內容");
+  assert.ok((await stale.text()).length > 0);
+
+  // 壓縮：實際傳輸量必須明顯小於原始大小（fetch 會自動解壓，所以量 content-length）。
+  const compressed = await srv.raw("/app.js", { headers: { "accept-encoding": "gzip" } });
+  assert.equal(compressed.status, 200);
+  const compressedLength = Number(compressed.headers.get("content-length"));
+  const rawLength = Buffer.byteLength(await compressed.text());
+  assert.ok(compressedLength > 0 && compressedLength < rawLength / 2, `gzip 後應該明顯變小（${compressedLength} vs ${rawLength}）`);
+
+  const identity = await srv.raw("/app.js", { headers: { "accept-encoding": "identity" } });
+  assert.equal(identity.headers.get("content-encoding"), null, "沒說接受 gzip 就不可以壓");
+  assert.equal(Number(identity.headers.get("content-length")), rawLength);
+  await identity.text();
+
+  const font = await srv.raw("/fonts/IBMPlexMono-Medium-Latin1.woff2", { headers: { "accept-encoding": "gzip" } });
+  assert.equal(font.status, 200);
+  assert.equal(font.headers.get("content-encoding"), null, "woff2 本身就是壓縮格式，不該再壓一次");
+  await font.arrayBuffer();
+});
+
+test("靜態快取：檔案換了就必須換 ETag（改完 app.js 重整要看到新版）", async () => {
+  // 記憶體快取的風險是「使用者改了檔案，伺服器還在吐舊的」。
+  // 這條用臨時檔直接驗 loadStaticAsset 的失效條件，不去動 repo 裡的真實資產。
+  const dir = await mkdtemp(join(tmpdir(), "stock1-static-"));
+  const file = join(dir, "probe.js");
+  await writeFile(file, `console.log("${"a".repeat(2000)}");`, "utf8");
+  const first = await srv.mod.loadStaticAsset(file);
+  const again = await srv.mod.loadStaticAsset(file);
+  assert.equal(again, first, "沒變動時應該直接命中快取（同一個物件）");
+  assert.ok(first.gzip, "夠大的 JS 要預先壓好");
+  assert.ok(first.gzip.length < first.raw.length);
+
+  await writeFile(file, `console.log("${"b".repeat(2100)}");`, "utf8");
+  const changed = await srv.mod.loadStaticAsset(file);
+  assert.notEqual(changed.etag, first.etag, "內容變了 ETag 就必須跟著變");
+  assert.ok(changed.raw.includes("b".repeat(20)), "要吐新內容，不是快取裡的舊的");
 });

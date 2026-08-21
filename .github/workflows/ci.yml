@@ -14,11 +14,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json 的 engines 與 README 都宣稱支援 20.19+／22+／24+ 三條線，
-        # matrix 原本只測前兩個——24.x 從未被驗證過，而恰好是本機的預設版本。
-        # 這次修的 fetch-timeout bug 只在 20.x／22.x 出現、24.x 完全正常，
-        # 反過來也可能有只在 24.x 出現的問題被本機開發蓋掉，CI 卻測不到。
-        node-version: ["20.x", "22.x", "24.x"]
+        # matrix 要跟 package.json 的 engines 逐字對齊——宣稱支援卻沒測的版本，
+        # 等於沒有支援（2026-08 的 fetch-timeout bug 只在 20.x／22.x 出現、24.x 完全正常，
+        # 反過來也可能有只在 24.x 出現的問題被本機開發蓋掉）。
+        #
+        # 20.x 已於 2026-04-30 EOL（不再收安全更新），2026-08-21 一併從 engines 與這裡移除。
+        # 觸發點是 jsdom 30 的 engines 是 ^22.22.2 || ^24.15.0 || >=26.0.0，Node 20 已經
+        # 裝不動測試用的 jsdom；與其把 devDependency 釘在有 undici advisory 的舊版來遷就
+        # 一個沒有安全更新的 runtime，不如跟著上游走。
+        node-version: ["22.x", "24.x"]
 
     steps:
       # v4 的 action 本體跑在 Node 20 runtime 上，已被 GitHub 標為 deprecated、目前是被

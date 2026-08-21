@@ -1,7 +1,7 @@
 # stock-cockpit
 
 [![CI](https://github.com/kuotunyu/stock-cockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/kuotunyu/stock-cockpit/actions/workflows/ci.yml)
-![Node.js 20.19/22.13/24+](https://img.shields.io/badge/Node.js-20.19%20%7C%2022.13%20%7C%2024%2B-339933?logo=nodedotjs&logoColor=white)
+![Node.js 22.13/24 LTS](https://img.shields.io/badge/Node.js-22.13%20%7C%2024%20LTS-339933?logo=nodedotjs&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/Runtime%20Deps-1-purple)
 ![PWA](https://img.shields.io/badge/PWA-Offline%20Shell-orange)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -124,7 +124,7 @@ sequenceDiagram
 
 | 模組分類 | 主要 API 端點 | 功能說明 |
 |---|---|---|
-| **服務健康** | `GET /api/health` | 系統狀態、上游資料品質警告與數據源連線稽核 |
+| **服務健康** | `GET /api/health`、`GET /api/app-version` | 系統狀態、上游資料品質警告與數據源連線稽核；本機 build commit 與 GitHub 更新比對 |
 | **身分驗證** | `/api/auth/*`、`/api/admin/users` | 管理者帳號登入、Session 管理與權限控制 |
 | **行情與大盤** | `/api/quotes`、`/api/markets`、`/api/technical-analysis` | 即時大盤、三大法人、融資融券與技術分析 K 線 |
 | **選股引擎** | `/api/overnight*`、`/api/swing*` | 隔日沖、波段選股訊號與每日歷史前向驗證成績單 |
@@ -135,40 +135,73 @@ sequenceDiagram
 
 ## 快速開始
 
-需求：Node.js 20.19+、22+ 或 24+。
+需求：Node.js 22.13+ 或 24+，**建議 Node 24 LTS**（Node 20 已於 2026-04-30 EOL，不再提供安全更新）。
 
 ### 1. 本地啟動
 
 ```powershell
-# 安裝依賴 (僅 1 項執行期依賴)
+git clone https://github.com/kuotunyu/stock-cockpit.git
+cd stock-cockpit
 npm install
-
-# 啟動本機伺服器 (開啟 http://127.0.0.1:5174)
 npm start
 ```
 
-### 2. 執行自動化測試
+啟動後開 <http://127.0.0.1:5174>。Windows 也可以直接雙擊專案根目錄的 **`start.bat`**（會自動補跑 `npm install` 並開好瀏覽器），把它「傳送到 → 桌面（建立捷徑）」就不用每次開終端機。
+
+**第一次啟動的預設帳號是 `admin` / `admin1234`**（只在資料庫是空的時候種下去）。登入後請到「更多 → 帳號管理」改掉；沒改的話畫面上會一直有提示。只在自己這台電腦上用（預設綁 `127.0.0.1`，外面連不進來）不改也不會有事，但一旦要對外開放就必須先改。
+
+### 2. 更新到最新版
 
 ```powershell
-# 執行離線單元測試套件 (無需網路連接)
-npm test
+git pull
+npm install
+```
 
-# 執行真實上游 API 形狀對齊測試 (選用)
+改到後端（`server.mjs`）必須**重新啟動伺服器**（Node 不會熱載）；只改前端的話瀏覽器 **Ctrl+F5** 一次即可。不確定自己是不是舊版，就到「更多 → 版本與更新」看——那裡會顯示這台跑的 commit，並跟 GitHub 上的最新版比對。
+
+### 3. 從手機／平板看盤（同一個 Wi-Fi）
+
+先在 `.env` 設好強度足夠的密碼與密鑰（對外開放時伺服器會強制檢查，沒設就拒絕啟動），再用 LAN 模式啟動：
+
+```powershell
+copy .env.example .env
+npm run secret
+npm run start:lan
+```
+
+`npm run secret` 會印一組隨機字串，貼到 `.env` 的 `APP_SECRET=` 後面；`ADMIN_PASSWORD` 也用同樣方式產生（至少 12 字元）。`npm run start:lan` 啟動後會把手機該輸入的網址印出來。第一次啟動時 Windows 防火牆會跳提示，要選「允許存取」。
+
+> PWA 的「加到主畫面」需要 HTTPS（`localhost` 例外），所以純 http 的區域網路位址只能用瀏覽器開。想要完整 PWA 體驗得自備憑證或走 Tailscale 之類的方案。
+
+### 4. 執行自動化測試
+
+```powershell
+npm test
+```
+
+```powershell
 npm run test:live
 ```
+
+`npm test` 是全離線的（上游全部 mock）；`test:live` 會真的打 TWSE／TPEx，用來偵測官方 API 改版，屬選用。
 
 ---
 
 ## 環境變數說明
 
+把 `.env.example` 複製成 `.env` 即可，`npm start` 與 `start.bat` 都會自動載入（沒有這個檔就沿用預設值，終端機會印一行 `.env not found`，屬正常）。
+
 ```text
 NODE_ENV=production
 HOST=0.0.0.0
 PORT=5174
-APP_SECRET=長且隨機之加密密鑰 (用於券商憑證與 API 設定加密)
+APP_SECRET=長且隨機之加密密鑰 (用於券商憑證與 API 設定加密，至少 32 字元)
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=強密碼
+ADMIN_PASSWORD=強密碼 (至少 12 字元)
 PUBLIC_ORIGIN=https://你的正式網域
 COOKIE_SECURE=true
 DATA_DIR=/var/app/data
+UPDATE_CHECK=on   # 設 off 可關閉「跟 GitHub 比對版本」的對外查詢
 ```
+
+只在自己電腦上跑（綁 `127.0.0.1`）時這些全部可以留空；**一旦綁到非 loopback 位址或設了 `PUBLIC_ORIGIN`，`ADMIN_PASSWORD` 與 `APP_SECRET` 就是啟動的硬性條件**，不足時伺服器會直接拒絕啟動而不是降級執行。

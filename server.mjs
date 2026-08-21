@@ -1,10 +1,11 @@
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
-import { constants as fsConstants, existsSync } from "node:fs";
+import { constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import {
   createCipheriv,
   createDecipheriv,
@@ -3656,6 +3657,178 @@ async function loadWithLastGood(state, { ttlMs, retryMs, load }) {
     state.inFlight = null;
   });
   return state.inFlight;
+}
+
+// ===== 版本與更新檢查 =====
+// 三個人各自 git pull、各自 npm start，出事時第一個要問的是「你那份是哪一版」。
+// package.json 的 version 幾乎不會動，真正能辨識一份 code 的是 commit——所以直接讀 .git。
+// 刻意不 spawn `git rev-parse`：啟動路徑不該多一個外部程序，而且拿 zip 解壓來跑的機器
+// 不一定有 git CLI。讀不到就誠實回 available:false，不要編一個看起來像版本號的東西。
+const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const GIT_REF_PATTERN = /^refs\/[A-Za-z0-9._\-/]+$/;
+const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
+const UPDATE_CHECK_RETRY_MS = 30 * 60 * 1000;
+// 對外查 GitHub 是唯一會離開本機的「非行情」請求，給一個明確的關閉開關。
+const updateCheckDisabled = ["off", "0", "false", "no"].includes(
+  String(process.env.UPDATE_CHECK || "").trim().toLowerCase(),
+);
+let appBuildCache = null;
+let updateCheckCache = { value: null, expiresAt: 0, retryAt: 0, lastError: "", inFlight: null };
+
+function resolveGitDir() {
+  const candidate = join(root, ".git");
+  let stats;
+  try {
+    stats = statSync(candidate);
+  } catch {
+    return "";
+  }
+  if (stats.isDirectory()) return candidate;
+  if (!stats.isFile()) return "";
+  // worktree／submodule 的 .git 是一個寫著 `gitdir: <path>` 的檔案。
+  try {
+    const pointer = readFileSync(candidate, "utf8").trim();
+    if (!pointer.startsWith("gitdir:")) return "";
+    const target = pointer.slice("gitdir:".length).trim();
+    if (!target) return "";
+    return isAbsolute(target) ? target : resolve(root, target);
+  } catch {
+    return "";
+  }
+}
+
+function readPackedRef(gitDir, ref) {
+  // 剛 clone 完的 repo，refs/heads/main 常常只存在 packed-refs 裡，沒有獨立檔案。
+  try {
+    const packed = readFileSync(join(gitDir, "packed-refs"), "utf8");
+    for (const line of packed.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("^")) continue;
+      const [sha, name] = trimmed.split(/\s+/);
+      if (name === ref && GIT_SHA_PATTERN.test(String(sha))) return sha;
+    }
+  } catch {
+    // 沒有 packed-refs 是正常狀態，不是錯誤。
+  }
+  return "";
+}
+
+function readGitHubRepo(gitDir) {
+  // 只認 github.com 的 origin：沒有可比對的上游就不做更新檢查，也不猜其他 host 的 API 形狀。
+  let config = "";
+  try {
+    config = readFileSync(join(gitDir, "config"), "utf8");
+  } catch {
+    return null;
+  }
+  let inOrigin = false;
+  let url = "";
+  for (const line of config.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) {
+      inOrigin = /^\[remote\s+"origin"\]$/.test(trimmed);
+      continue;
+    }
+    if (!inOrigin) continue;
+    const match = /^url\s*=\s*(.+)$/.exec(trimmed);
+    if (match) {
+      url = match[1].trim();
+      break;
+    }
+  }
+  if (!url) return null;
+  const parsed = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^/]+)\/(.+?)(?:\.git)?$/.exec(url);
+  if (!parsed) return null;
+  return { owner: parsed[1], repo: parsed[2] };
+}
+
+function readAppBuildInfo() {
+  const gitDir = resolveGitDir();
+  const empty = { available: false, commit: "", shortCommit: "", branch: "", repo: null };
+  if (!gitDir) return empty;
+  let head = "";
+  try {
+    head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+  } catch {
+    return empty;
+  }
+  const repo = readGitHubRepo(gitDir);
+  if (GIT_SHA_PATTERN.test(head)) {
+    // detached HEAD：有 commit 但沒有分支名。
+    return { available: true, commit: head, shortCommit: head.slice(0, 7), branch: "", repo };
+  }
+  if (!head.startsWith("ref:")) return { ...empty, repo };
+  const ref = head.slice(4).trim();
+  if (!GIT_REF_PATTERN.test(ref) || ref.includes("..")) return { ...empty, repo };
+  const branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : "";
+  let commit = "";
+  try {
+    commit = readFileSync(join(gitDir, ref), "utf8").trim();
+  } catch {
+    commit = readPackedRef(gitDir, ref);
+  }
+  if (!GIT_SHA_PATTERN.test(commit)) return { ...empty, branch, repo };
+  return { available: true, commit, shortCommit: commit.slice(0, 7), branch, repo };
+}
+
+function getAppBuild() {
+  if (!appBuildCache) appBuildCache = readAppBuildInfo();
+  return appBuildCache;
+}
+
+// GitHub 的 compare 是 `base...head`，回傳的 status／ahead_by 描述的是 **head 相對於 base**。
+// 我們把 base 設成本機 commit、head 設成上游分支，所以 status="ahead" 代表「上游比我新」，
+// ahead_by 就是本機落後的 commit 數（2026-08-21 對真實 API 實測確認過語意）。
+function normalizeUpdateComparison(payload, build) {
+  const status = String(payload?.status || "");
+  const aheadBy = Number(payload?.ahead_by);
+  const behindBy = Number(payload?.behind_by);
+  if (status === "identical") return { state: "current", behindBy: 0, localAhead: 0 };
+  if (status === "ahead") {
+    return { state: "behind", behindBy: Number.isFinite(aheadBy) ? aheadBy : 0, localAhead: 0 };
+  }
+  if (status === "behind") {
+    // 本機比上游新：自己還沒 push 的 commit，不該說成「有新版」。
+    return { state: "ahead", behindBy: 0, localAhead: Number.isFinite(behindBy) ? behindBy : 0 };
+  }
+  if (status === "diverged") {
+    return {
+      state: "diverged",
+      behindBy: Number.isFinite(aheadBy) ? aheadBy : 0,
+      localAhead: Number.isFinite(behindBy) ? behindBy : 0,
+    };
+  }
+  return { state: "unknown", behindBy: 0, localAhead: 0, note: build.branch ? "" : "detached HEAD" };
+}
+
+async function getUpdateStatus() {
+  const build = getAppBuild();
+  if (updateCheckDisabled) return { state: "disabled", reason: "UPDATE_CHECK=off" };
+  if (!build.available || !build.repo) {
+    return { state: "unavailable", reason: build.repo ? "讀不到本機 commit" : "沒有 GitHub origin" };
+  }
+  const branch = build.branch || "HEAD";
+  const result = await loadWithLastGood(updateCheckCache, {
+    ttlMs: UPDATE_CHECK_TTL_MS,
+    retryMs: UPDATE_CHECK_RETRY_MS,
+    load: async () => {
+      const url = `https://api.github.com/repos/${encodeURIComponent(build.repo.owner)}/${encodeURIComponent(build.repo.repo)}`
+        + `/compare/${encodeURIComponent(build.commit)}...${encodeURIComponent(branch)}`;
+      const payload = await fetchJson(url, {
+        timeoutMs: 8000,
+        headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" },
+      });
+      return {
+        ...normalizeUpdateComparison(payload, build),
+        comparedCommit: build.shortCommit,
+        latestCommit: String(payload?.commits?.at?.(-1)?.sha || "").slice(0, 7),
+        checkedAt: new Date().toISOString(),
+      };
+    },
+  });
+  if (result.value) return { ...result.value, freshness: result.status };
+  // 本機 commit 還沒推上去時 compare 會 404——那不是故障，是「上游沒有這個起點可比」。
+  return { state: "unavailable", reason: result.error || "無法連線 GitHub" };
 }
 
 async function loadCompanyDirectoryMarket(marketKey) {
@@ -11067,6 +11240,7 @@ async function inspectSwingStock(rawCode) {
 
 const getOnlyApiPaths = new Set([
   "/api/health",
+  "/api/app-version",
   "/api/auth/me",
   "/api/personal-data/export",
   "/api/symbols",
@@ -11096,10 +11270,32 @@ async function handleApi(request, requestUrl, response) {
       ok: ready,
       status: lifecycleStatus,
       version: appVersion,
+      // build 只讀本機 .git（有快取、不打網路），符合「探針不得觸發昂貴上游」。
+      // 要比對上游有沒有新版請走 /api/app-version。
+      build: { commit: getAppBuild().shortCommit, branch: getAppBuild().branch },
       startedAt: serverStartedAt || null,
       uptimeSeconds: Number.isFinite(startedAtMs) ? Math.max(0, Math.floor((now - startedAtMs) / 1000)) : 0,
       generatedAt: new Date(now).toISOString(),
       persistence: { pendingWrites: pendingPersistenceCount() },
+    });
+    return true;
+  }
+  if (requestUrl.pathname === "/api/app-version") {
+    // 唯讀、免登入（比照其他唯讀端點）。更新檢查失敗一律降級成 state:"unavailable"，
+    // 不讓「查不到 GitHub」變成使用者看得到的錯誤——它不影響任何看盤功能。
+    const build = getAppBuild();
+    const update = await getUpdateStatus();
+    jsonResponse(response, 200, {
+      ok: true,
+      version: appVersion,
+      build: {
+        available: build.available,
+        commit: build.shortCommit,
+        branch: build.branch,
+        repo: build.repo ? `${build.repo.owner}/${build.repo.repo}` : "",
+      },
+      update,
+      generatedAt: new Date().toISOString(),
     });
     return true;
   }
@@ -12151,6 +12347,42 @@ async function handleApi(request, requestUrl, response) {
   return false;
 }
 
+// app shell 每次載入是 app.js 560KiB＋lucide 402KiB＋styles 200KiB＋html 45KiB ≈ 1.18MiB，
+// 而原本每個 request 都重新 readFile 再原封不動吐出去。localhost 感覺不出來，
+// 但「手機連家裡電腦看盤」時這 1.18MiB 是真的要走 Wi-Fi 的（壓縮後實測 314KiB，26%）。
+// 這裡做兩件事，都不改變 `cache-control: no-cache` 的語意（仍然每次都回伺服器問）：
+//   ① ETag：內容沒變就回 304，省掉整包傳輸（no-cache 是「要問」，不是「不能快取」）。
+//   ② gzip：文字類資產壓縮後約剩 26%。woff2／png 已經是壓縮格式，再壓只會浪費 CPU。
+// 快取以 mtimeMs＋size 判斷檔案有沒有換過——使用者改完 app.js 重整就要看到新版，
+// 不能因為記憶體裡有舊的就一直吐舊檔。
+const COMPRESSIBLE_STATIC_TYPES = /^(text\/|application\/(javascript|json)|image\/svg\+xml)/;
+const staticFileCache = new Map();
+
+async function loadStaticAsset(candidate) {
+  const stats = await lstat(candidate);
+  const version = `${stats.mtimeMs}:${stats.size}`;
+  const cached = staticFileCache.get(candidate);
+  if (cached?.version === version) return cached;
+  const raw = await readFile(candidate);
+  const type = mimeTypes[extname(candidate).toLowerCase()] || "application/octet-stream";
+  // 內容雜湊當 ETag：比 mtime 弱驗證器可靠（改完再改回來也能正確命中），
+  // 而且只在檔案真的換過時才付這個成本。
+  const etag = `"${createHash("sha1").update(raw).digest("base64url")}"`;
+  const entry = {
+    version,
+    type,
+    etag,
+    raw,
+    gzip: COMPRESSIBLE_STATIC_TYPES.test(type) && raw.length >= 1024 ? gzipSync(raw, { level: 6 }) : null,
+  };
+  staticFileCache.set(candidate, entry);
+  return entry;
+}
+
+function acceptsGzip(request) {
+  return /(^|,)\s*gzip\s*(;|,|$)/i.test(String(request.headers["accept-encoding"] || ""));
+}
+
 async function serveStatic(request, requestUrl, response) {
   if (request.method !== "GET" && request.method !== "HEAD") {
     textResponse(response, 405, "Method not allowed");
@@ -12162,14 +12394,26 @@ async function serveStatic(request, requestUrl, response) {
     return;
   }
   const candidate = join(root, fileName);
-  const file = await readFile(candidate);
-  const type = mimeTypes[extname(candidate).toLowerCase()] || "application/octet-stream";
-  response.writeHead(200, {
+  const asset = await loadStaticAsset(candidate);
+  const headers = {
     ...securityHeaders,
-    "content-type": type,
+    "content-type": asset.type,
     "cache-control": "no-cache",
-  });
-  response.end(request.method === "HEAD" ? undefined : file);
+    etag: asset.etag,
+    vary: "accept-encoding",
+  };
+  // If-None-Match 可能帶多個值或 W/ 前綴；只要有一個對上就代表瀏覽器手上那份還是新的。
+  const ifNoneMatch = String(request.headers["if-none-match"] || "");
+  if (ifNoneMatch && ifNoneMatch.split(",").some((value) => value.trim().replace(/^W\//, "") === asset.etag)) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  const body = asset.gzip && acceptsGzip(request) ? asset.gzip : asset.raw;
+  if (body === asset.gzip) headers["content-encoding"] = "gzip";
+  headers["content-length"] = String(body.length);
+  response.writeHead(200, headers);
+  response.end(request.method === "HEAD" ? undefined : body);
 }
 
 function buildWriterLeaseEndpoint(canonicalPath) {
@@ -12935,6 +13179,10 @@ export {
   corporateActionResultMonthUsable, corporateActionResultPayloadRows, corporateActionResultMonthCovered, CORPORATE_ACTION_RESULT_MAX_MONTHS,
   corporateActionResultFor, corporateActionResultRatio, CORPORATE_ACTION_RESULT_URL,
   peekDividendSchedule, getCompanyDirectory, getIssuedShares, getCompanyMeta, buildFundamentals,
+  // 版本與更新檢查（app-version.test）
+  readAppBuildInfo, readGitHubRepo, readPackedRef, normalizeUpdateComparison,
+  // 靜態資產快取（api-data.test 的 ETag／gzip 契約）
+  loadStaticAsset,
   // 伺服器
   server, startServer, shutdownServer,
 };
