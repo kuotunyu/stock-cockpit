@@ -13,6 +13,12 @@ npm run test:dates    # 【選跑】把時鐘平移到各種風險日期各跑�
 npm run test:live     # 【選跑】真打 TWSE/TPEx 驗證上游欄位形狀（偵測 fixture 漂移）
 ```
 
+`test:dates` 與 `test:live` 都**不掛在每次 push 的 CI**（一輪好幾分鐘），改由
+`.github/workflows/reliability.yml` **每天台北 06:00 排程執行**，也可以在 Actions 頁面手動觸發。
+理由：這兩類問題結構上是 push CI 看不到的——日期炸彈平常永遠是綠的、時間到了才自己紅；
+上游改版時離線測試用的是 fixture，永遠不會發現。
+（`test:live` 網路失敗是 skip 不 fail，所以那個 workflow 另外會擋「半數以上 skip」的假綠燈。）
+
 - 預設 `npm test` **完全離線**：`tests/helpers/fetch-mock.mjs` 攔截 `globalThis.fetch`，未接路由的外部 URL 直接 throw。
 - 測試伺服器一律 `startServer(0)` 綁**臨時埠**；`boot-preserved.test.mjs` spawn 真正的 `node server.mjs` 時所有案例也都明確設 `PORT=0`，由 OS 配發臨時埠，證明正式啟動路徑未被改變且絕不碰 5174。
 - `node --test` **每個測試檔一個行程**：env、模組快取（`survBoardCache`／`referenceMarketCache`／`companyDirectoryMarketCache`／`productDirectoryMarketCache`／`dividendMarketCache`／`tradingCalendarSourceCache` 等）天然隔離。

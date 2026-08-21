@@ -1,0 +1,84 @@
+name: Reliability
+
+# 每次 push 跑的 CI（ci.yml）只跑離線測試，那是對的——快、確定、擋得住一般回歸。
+# 但有兩類問題**它結構上就看不到**：
+#
+#   1. 日期炸彈：fixture 幾乎都以「相對今天位移」產生，於是有一整類 bug 只在特定日子現形，
+#      平常怎麼跑都是綠的，時間一到才自己轉紅，而且沒有任何 commit 碰過它。
+#      2026-08-21 實例：新寫的 background-price-alerts 用 UTC 取日期，
+#      在台北凌晨 02:00 會有 7 支測試全紅——是 date sweep 抓到的，不是 CI。
+#   2. 上游改版：TWSE／TPEx 改欄位名或改單位時，離線測試用的是 fixture，永遠不會發現；
+#      使用者是等到畫面上的數字不對才知道。
+#
+# 這兩件事都不該掛在每次 push（一輪要好幾分鐘），但**非常適合排程**。
+on:
+  schedule:
+    # 22:00 UTC = 隔天台北 06:00：開盤前就知道有沒有事。
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  date-sweep:
+    name: 日期炸彈掃描
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 把系統時鐘平移到一組結構上有風險的日子，每個日子跑一次完整測試。
+      # 完全離線、確定性，紅了就是真的有問題。
+      - name: Run date sweep
+        run: npm run test:dates
+
+  upstream-shape:
+    name: 上游欄位形狀
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # tests/live 在網路失敗時是 skip 不 fail（刻意的：被限流不該算測試失敗）。
+      # 但那也代表「全部 skip」會變成假綠燈——GitHub runner 的 IP 若被官方擋掉，
+      # 這個 job 會看起來很健康卻什麼都沒檢查到。所以這裡自己數 skip 數量。
+      - name: Run upstream shape checks
+        id: live
+        run: npm run test:live 2>&1 | tee live-output.txt
+
+      - name: Fail if the check never actually ran
+        if: always() && steps.live.outcome != 'cancelled'
+        run: |
+          skipped=$(grep -oP '^ℹ skipped \K\d+' live-output.txt | tail -1)
+          total=$(grep -oP '^ℹ tests \K\d+' live-output.txt | tail -1)
+          echo "上游檢查：共 $total 項，skip $skipped 項"
+          if [ -z "$total" ]; then
+            echo "::error::讀不到測試結果，live 檢查沒有正常執行"
+            exit 1
+          fi
+          # 半數以上 skip ＝ 連不上官方，這個 job 的綠燈沒有意義，寧可紅給人看。
+          if [ "$skipped" -gt $(( total / 2 )) ]; then
+            echo "::error::$total 項裡有 $skipped 項因為連不上官方而 skip——這是假綠燈，不是通過"
+            exit 1
+          fi
