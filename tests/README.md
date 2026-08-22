@@ -19,6 +19,14 @@ npm run test:live     # 【選跑】真打 TWSE/TPEx 驗證上游欄位形狀（
 上游改版時離線測試用的是 fixture，永遠不會發現。
 （`test:live` 網路失敗是 skip 不 fail，所以那個 workflow 另外會擋「半數以上 skip」的假綠燈。）
 
+`test:live` 涵蓋的上游（2026-08-23 補齊主要資料路徑後）：處置／注意／鉅額／全額交割／整批收盤／
+除權息／停牌／下市／交易日曆／ETF 主檔／TWT49U 計算結果表／Yahoo chart，
+以及 **MIS 即時報價、期交所 MIS、逐檔月歷史 STOCK_DAY、三大法人 T86、上市與上櫃融資融券**。
+最後那幾條是主畫面每天在用的資料路徑，先前完全沒有被檢查。
+**每個端點的回應形狀不一樣**（`data[]` vs `tables[]`），共用的 `fetchLatestTradingPayload`
+因此要求各測試自帶 `isUsable`——第一版用「假設有 data」的通用判斷，讓 MI_MARGN 靜靜地
+永遠 skip，看起來很健康但從來沒檢查過。加新端點時要確認它**真的跑起來**，不是 skip 掉。
+
 - 預設 `npm test` **完全離線**：`tests/helpers/fetch-mock.mjs` 攔截 `globalThis.fetch`，未接路由的外部 URL 直接 throw。
 - 測試伺服器一律 `startServer(0)` 綁**臨時埠**；`boot-preserved.test.mjs` spawn 真正的 `node server.mjs` 時所有案例也都明確設 `PORT=0`，由 OS 配發臨時埠，證明正式啟動路徑未被改變且絕不碰 5174。
 - `node --test` **每個測試檔一個行程**：env、模組快取（`survBoardCache`／`referenceMarketCache`／`companyDirectoryMarketCache`／`productDirectoryMarketCache`／`dividendMarketCache`／`tradingCalendarSourceCache` 等）天然隔離。

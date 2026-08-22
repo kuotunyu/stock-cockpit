@@ -254,3 +254,178 @@ test("Yahoo chart：events.splits 結構與 numerator/denominator", async (t) =>
     assert.ok(Number(split?.denominator) > 0, "split.denominator 應為正數");
   }
 });
+
+// ===== 2026-08-23 補上的涵蓋缺口 =====
+// 這支原本只檢查「看板類」的官方 OpenAPI（處置／注意／除權息／交易日曆）、TWT49U 與 Yahoo。
+// 盤點之後發現一個明顯的洞：**主畫面每天在看的即時報價（MIS）完全沒有被檢查**——
+// 它改欄位或改回應結構的話，目前只能等使用者發現價格不對。
+// 同批補上台指期、逐檔月歷史、三大法人與融資券，讓每日排程真的涵蓋主要資料路徑。
+//
+// 這幾條全部只驗「形狀」不驗「值」：盤中／盤後／假日的內容本來就不同，
+// 但欄位名與結構任何時候都必須成立。
+
+async function fetchOrSkip(t, url, init = {}) {
+  let res;
+  try {
+    res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(20000), ...init });
+  } catch (error) {
+    t.skip(`網路失敗：${error.message}`);
+    return null;
+  }
+  if (!res.ok) {
+    t.skip(`HTTP ${res.status}（可能被限流）`);
+    return null;
+  }
+  return res.json();
+}
+
+test("MIS 即時報價：msgArray 與三層價格備援依賴的欄位", async (t) => {
+  // ex_ch 同時要上市個股、上櫃個股與加權指數——三種列的欄位集合不一樣，
+  // 只測一種會漏掉另外兩種的改版。
+  const payload = await fetchOrSkip(
+    t,
+    `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw|otc_5347.tw|tse_t00.tw&json=1&delay=0&_=${Date.now()}`,
+    { headers: { ...HEADERS, referer: "https://mis.twse.com.tw/stock/index.jsp" } },
+  );
+  if (!payload) return;
+
+  assert.equal(String(payload.rtcode), "0000", `rtcode 非 0000：${JSON.stringify(payload).slice(0, 200)}`);
+  const rows = Array.isArray(payload.msgArray) ? payload.msgArray : [];
+  assert.ok(rows.length >= 3, `三個 ex_ch 應各回一列，實際 ${rows.length}`);
+
+  const byCode = new Map(rows.map((row) => [String(row.c), row]));
+  for (const code of ["2330", "5347", "t00"]) {
+    assert.ok(byCode.has(code), `msgArray 少了 ${code}`);
+  }
+
+  // 個股：三層價格備援（z → pz → oz）與昨收 y 是 normalizeMisRow 的全部依賴。
+  // 值可以是 "-"（無成交哨兵，這正是三層備援存在的理由），但**欄位必須在**。
+  for (const code of ["2330", "5347"]) {
+    const row = byCode.get(code);
+    for (const field of ["c", "n", "z", "pz", "oz", "y", "tv", "v", "d", "t"]) {
+      assert.ok(field in row, `${code} 缺欄位 ${field}；實際欄位：${Object.keys(row).join(",")}`);
+    }
+    assert.match(String(row.d), /^\d{8}$/, `${code} 的資料日期 d 應為 YYYYMMDD，實際 ${row.d}`);
+    // 昨收是 priceStale 顯示與漲跌計算的基準，不可能是哨兵。
+    assert.ok(Number(row.y) > 0, `${code} 的昨收 y 應為正數，實際 ${row.y}`);
+  }
+
+  // 指數列沒有 pz/oz/tv，只有 z 與 y——別把個股的欄位期待套到它身上。
+  const index = byCode.get("t00");
+  for (const field of ["c", "n", "z", "y", "d"]) {
+    assert.ok(field in index, `加權指數缺欄位 ${field}；實際欄位：${Object.keys(index).join(",")}`);
+  }
+  assert.ok(Number(index.y) > 0, "加權指數昨收應為正數");
+});
+
+test("期交所 MIS：TXF 月份契約與 CLastPrice", async (t) => {
+  const payload = await fetchOrSkip(t, "https://mis.taifex.com.tw/futures/api/getQuoteList", {
+    method: "POST",
+    headers: { ...HEADERS, "content-type": "application/json", referer: "https://mis.taifex.com.tw/futures/" },
+    body: JSON.stringify({
+      MarketType: "0", SymbolType: "F", KindID: "1", CID: "",
+      ExpireMonth: "", RowSize: "全部", PageNo: "", SortColumn: "", AscDesc: "A",
+    }),
+  });
+  if (!payload) return;
+
+  const list = payload?.RtData?.QuoteList;
+  assert.ok(Array.isArray(list) && list.length, "RtData.QuoteList 應為非空陣列");
+  // 產品碼格式是 getTaifexQuote 的過濾條件（排除現貨列與價差單）；格式一改就整批篩空。
+  const monthly = list.filter((row) => /^TXF[A-L]\d-(F|M)$/.test(String(row.SymbolID || "")));
+  assert.ok(monthly.length >= 1, `找不到任何 TXF 月份契約；SymbolID 範例：${list.slice(0, 3).map((r) => r.SymbolID).join(", ")}`);
+  for (const field of ["SymbolID", "CLastPrice", "CRefPrice"]) {
+    assert.ok(field in monthly[0], `TXF 契約缺欄位 ${field}；實際欄位：${Object.keys(monthly[0]).join(",")}`);
+  }
+});
+
+test("TWSE 逐檔月歷史 STOCK_DAY：欄位順序與 ROC 日期", async (t) => {
+  const now = new Date();
+  const month = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}01`;
+  const payload = await fetchOrSkip(t, `https://www.twse.com.tw/exchangeReport/STOCK_DAY?date=${month}&stockNo=2330&response=json`);
+  if (!payload) return;
+
+  assert.equal(payload.stat, "OK", `stat 非 OK：${payload.stat}`);
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  assert.ok(rows.length, "當月應至少有一根 K");
+  const [first] = rows;
+  // 欄位是「位置」不是「名字」，所以順序改了不會有任何錯誤訊息——只會靜靜算錯。
+  // 索引 0=ROC 日期 1=成交股數 2=成交金額 3=開 4=高 5=低 6=收 7=漲跌 8=筆數。
+  assert.ok(first.length >= 9, `每列至少 9 欄，實際 ${first.length}`);
+  assert.match(String(first[0]), /^\d{3}\/\d{2}\/\d{2}$/, `第 0 欄應為 ROC 日期，實際 ${first[0]}`);
+  const numeric = (value) => Number(String(value).replace(/,/g, ""));
+  for (const index of [3, 4, 5, 6]) {
+    assert.ok(numeric(first[index]) > 0, `第 ${index} 欄（開高低收）應為正數，實際 ${first[index]}`);
+  }
+  assert.ok(numeric(first[4]) >= numeric(first[5]), "第 4 欄應是最高價、第 5 欄是最低價（順序不可對調）");
+});
+
+// 法人與融資券要挑一個真的有資料的交易日：假日與尚未公布的當天都會回非 OK。
+// 往回找最多 10 天，全都沒有才 skip——那才是真的異常。
+//
+// `isUsable` 必須由各測試自己給：**這三個端點的回應形狀不一樣**。
+// T86 把資料放 `data`，MI_MARGN 放 `tables[]`（兩張表），TPEx margin 也是 `tables[]`。
+// 用一個「假設有 data」的通用判斷，會讓形狀不同的端點永遠 skip——看起來很健康，
+// 其實從來沒檢查過（2026-08-23 第一版就是這樣，MI_MARGN 靜靜地 skip 掉）。
+async function fetchLatestTradingPayload(t, buildUrl, referer, isUsable) {
+  for (let back = 0; back < 10; back += 1) {
+    const date = new Date(Date.now() - back * 86400e3);
+    const compact = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+    let res;
+    try {
+      res = await fetch(buildUrl(compact), { headers: { ...HEADERS, referer }, signal: AbortSignal.timeout(20000) });
+    } catch (error) {
+      t.skip(`網路失敗：${error.message}`);
+      return null;
+    }
+    if (!res.ok) continue;
+    const payload = await res.json();
+    if (isUsable(payload)) return payload;
+  }
+  t.skip("最近 10 天都沒有取得資料（可能全是假日，或上游改版）");
+  return null;
+}
+
+test("TWSE 三大法人 T86：stat 與逐檔買賣超欄位", async (t) => {
+  const payload = await fetchLatestTradingPayload(
+    t,
+    (date) => `https://www.twse.com.tw/rwd/zh/fund/T86?date=${date}&selectType=ALLBUT0999&response=json`,
+    "https://www.twse.com.tw/zh/trading/foreign/t86.html",
+    (body) => body?.stat === "OK" && Array.isArray(body.data) && body.data.length > 0,
+  );
+  if (!payload) return;
+  assert.ok(payload.data.length > 100, `全市場法人資料應有數百檔，實際 ${payload.data.length}`);
+  assert.ok(Array.isArray(payload.fields) && payload.fields.length >= 5, "fields 應描述欄位順序");
+  assert.match(String(payload.data[0][0]).trim(), /^[0-9A-Z]{4,6}$/, `第 0 欄應為代號，實際 ${payload.data[0][0]}`);
+});
+
+test("TWSE 融資融券 MI_MARGN：兩張表的結構與「挑對表」的前提", async (t) => {
+  const payload = await fetchLatestTradingPayload(
+    t,
+    (date) => `https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date=${date}&selectType=ALL&response=json`,
+    "https://www.twse.com.tw/zh/trading/margin/mi-margn.html",
+    (body) => body?.stat === "OK" && Array.isArray(body.tables) && body.tables.length >= 2,
+  );
+  if (!payload) return;
+
+  // getMarginData 是用「哪張表的列數 > 50」來挑逐檔那張的。所以真正要釘的不是「有兩張表」，
+  // 而是**只有一張表的列數會超過 50**——摘要表哪天長胖到 51 列，就會挑錯表而且毫無徵兆。
+  const big = payload.tables.filter((table) => Array.isArray(table.data) && table.data.length > 50);
+  assert.equal(big.length, 1, `列數 >50 的表應該只有一張（逐檔），實際 ${big.length} 張：${payload.tables.map((tb) => (tb.data || []).length).join("/")}`);
+  assert.ok(big[0].data.length > 500, `逐檔融資券應有上千檔，實際 ${big[0].data.length}`);
+  assert.match(String(big[0].data[0][0]).trim(), /^[0-9A-Z]{4,6}$/, `第 0 欄應為代號，實際 ${big[0].data[0][0]}`);
+});
+
+test("TPEx 融資融券 balance：tables[0] 與逐檔欄位", async (t) => {
+  const payload = await fetchLatestTradingPayload(
+    t,
+    (date) => `https://www.tpex.org.tw/www/zh-tw/margin/balance?date=${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)}&response=json`,
+    "https://www.tpex.org.tw/zh-tw/mainboard/trading/margin-trading/transactions.html",
+    (body) => Array.isArray(body?.tables) && Array.isArray(body.tables[0]?.data) && body.tables[0].data.length > 0,
+  );
+  if (!payload) return;
+  // 上櫃這條**固定讀 tables[0]**（不像上市要挑），所以第一張表就必須是逐檔那張。
+  const rows = payload.tables[0].data;
+  assert.ok(rows.length > 100, `上櫃逐檔融資券應有數百檔，實際 ${rows.length}`);
+  assert.match(String(rows[0][0]).trim(), /^[0-9A-Z]{4,6}$/, `第 0 欄應為代號，實際 ${rows[0][0]}`);
+});

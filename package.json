@@ -10,6 +10,7 @@
     "start": "node --env-file-if-exists=.env server.mjs",
     "start:lan": "node --env-file-if-exists=.env scripts/start-lan.mjs",
     "secret": "node scripts/print-secret.mjs",
+    "backup": "node --env-file-if-exists=.env scripts/backup.mjs",
     "test": "node --test tests/backend/*.test.mjs tests/frontend/*.test.mjs",
     "test:backend": "node --test tests/backend/*.test.mjs",
     "test:frontend": "node --test tests/frontend/*.test.mjs",

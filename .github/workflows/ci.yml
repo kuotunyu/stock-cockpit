@@ -8,6 +8,34 @@ permissions:
   contents: read
 
 jobs:
+  # 這個 repo 是公開的，而 .data/stock1-db.json 裡有密碼 hash、完整交易帳本與加密的券商憑證。
+  # 擋住它們的目前只有一行 .gitignore——只要一次 `git add -f`，或哪天有人改壞 .gitignore，
+  # 這些就會**永久公開**（git 歷史與 GitHub 快取都拿不回來）。
+  #
+  # 所以這裡不看 .gitignore 說什麼，直接看 `git ls-files`：版控裡實際有什麼。
+  # 這道守門存在的意義正是「.gitignore 失效時還有人擋」，用它自己當依據就沒有意義了。
+  # 秒級完成，所以掛在每次 push 都不心疼。
+  # （檔案**內容**裡的金鑰由 GitHub 內建的 secret scanning 負責，公開 repo 預設就有。）
+  no-private-data:
+    name: 資料外洩守門
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Fail if private data is tracked
+        run: |
+          # .env.example 是刻意追蹤的範本（只有欄位名、沒有值），必須放行。
+          tracked=$(git ls-files \
+            | grep -Ei '^\.data(-preview)?/|^log/|^\.env($|\.)|\.(pfx|p12|pem|key)$' \
+            | grep -vx '.env.example' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::下列私人檔案被加進版控了，這個 repo 是公開的——請先 git rm --cached 再重新提交"
+            echo "$tracked" | while read -r file; do echo "::error file=$file::$file 不可進版控"; done
+            exit 1
+          fi
+          echo "✅ 版控裡沒有 .data / .env / 憑證檔"
+
   test:
     name: Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
