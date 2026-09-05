@@ -6263,7 +6263,8 @@ function swingNextOpenLine(nextOpen) {
   if (!nextOpen || !Number(nextOpen.resolved)) return "";
   const rate = nextOpen.winRate != null ? `${nextOpen.winRate}%` : `${nextOpen.wins}/${nextOpen.resolved}`;
   const avg = nextOpen.avgResultPct != null ? `・平均 ${nextOpen.avgResultPct >= 0 ? "+" : ""}${nextOpen.avgResultPct}%` : "";
-  return `<small class="sv-regime" title="同一批驗證單改以「第一個交易日的開盤價」當進場價重算（扣費稅後淨報酬 > 0 算勝）。訊號依賴收盤後才發布的整批收盤，真實進場多半是次日開盤，所以並陳這個口徑；只有 2026-09-05 之後推進的單有這個數字。">次日開盤進場 ${rate}（${nextOpen.resolved} 筆）${avg}</small>`;
+  const gap = Number(nextOpen.gapSkipped) > 0 ? `・跳空略過 ${Number(nextOpen.gapSkipped)}` : "";
+  return `<small class="sv-regime" title="同一批驗證單改以「第一個交易日的開盤價」當進場價重算（扣費稅後淨報酬 > 0 算勝）。訊號依賴收盤後才發布的整批收盤，真實進場多半是次日開盤，所以並陳這個口徑；只有 2026-09-05 之後推進的單有這個數字。「跳空略過」＝第一根開盤已在停損下方或目標上方、這個口徑裡不會進場的單，不進分母。">次日開盤進場 ${rate}（${nextOpen.resolved} 筆）${avg}${gap}</small>`;
 }
 
 // 場景勝率依驗證單建立當天的大盤位階（季線上／下）分兩欄；未達最小樣本只給筆數。

@@ -106,10 +106,10 @@ test("場景卡：次日開盤進場口徑與全版本合併一行", () => {
     swingVerifyState.data = { ok: true, currentFormulaVersion: "v", formulaVersions: [{ formulaVersion: "v", samples: 5 }, { formulaVersion: "old", samples: 30 }], recent: [], pendingCount: 0,
       allVersions: { versions: 2, samples: 35, resolved: 25, wins: 12, winRate: 48 },
       scenarios: [{ scenario: "midBandDefense", samples: 5, wins: 2, losses: 1, expired: 0, pending: 2, resolved: 3, continuousResolved: 3, winRate: null, winRateMinSamples: 20,
-        nextOpenEntry: { resolved: 3, wins: 1, winRate: null, avgResultPct: -0.27 } }] };
+        nextOpenEntry: { resolved: 3, wins: 1, winRate: null, avgResultPct: -0.27, gapSkipped: 2 } }] };
     renderSwingVerifyPanel();
     return document.getElementById("swingVerify").innerHTML;
   })()`)).replace(/\s+/g, " ");
-  assert.match(html, /次日開盤進場 1\/3（3 筆）・平均 -0\.27%/);
+  assert.match(html, /次日開盤進場 1\/3（3 筆）・平均 -0\.27%・跳空略過 2/);
   assert.match(html, /全版本合併 48%（25 筆結案）/);
 });

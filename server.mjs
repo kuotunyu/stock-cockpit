@@ -10959,8 +10959,12 @@ function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
   delete entry.dataGap;
   // 「進場＝當日收盤」是刻意的型態邏輯，但訊號要等 13:30 後的整批收盤才算得出來，真實進場多半是
   // 次日開盤。第一根推進時把開盤價記下來，結案時並陳「次日開盤進場」的結果（口徑並陳，不改判定）。
-  if (entry.daysHeld === 1 && Number.isFinite(open) && open > 0 && !Number.isFinite(Number(entry.nextOpen))) {
-    entry.nextOpen = open;
+  // 開盤已在停損下方／目標上方的單，在「次日開盤進場」口徑裡根本不會進場（或進場即結案）：
+  // 記 nextOpenSkipped 不進分母。以前把它記成 nextOpen＝出場價，結果永遠是 0%——跳空破停損的 −6%
+  // 被 0% 取代（平均偏高）、跳空過目標的 +11% 記成 0% 再扣費變成「輸」（勝率偏低），數字不可解讀。
+  if (entry.daysHeld === 1 && Number.isFinite(open) && open > 0 && !Number.isFinite(Number(entry.nextOpen)) && !entry.nextOpenSkipped) {
+    if (open <= entry.stop || open >= entry.target) entry.nextOpenSkipped = "gap";
+    else entry.nextOpen = open;
   }
   const resolve = (status, exitPrice) => {
     entry.status = status;
@@ -11109,6 +11113,8 @@ function applySwingCorporateAction(entry, ratio, day) {
   entry.entry = roundTo(entry.entry * ratio);
   entry.stop = roundTo(entry.stop * ratio);
   entry.target = roundTo(entry.target * ratio);
+  // 次日開盤進場價是同一個座標系的價格，不跟著調的話股利會被算成虧損（差的正好是股利率）。
+  if (Number.isFinite(Number(entry.nextOpen)) && Number(entry.nextOpen) > 0) entry.nextOpen = roundTo(Number(entry.nextOpen) * ratio);
   const adjustments = Array.isArray(entry.corporateActions) ? entry.corporateActions : [];
   adjustments.push({ date: day, ratio: roundTo(ratio, 6) });
   entry.corporateActions = adjustments.slice(-8);
@@ -11471,6 +11477,7 @@ async function buildSwingVerificationSummary() {
           status: entry.status,
           resultPct: Number.isFinite(entry.resultPct) ? entry.resultPct : 0,
           resultPctNextOpen: Number.isFinite(entry.resultPctNextOpen) ? entry.resultPctNextOpen : null,
+          nextOpenSkipped: entry.nextOpenSkipped || "",
           daysHeld: Number(entry.daysHeld) || 0,
           resolvedAt: entry.resolvedAt || day,
           periodic: Boolean(entry.fillModel && entry.fillModel !== "continuous"),
@@ -11530,6 +11537,8 @@ async function buildSwingVerificationSummary() {
           wins,
           winRate: rows.length >= WIN_RATE_MIN_SAMPLES ? Math.round((wins / rows.length) * 1000) / 10 : null,
           avgResultPct: rows.length ? roundTo(average(rows.map((item) => item.resultPctNextOpen))) : null,
+          // 第一根開盤已穿過停損／目標、在這個口徑裡不會進場的筆數（不進分母，但要讓人看得到少了多少）。
+          gapSkipped: continuous.filter((item) => item.nextOpenSkipped === "gap").length,
         };
       })(),
       // 大盤季線上／下分層；各自也套最小樣本門檻，低於門檻只給筆數不給百分比。
@@ -14193,7 +14202,7 @@ export {
   stockLimitUpPrice, isLimitUpLockedBar, stockLimitDownPrice, isLimitDownLockedBar,
   scanSwingBoard, inspectSwingStock,
   // 波段前向驗證
-  recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,
+  recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification, applySwingCorporateAction,
   swingAdvanceTargetDate,
   buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
   median, maxConsecutiveLosses, worstResolvedDay,

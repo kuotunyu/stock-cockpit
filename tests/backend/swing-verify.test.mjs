@@ -480,10 +480,64 @@ test("口徑並陳：第一根推進記 nextOpen，結案並陳 resultPctNextOpe
   mod.invalidateSwingVerifySummaryCache();
   const summary = await mod.buildSwingVerificationSummary();
   const s = summary.scenarios.find((item) => item.scenario === "midBandDefense");
-  assert.deepEqual(s.nextOpenEntry, { resolved: 3, wins: 1, winRate: null, avgResultPct: Math.round(((3.2 - 4.1 + 0.1) / 3) * 100) / 100 });
+  assert.deepEqual(s.nextOpenEntry, { resolved: 3, wins: 1, winRate: null, avgResultPct: Math.round(((3.2 - 4.1 + 0.1) / 3) * 100) / 100, gapSkipped: 0 });
   assert.equal(summary.allVersions.versions, 2);
   assert.equal(summary.allVersions.resolved, 6);
   assert.equal(summary.allVersions.wins, 4);
   assert.equal(summary.allVersions.winRate, null, "未達 20 筆不給百分比");
   assert.ok(summary.formulaVersions.find((v) => v.formulaVersion === "swing-v12-bandnames").wins === 1);
+});
+
+// ---- 第二輪第一批：次日開盤口徑的兩個洞 ----
+test("次日開盤口徑：第一根開盤已穿過停損／目標 → 記 nextOpenSkipped=gap、不記 nextOpen、不進 nextOpenEntry 分母", async () => {
+  const gapDown = makeEntry({ lastChecked: compactTradingDay(-3) });
+  mod.advanceSwingVerificationEntry(gapDown, quoteAt(compactTradingDay(-2), { open: 94, high: 96, low: 93, price: 95 }), { price: 100 });
+  assert.equal(gapDown.status, "loss");
+  assert.equal(gapDown.resultPct, -6, "收盤進場口徑：以開盤 94 出場");
+  assert.equal(gapDown.nextOpen, undefined, "開盤已在停損下方，這筆在次日開盤口徑裡根本不會進場");
+  assert.equal(gapDown.nextOpenSkipped, "gap");
+  assert.equal(gapDown.resultPctNextOpen, undefined, "不可記成 0%");
+
+  const gapUp = makeEntry({ lastChecked: compactTradingDay(-3) });
+  mod.advanceSwingVerificationEntry(gapUp, quoteAt(compactTradingDay(-2), { open: 111, high: 113, low: 110, price: 112 }), { price: 100 });
+  assert.equal(gapUp.status, "win");
+  assert.equal(gapUp.resultPct, 11);
+  assert.equal(gapUp.nextOpenSkipped, "gap");
+  assert.equal(gapUp.resultPctNextOpen, undefined, "跳空過目標不可記成 0%（扣費後會變成「輸」）");
+
+  const inside = makeEntry({ lastChecked: compactTradingDay(-3) });
+  mod.advanceSwingVerificationEntry(inside, quoteAt(compactTradingDay(-2), { open: 101, high: 103, low: 100, price: 102 }), { price: 100 });
+  assert.equal(inside.nextOpen, 101);
+  assert.equal(inside.nextOpenSkipped, undefined);
+
+  const db = await mod.loadDb();
+  const day = compactTradingDay(-10);
+  const resolved = (code, status, resultPct, extra = {}) => makeEntry({ code, status, resultPct, resolvedAt: day, daysHeld: 2, lastChecked: day, ...extra });
+  db.swingVerification = {
+    [day]: [
+      resolved("G1", "loss", -6, { nextOpenSkipped: "gap" }),
+      resolved("G2", "win", 11, { nextOpenSkipped: "gap" }),
+      resolved("N1", "win", 5, { nextOpen: 101, resultPctNextOpen: 3.96 }),
+    ],
+  };
+  mod.invalidateSwingVerifySummaryCache();
+  const summary = await mod.buildSwingVerificationSummary();
+  const s = summary.scenarios.find((item) => item.scenario === "midBandDefense");
+  assert.equal(s.nextOpenEntry.resolved, 1, "跳空的兩筆不進分母");
+  assert.equal(s.nextOpenEntry.gapSkipped, 2);
+  assert.equal(s.resolved, 3, "收盤進場口徑不受影響");
+});
+
+test("次日開盤口徑遇除權息：applySwingCorporateAction 同步乘 nextOpen，resultPctNextOpen 含息", () => {
+  const entry = makeEntry({ lastChecked: compactTradingDay(-4) });
+  mod.advanceSwingVerificationEntry(entry, quoteAt(compactTradingDay(-3), { open: 101, high: 103, low: 100, price: 102 }), { price: 100 });
+  assert.equal(entry.nextOpen, 101);
+  mod.applySwingCorporateAction(entry, 0.95, compactTradingDay(-2));
+  assert.equal(entry.entry, 95);
+  assert.equal(entry.target, 104.5);
+  assert.equal(entry.nextOpen, 95.95, "除息比率要一併套到次日開盤進場價，否則股利會被算成虧損");
+  mod.advanceSwingVerificationEntry(entry, quoteAt(compactTradingDay(-2), { open: 104.5, high: 106, low: 104, price: 105 }), { price: 100 });
+  assert.equal(entry.status, "win");
+  assert.equal(entry.resultPct, 10, "收盤進場：104.5/95");
+  assert.equal(entry.resultPctNextOpen, Math.round(((104.5 - 95.95) / 95.95) * 10000) / 100, "8.91%，不是未調整的 3.47%");
 });
