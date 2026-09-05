@@ -143,3 +143,22 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   assert.match(enough, /開盤賣勝率.*曾達\+2%.*曾破−2%.*平均開盤.*平均收盤/, "表頭七欄");
   assert.match(enough, /100%/, "該日 winAtOpen 2/2");
 });
+
+test("策略表現面板：明講 look-ahead 取樣與偏誤量級，卡片回測門檻 10 次", () => {
+  const html = normalized(app.evalIn(`(() => {
+    backtestState.loading = false;
+    backtestState.error = "";
+    backtestState.data = { days: 30, generatedAt: "2026-09-04T14:00:00+08:00", sampleCodes: ["2330"],
+      summary: { strongContinuation: { groupName: "強勢續攻", sampleSize: 12, hitPlus2Rate: 0.5, brokeMinus2Rate: 0.2, winAtOpenRate: 0.4, winAtCloseRate: 0.3, avgOpenReturn: 0.3, avgHighReturn: 1.5, avgCloseReturn: 0.2 } } };
+    return renderBacktestPerformance();
+  })()`));
+  assert.match(html, /look-ahead/);
+  assert.match(html, /\+0\.3～0\.5/);
+  assert.match(html, /候選股自身的歷史統計/);
+  assert.doesNotMatch(html, /策略表現（近/);
+  assert.match(html, /開盤賣勝率/);
+  const few = app.evalIn(`renderBacktestChips({ sampleSize: 8, hitPlus2Rate: 1, avgCloseReturn: 3 })`);
+  assert.match(few, /樣本不足/);
+  const enough = app.evalIn(`renderBacktestChips({ sampleSize: 12, hitPlus2Rate: 0.5, avgCloseReturn: 3 })`);
+  assert.doesNotMatch(enough, /樣本不足/);
+});

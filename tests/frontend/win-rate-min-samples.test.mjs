@@ -81,8 +81,9 @@ test("個股回測 chip：觸發次數太少時不給達成率百分比，但次
 });
 
 test("個股回測 chip：樣本足夠時照常顯示達成率", () => {
-  const many = backtestChip({ sampleSize: 8, hitPlus2Rate: 0.5, avgCloseReturn: 1.2 });
-  assert.match(many.text, /8次/);
+  // 門檻 2026-09-05 從 5 提高到 10（個股回測是 look-ahead 取樣，小樣本的樂觀數字要更保守）。
+  const many = backtestChip({ sampleSize: 12, hitPlus2Rate: 0.5, avgCloseReturn: 1.2 });
+  assert.match(many.text, /12次/);
   assert.match(many.text, /50/, `實際：${many.text}`);
   assert.doesNotMatch(many.text, /樣本不足/);
 });

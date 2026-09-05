@@ -1158,9 +1158,10 @@ function renderBacktestChips(backtest) {
   }
   // 個股回測的樣本是「這檔在回測窗內觸發訊號的次數」，常常只有一兩次。
   // 1 次觸發算出的「+2 達成率 100%」沒有統計意義，卻跟累積多次的數字長得一樣。
-  // 這裡的門檻用 5（比場景勝率的 20 寬鬆）——它是個股層級的參考提示，不是策略結論；
-  // 次數本身照樣顯示，讓使用者自己看得到樣本有多小。
-  const RATE_MIN_SAMPLES = 5;
+  // 這裡的門檻用 10（比場景勝率的 20 寬鬆）——它是個股層級的參考提示，不是策略結論；
+  // 而且這個回測是 look-ahead 取樣（只對「今天入選」的股票回看），本來就偏樂觀，
+  // 門檻放寬只會讓小樣本的樂觀數字更常出現。次數本身照樣顯示，讓使用者自己看得到樣本有多小。
+  const RATE_MIN_SAMPLES = 10;
   const hitRate = sample < RATE_MIN_SAMPLES
     ? "樣本不足"
     : backtest?.hitPlus2Rate === null || backtest?.hitPlus2Rate === undefined
@@ -5723,14 +5724,14 @@ function renderBacktestPerformance() {
     .join("");
   return `
     <div class="overnight-summary">
-      <strong>策略表現（近 ${data.days || 30} 個交易日回測）</strong>
-      <span>樣本股票：目前訊號候選 ${data.sampleCodes?.length || 0} 檔</span>
+      <strong>候選股自身的歷史統計（近 ${data.days || 30} 個交易日）</strong>
+      <span>樣本股票：今天入選的 ${data.sampleCodes?.length || 0} 檔</span>
       <span>基準：訊號日收盤 → 實際下一交易日開高收</span>
       <span>產生：${escapeHtml(formatLocalTime(data.generatedAt))}</span>
     </div>
     <section class="performance-grid">${cards}</section>
     <div class="overnight-field-guide" aria-label="回測說明">
-      <span><strong>注意</strong>回測樣本只涵蓋目前的訊號候選股，不是全市場，結果偏樂觀，僅供校準參考。</span>
+      <span><strong>這不是回測，是 look-ahead 取樣</strong>樣本只涵蓋「今天收盤後符合條件」的股票，再回頭看它們過去 30 天——入選條件（收在均線上）本身建立在未來價格路徑上，所以每個過去訊號的隔日報酬都被抬高。用零漂移隨機漫步實測，這種取樣法會把真實 edge 為 0 的策略算出 +0.3～0.5 個百分點的平均隔日報酬，與來回費稅 0.471% 同量級。請以上方「實際驗證紀錄（前向）」為準。</span>
     </div>
   `;
 }
