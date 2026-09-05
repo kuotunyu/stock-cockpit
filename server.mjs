@@ -82,7 +82,31 @@ function isLoopbackHost(value) {
 // 不在白名單一律 421（Misdirected Request），API 與靜態都套，而且要在 OPTIONS 之前。
 // 白名單＝loopback、PUBLIC_ORIGIN 的 host、ALLOWED_HOSTS 環境變數，以及非 loopback listen
 // （start:lan）時由 startServer 列舉的本機介面位址。port 刻意不比對（同一台機器可能換 port）。
-const trustProxy = ["1", "true", "yes", "on"].includes(String(process.env.TRUST_PROXY || "").trim().toLowerCase());
+// TRUST_PROXY：off（預設）｜on｜cloudflare。on 才採信 x-forwarded-*，且一律取「最右邊第 TRUST_PROXY_HOPS 段」——
+// 代理是附加不是取代，最左段由客戶端自填；cloudflare 模式優先 cf-connecting-ip。
+const trustProxyMode = (() => {
+  const raw = String(process.env.TRUST_PROXY || "").trim().toLowerCase();
+  if (raw === "cloudflare") return "cloudflare";
+  return ["1", "true", "yes", "on"].includes(raw) ? "on" : "off";
+})();
+const trustProxy = trustProxyMode !== "off";
+const trustProxyHops = Math.max(1, Math.floor(Number(process.env.TRUST_PROXY_HOPS) || 1));
+
+// 逗號清單取「從右數第 hops 段」；清單比跳點數短就取最左（能拿到的最外層）。
+function forwardedListValue(headerValue, hops = trustProxyHops) {
+  const parts = String(headerValue || "").split(",").map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) return "";
+  return parts[Math.max(0, parts.length - Math.max(1, hops))];
+}
+
+function forwardedClientAddress(headers, socketAddress, { mode = trustProxyMode, hops = trustProxyHops } = {}) {
+  if (mode === "off") return String(socketAddress || "");
+  if (mode === "cloudflare") {
+    const cf = String(headers?.["cf-connecting-ip"] || "").trim();
+    if (cf) return cf;
+  }
+  return forwardedListValue(headers?.["x-forwarded-for"], hops) || String(socketAddress || "");
+}
 const runtimeAllowedHosts = new Set();
 
 function hostnameOfHeader(value) {
@@ -121,14 +145,10 @@ function isAllowedHost(hostHeader) {
   return false;
 }
 
-// 登入限流的第二層鍵。只有明確放在反向代理後面（TRUST_PROXY=true）才信 x-forwarded-for，
-// 否則任何人都能靠自填 header 換一個「來源」繞過計次。
+// 登入限流的第二層鍵。只有明確放在反向代理後面（TRUST_PROXY=on|cloudflare）才信 x-forwarded-for，
+// 否則任何人都能靠自填 header 換一個「來源」繞過計次；採信時也只取最右可信跳點（見 forwardedClientAddress）。
 function clientAddressOf(request) {
-  if (trustProxy) {
-    const forwarded = String(request.headers["x-forwarded-for"] || "").split(",")[0].trim();
-    if (forwarded) return forwarded;
-  }
-  return String(request.socket?.remoteAddress || "");
+  return forwardedClientAddress(request.headers, request.socket?.remoteAddress);
 }
 
 function validateStartupSecurity(listenHost) {
@@ -248,6 +268,7 @@ const riskInFlight = new Map();
 let marketCache = {
   expiresAt: 0,
   value: null,
+  inFlight: null,
 };
 
 const institutionalCache = new Map();
@@ -433,7 +454,7 @@ function parseCookies(cookieHeader = "") {
 }
 
 function isSecureRequest(request) {
-  const forwardedProto = trustProxy ? String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim() : "";
+  const forwardedProto = trustProxy ? forwardedListValue(request.headers["x-forwarded-proto"]) : "";
   return forwardedProto === "https" || process.env.COOKIE_SECURE === "true";
 }
 
@@ -446,9 +467,9 @@ function requestPublicOrigin(request) {
   if (configured) {
     try { return new URL(configured).origin; } catch { return ""; }
   }
-  const forwardedProto = trustProxy ? String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim() : "";
+  const forwardedProto = trustProxy ? forwardedListValue(request.headers["x-forwarded-proto"]) : "";
   const proto = forwardedProto || (request.socket?.encrypted ? "https" : "http");
-  const forwardedHost = trustProxy ? String(request.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
+  const forwardedHost = trustProxy ? forwardedListValue(request.headers["x-forwarded-host"]) : "";
   const requestHost = forwardedHost || String(request.headers.host || "").trim();
   if (!requestHost) return "";
   try { return new URL(`${proto}://${requestHost}`).origin; } catch { return ""; }
@@ -3871,11 +3892,17 @@ function buildStockMarketCalendarStatus(evidence, dateCompact = toTaipeiCompactD
 }
 
 async function getMarketSummary() {
-  const now = Date.now();
-  if (marketCache.value && marketCache.expiresAt > now) {
+  if (marketCache.value && marketCache.expiresAt > Date.now()) {
     return marketCache.value;
   }
+  // single-flight：只有 15 秒快取時，到期瞬間 N 個並發 /api/markets 會打 2N 次 MIS／期交所。
+  if (marketCache.inFlight) return marketCache.inFlight;
+  marketCache.inFlight = buildMarketSummary().finally(() => { marketCache.inFlight = null; });
+  return marketCache.inFlight;
+}
 
+async function buildMarketSummary() {
+  const now = Date.now();
   const warnings = [];
   const [taiexResult, txResult] = await Promise.allSettled([fetchTaiexIndex(), fetchTxQuote()]);
   const markets = {};
@@ -3915,6 +3942,7 @@ async function getMarketSummary() {
   marketCache = {
     expiresAt: now + 15 * 1000,
     value: body,
+    inFlight: marketCache.inFlight,
   };
   return body;
 }
@@ -14318,7 +14346,7 @@ export {
   normalizeTwseInstitutionalRow, normalizeTpexInstitutionalRow,
   normalizeTwseMarginRow, normalizeTpexMarginRow, getInstitutionalData, getMarginData,
   // Host 白名單／來源位址（api-host-allowlist.test）
-  isAllowedHost, hostnameOfHeader, clientAddressOf,
+  isAllowedHost, hostnameOfHeader, clientAddressOf, forwardedClientAddress, forwardedListValue, trustProxyMode, trustProxyHops,
   // 券商憑證檔（broker-settings-guard.test）
   resolveBrokerCertPath, brokerCertFilePath,
   // 認證／加解密

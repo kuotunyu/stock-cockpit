@@ -217,7 +217,8 @@ COOKIE_SECURE=true
 DATA_DIR=/var/app/data
 UPDATE_CHECK=on   # 設 off 可關閉「跟 GitHub 比對版本」的對外查詢
 ALLOWED_HOSTS=    # 額外允許的 Host 名稱（逗號分隔）；預設只認 127.0.0.1／localhost 與 LAN 模式列舉的本機位址，其餘回 421
-TRUST_PROXY=off   # 只有放在反向代理後面才設 on，代理的 x-forwarded-* 才會被採信
+TRUST_PROXY=off   # off｜on｜cloudflare：只有放在反向代理後面才設；on 取 x-forwarded-* 最右可信跳點，cloudflare 優先 cf-connecting-ip
+TRUST_PROXY_HOPS=1 # 可信代理層數（on 模式取 x-forwarded-for 從右數第 N 段；代理是附加不是取代，最左段由客戶端自填）
 SCHEDULER=on      # 收盤後排程（每 10 分鐘檢查、兩市場對齊後自動掃描與推進驗證）；設 off 回到「有人開 App 才算」
 ```
 
