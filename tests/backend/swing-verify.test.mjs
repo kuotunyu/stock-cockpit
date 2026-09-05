@@ -390,3 +390,65 @@ test("分佈指標：PF／中位數／最長連虧／最差單日；處置股（
   assert.equal(mod.maxConsecutiveLosses([{ status: "loss", resolvedAt: "20260101", code: "a" }, { status: "win", resolvedAt: "20260102", code: "a" }, { status: "loss", resolvedAt: "20260103", code: "a" }, { status: "loss", resolvedAt: "20260104", code: "a" }]), 2);
   assert.equal(mod.worstResolvedDay([]), null);
 });
+
+test("跌停鎖死：碰停損那天賣不掉 → 順延到下一個有開的交易日以開盤價出場，記 exitModel", () => {
+  assert.equal(mod.stockLimitDownPrice(100), 90);
+  assert.equal(mod.stockLimitDownPrice(99.5), 89.6, "89.55 向上取 0.05 檔 → 89.6");
+  assert.equal(mod.isLimitDownLockedBar({ high: 90, low: 90, close: 90 }, { close: 100 }), true);
+  assert.equal(mod.isLimitDownLockedBar({ high: 91, low: 90, close: 90 }, { close: 100 }), false, "盤中有開就不算鎖死");
+  const entry = makeEntry({ lastChecked: compactTradingDay(-3) });
+  const d1 = compactTradingDay(-2);
+  const d2 = compactTradingDay(-1);
+  // D1 一價跌停鎖死（前收 100 → 90）
+  assert.equal(mod.advanceSwingVerificationEntry(entry, quoteAt(d1, { open: 90, high: 90, low: 90, price: 90 }), { price: 100 }), true);
+  assert.equal(entry.status, "pending", "當天賣不掉，不結案");
+  assert.equal(entry.exitPending.reason, "limit-down-locked");
+  assert.equal(entry.daysHeld, 1);
+  // D2 開盤 88、盤中有開
+  assert.equal(mod.advanceSwingVerificationEntry(entry, quoteAt(d2, { open: 88, high: 91, low: 87, price: 89 }), { price: 90 }), true);
+  assert.equal(entry.status, "loss");
+  assert.equal(entry.resultPct, -12, "以下一個可成交日開盤 88 出場，不是停損價 95");
+  assert.equal(entry.exitModel, "limit-down-deferred");
+  assert.equal(entry.exitPending, undefined);
+  // 對照：碰停損但非鎖死 → 當天 loss@stop、same-day
+  const normal = makeEntry({ lastChecked: compactTradingDay(-3) });
+  mod.advanceSwingVerificationEntry(normal, quoteAt(d1, { open: 96, high: 97, low: 94, price: 95.5 }), { price: 100 });
+  assert.equal(normal.status, "loss");
+  assert.equal(normal.resultPct, -5);
+  assert.equal(normal.exitModel, "same-day");
+  // 連續兩天鎖死：第二天仍等
+  const twice = makeEntry({ lastChecked: compactTradingDay(-3) });
+  mod.advanceSwingVerificationEntry(twice, quoteAt(d1, { open: 90, high: 90, low: 90, price: 90 }), { price: 100 });
+  mod.advanceSwingVerificationEntry(twice, quoteAt(d2, { open: 81, high: 81, low: 81, price: 81 }), { price: 90 });
+  assert.equal(twice.status, "pending");
+  assert.equal(twice.daysHeld, 2);
+});
+
+test("停牌：pending 單標 halted、單獨計數、不併進「卡住」，解除後恢復推進", async () => {
+  const db = await mod.loadDb();
+  const target = compactTradingDay(-1);
+  const stale = compactTradingDay(-45);
+  db.swingVerification = {
+    [stale]: [
+      makeEntry({ code: "5555", lastChecked: stale }),
+      makeEntry({ code: "6666", lastChecked: stale }),
+    ],
+  };
+  const reference = { byCode: new Map() };
+  const riskSets = { halted: new Map([["5555", "20260801"]]), delisted: new Set() };
+  await mod.advanceSwingVerification(reference, target, { riskSets });
+  const entries = db.swingVerification[stale];
+  const halted = entries.find((e) => e.code === "5555");
+  const normal = entries.find((e) => e.code === "6666");
+  assert.deepEqual(halted.halted, { since: "20260801" });
+  assert.equal(normal.halted, undefined);
+  assert.ok(halted.dataGap && normal.dataGap, "兩檔都沒有日 K，都有缺口");
+  mod.invalidateSwingVerifySummaryCache();
+  const summary = await mod.buildSwingVerificationSummary();
+  assert.equal(summary.haltedCount, 1);
+  assert.equal(summary.stalledCount, 1, "6666 缺口超過 30 天算卡住；5555 是停牌不算");
+  // 停牌解除：下一輪名單裡沒有它 → 撕掉 halted
+  await mod.advanceSwingVerification(reference, compactTradingDay(0), { riskSets: { halted: new Map(), delisted: new Set() } });
+  // commit 是 copy-on-write：每次推進都換一份新的 store，要重新讀
+  assert.equal(db.swingVerification[stale].find((e) => e.code === "5555").halted, undefined);
+});

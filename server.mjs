@@ -10168,6 +10168,24 @@ function stockLimitUpPrice(previousClose) {
   return roundToStockTick(previousClose * 1.1, "down");
 }
 
+// 跌停價：前收 ×0.9 **向上**取合法申報價位（鏡像漲停的向下）。
+function stockLimitDownPrice(previousClose) {
+  if (!Number.isFinite(previousClose) || previousClose <= 0) return null;
+  return roundToStockTick(previousClose * 0.9, "up");
+}
+
+// 一價跌停鎖死：整天只有跌停這一個成交價（high === low === 跌停價）。掛在停損價的單那天賣不掉，
+// 記「當天 loss@stop」會把損失尾端截短；正確是順延到下一個可成交日的開盤（D-23 只做了進場那一半）。
+function isLimitDownLockedBar(row, previousRow) {
+  const limit = stockLimitDownPrice(Number(previousRow?.close ?? previousRow?.price));
+  if (limit === null) return false;
+  const high = Number(row?.high);
+  const low = Number(row?.low);
+  const close = Number(row?.close ?? row?.price);
+  if (![high, low, close].every(Number.isFinite)) return false;
+  return high === low && Math.abs(low - limit) < 1e-6;
+}
+
 // 「收在漲停」不等於「買不到」——實測 240 檔逐日回放 3,571 個合格 pick 裡有 233 個（6.52%）
 // 收在漲停價，但其中 231 個盤中有開（high > low），整天都買得到，只是收盤剛好落在漲停。
 // 真正買不到的是**一價鎖死**：整天只有漲停這一個成交價（2 個，0.06%）。
@@ -10834,7 +10852,7 @@ function recordSwingVerification(db, body) {
 // 這只影響「要不要把百分比當結論呈現」，不改變任何選股結果。
 const WIN_RATE_MIN_SAMPLES = 20;
 const SWING_VERIFY_MAX_DAYS = 15;
-function advanceSwingVerificationEntry(entry, dayQuote) {
+function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
   if (!entry || entry.status !== "pending" || !dayQuote) return false;
   const day = toCompactDate(dayQuote.rawDate || dayQuote.asOf);
   if (!day || day <= entry.lastChecked) return false;
@@ -10852,7 +10870,24 @@ function advanceSwingVerificationEntry(entry, dayQuote) {
     entry.status = status;
     entry.resolvedAt = day;
     entry.resultPct = roundTo(((exitPrice - entry.entry) / entry.entry) * 100);
+    // 舊紀錄沒有這一欄一律當 same-day，不追溯改寫。
+    entry.exitModel ||= "same-day";
   };
+  // 跌停鎖死（一價到底）：碰到停損的那天其實賣不掉。停損單順延到下一個「有開」的交易日，
+  // 以那天的開盤價出場，並記 exitModel 讓統計分得出來。停損那天先不結案、只累加持有日。
+  const lockedToday = isLimitDownLockedBar({ high, low, close }, previousQuote);
+  if (entry.exitPending) {
+    if (lockedToday) return true; // 連續跌停，繼續等
+    entry.exitModel = "limit-down-deferred";
+    delete entry.exitPending;
+    resolve("loss", Number.isFinite(open) ? open : close);
+    return true;
+  }
+  const stopTouched = (Number.isFinite(open) && open <= entry.stop) || low <= entry.stop;
+  if (stopTouched && lockedToday) {
+    entry.exitPending = { reason: "limit-down-locked", since: day };
+    return true;
+  }
   // D-24 裁決：開盤價優先於「同日雙觸保守記停損」。
   //
   // 「雙觸保守記停損」的前提是「日 K 沒有盤中序列，不知道先碰哪一邊」。但台股開盤是
@@ -11012,10 +11047,12 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
     const expected = toCompactDate(resolution.date);
     if (!expected || expected > latest) break;
     const row = byDate.get(expected);
+    // 前一根給兩件事用：公司行動比率的相鄰性檢查，以及跌停鎖死的判定（需要前收算跌停價）。
+    let previousRow = null;
     // 判定觸價之前先把公司行動的機械性跳空吸收掉，否則除權息當天必然誤判成停損。
     if (row) {
       const rowIndex = indexByDate.get(expected) ?? -1;
-      const previousRow = rowIndex > 0 ? rows[rowIndex - 1] : null;
+      previousRow = rowIndex > 0 ? rows[rowIndex - 1] : null;
       // 只有「真的相鄰」的兩根才能拿來推公司行動。逐月歷史抓取失敗會被 .catch(() => []) 吞成
       // 空陣列，缺口前後被直接接起來之後，兩根之間隔了幾週的正常漲跌本來就對不上「昨收」，
       // 硬算會把整段漲跌記成一次巨大的公司行動（實測：收平盤的股票被記成 −20% 停損）。
@@ -11056,7 +11093,7 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
         changed = true;
       }
     }
-    if (!row || !advanceSwingVerificationEntry(entry, row)) {
+    if (!row || !advanceSwingVerificationEntry(entry, row, previousRow)) {
       const nextGap = { from: expected, through: latest, detectedAt: new Date().toISOString() };
       const previous = entry.dataGap;
       if (!previous || previous.from !== nextGap.from || previous.through !== nextGap.through) {
@@ -11105,7 +11142,7 @@ function swingAdvanceTargetDate(reference, latestDate) {
   const common = twseCompact < tpexCompact ? twseCompact : tpexCompact;
   return common < requested ? common : requested;
 }
-async function advanceSwingVerification(reference, latestDate) {
+async function advanceSwingVerification(reference, latestDate, options = {}) {
   const targetDate = swingAdvanceTargetDate(reference, latestDate);
   if (!targetDate) return;
   const twseDate = reference?.markets?.twse?.asOf || "";
@@ -11128,6 +11165,9 @@ async function advanceSwingVerification(reference, latestDate) {
       loadFundamentalsHistory(),
       ensureCorporateActionResults(compactMonthsBefore(targetDate, 4), targetDate),
     ]);
+    // 停牌中的標的沒有日 K、也賣不掉：標成 halted 單獨計數，不併進「卡住」（那是資料缺口），
+    // 也不進分母；停牌解除後照常推進。名單抓不到就不標（不猜）。
+    const riskSets = options.riskSets || await getRiskSets(targetDate).catch(() => null);
     const pendingByCode = new Map();
     for (const entries of Object.values(store)) {
       for (const entry of entries) {
@@ -11170,6 +11210,14 @@ async function advanceSwingVerification(reference, latestDate) {
         rows = [...history, ...directRows];
       }
       for (const entry of entries) {
+        const haltedSince = riskSets?.halted?.has(code) ? (riskSets.halted.get(code) || targetDate) : "";
+        if (haltedSince && !entry.halted) {
+          entry.halted = { since: haltedSince };
+          changed = true;
+        } else if (!haltedSince && entry.halted) {
+          delete entry.halted;
+          changed = true;
+        }
         const result = replaySwingVerificationHistory(entry, rows, targetDate, calendar);
         if (result.changed) changed = true;
       }
@@ -11215,6 +11263,8 @@ function verificationStallFrom(entry) {
 }
 function isStalledVerificationEntry(entry, todayCompact) {
   if (!entry || entry.status !== "pending") return false;
+  // 停牌不是資料缺口：另外以 haltedCount 揭露，解除後會自行推進。
+  if (entry.halted) return false;
   const from = verificationStallFrom(entry);
   if (!from) return false;
   const gap = compactDaysDiff(toCompactDate(from), todayCompact);
@@ -11390,6 +11440,10 @@ async function buildSwingVerificationSummary() {
     corporateActionPendingCount: all.filter((entry) => entry.status === "pending" && entry.corporateActionPending).length,
     // 卡住＝資料缺口久到不可能再自行結案；它們永遠不會進 resolved 分母，必須讓使用者看得到。
     stalledCount: all.filter((entry) => isStalledVerificationEntry(entry, summaryToday)).length,
+    // 停牌中：沒有日 K 也賣不掉，與「卡住」分開數（停牌多半是壞消息，排除方向是樂觀的，要看得見）。
+    haltedCount: all.filter((entry) => entry.status === "pending" && entry.halted).length,
+    // 跌停鎖死順延出場的結案數：exitModel="limit-down-deferred"（舊紀錄一律 same-day）。
+    deferredExitCount: all.filter((entry) => entry.exitModel === "limit-down-deferred").length,
     // D-30：處置期間是分盤集合競價，觸價判定的前提（連續競價）在這些樣本上並不成立。
     periodicCallCount: all.filter((entry) => entry.fillModel && entry.fillModel !== "continuous").length,
     notes: [
@@ -13827,7 +13881,7 @@ export {
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,
   SWING_FORMULA_VERSION, stockTickSize, roundToStockTick,
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,
-  stockLimitUpPrice, isLimitUpLockedBar,
+  stockLimitUpPrice, isLimitUpLockedBar, stockLimitDownPrice, isLimitDownLockedBar,
   scanSwingBoard, inspectSwingStock,
   // 波段前向驗證
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,
