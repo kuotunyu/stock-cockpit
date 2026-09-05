@@ -141,3 +141,17 @@ test("場景卡：依大盤季線上／下分層；未達最小樣本只給筆�
   assert.match(html, /大盤季線上 60%・季線下 0\/2/);
   assert.doesNotMatch(html, /位階未知/);
 });
+
+test("場景卡：分佈指標一行（PF／中位／最長連虧／最差單日）與「含處置股」的另一個口徑", () => {
+  const html = String(app.evalIn(`(() => {
+    state.screen = "strategy";
+    swingVerifyState.data = { ok: true, currentFormulaVersion: "v", formulaVersions: [], recent: [], pendingCount: 0,
+      scenarios: [{ scenario: "midBandDefense", samples: 30, wins: 15, losses: 12, expired: 0, pending: 3, resolved: 27, continuousResolved: 23,
+        winRate: 47.8, winRateMinSamples: 20, avgResultPct: 0.83, profitFactor: 1.53, medianResultPct: -3, maxConsecutiveLosses: 3,
+        worstDay: { day: "20260825", avgResultPct: -3, count: 3 }, withPeriodicCall: { resolved: 27, wins: 15, winRate: 55.6 } }] };
+    renderSwingVerifyPanel();
+    return document.getElementById("swingVerify").innerHTML;
+  })()`)).replace(/\s+/g, " ");
+  assert.match(html, /PF 1\.53・中位 -3%・最長連虧 3・最差單日 08\/25 -3%（3 筆）/);
+  assert.match(html, /含處置股 55\.6%（27 筆）・主要勝率分母 23 筆連續競價/);
+});

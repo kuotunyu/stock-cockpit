@@ -6064,6 +6064,23 @@ function swingScenarioName(key) {
   return { midBandDefense: "中軌攻防", strongContinuation: "上軌續攻" }[key] || key;
 }
 
+// 分佈指標：PF／中位數／最長連虧／最差單日，以及「含處置股」的另一個口徑。
+// headline 勝率的分母只算連續競價的樣本（處置期間是分盤集合競價，觸價判定在那些樣本上不成立）。
+function swingDistributionLine(s) {
+  const parts = [];
+  const signed = (value) => `${value >= 0 ? "+" : ""}${value}%`;
+  if (s.profitFactor != null) parts.push(`PF ${s.profitFactor}`);
+  if (s.medianResultPct != null) parts.push(`中位 ${signed(s.medianResultPct)}`);
+  if (s.maxConsecutiveLosses) parts.push(`最長連虧 ${s.maxConsecutiveLosses}`);
+  if (s.worstDay?.day) parts.push(`最差單日 ${String(s.worstDay.day).slice(4, 6)}/${String(s.worstDay.day).slice(6, 8)} ${signed(s.worstDay.avgResultPct)}（${s.worstDay.count} 筆）`);
+  const wp = s.withPeriodicCall;
+  const periodic = wp && Number(wp.resolved) > Number(s.continuousResolved ?? wp.resolved)
+    ? `含處置股 ${wp.winRate != null ? `${wp.winRate}%` : `${wp.wins}/${wp.resolved}`}（${wp.resolved} 筆）・主要勝率分母 ${s.continuousResolved} 筆連續競價`
+    : "";
+  if (!parts.length && !periodic) return "";
+  return `<small class="sv-regime" title="PF＝獲利總和 ÷ 虧損總和；中位數與最長連虧看分佈，等權平均會把「整批停損的一週」和「平穩小虧」混成同一個數字。處置期間是分盤集合競價，那些樣本不進主要勝率的分母。">${[parts.join("・"), periodic].filter(Boolean).join("<br>")}</small>`;
+}
+
 // 場景勝率依驗證單建立當天的大盤位階（季線上／下）分兩欄；未達最小樣本只給筆數。
 function swingRegimeLine(byRegime) {
   if (!byRegime) return "";
@@ -6113,6 +6130,7 @@ function renderSwingVerifyPanel() {
             <span class="sv-rate ${tone}"><small>勝率</small> ${rate}</span>
           </div>
           <small>結案 ${resolved}（達標 ${s.wins}・停損 ${s.losses}・超時 ${s.expired}）・追蹤中 ${s.pending}${s.stalled ? `<span class="sv-stalled" title="這些單因官方日 K 長期缺漏而停在缺口前，不會自行結案，也永遠不會進入上面的勝率分母。">（含卡住 ${s.stalled}）</span>` : ""}${s.avgResultPct != null ? `・平均 ${s.avgResultPct >= 0 ? "+" : ""}${s.avgResultPct}%${s.avgResultPctNet != null ? `（淨 ${s.avgResultPctNet >= 0 ? "+" : ""}${s.avgResultPctNet}%）` : ""}` : ""}${s.avgDaysHeld != null ? `・平均持有 ${s.avgDaysHeld} 天` : ""}</small>
+          ${swingDistributionLine(s)}
           ${swingRegimeLine(s.byRegime)}
         </div>`;
     })

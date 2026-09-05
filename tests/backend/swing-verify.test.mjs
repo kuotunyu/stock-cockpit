@@ -350,3 +350,43 @@ test("regime 分層：建單時記錄大盤位階（精簡版），summary 依�
   assert.equal(mod.regimeBucket(entry.regime), "belowMa60");
   assert.equal(mod.regimeBucket(db.swingVerification[day][1].regime), "unknown");
 });
+
+test("分佈指標：PF／中位數／最長連虧／最差單日；處置股（分盤）不進 headline 分母、另列 withPeriodicCall", async () => {
+  const db = await mod.loadDb();
+  const day = compactTradingDay(-10);
+  const resolved = (code, status, resultPct, resolvedAt, extra = {}) => makeEntry({ code, status, resultPct, resolvedAt, daysHeld: 3, lastChecked: resolvedAt, ...extra });
+  const entries = [];
+  // 21 筆連續競價：前 3 筆同一天停損（最長連虧 3、最差單日），之後 11 勝（+5）／7 負（−3）交錯
+  const d = (offset) => compactTradingDay(-9 + offset);
+  entries.push(resolved("A001", "loss", -3, d(0)), resolved("A002", "loss", -3, d(0)), resolved("A003", "loss", -3, d(0)));
+  for (let i = 0; i < 18; i += 1) {
+    const win = i % 2 === 0; // 9 勝 9 負 → 加上面 3 負：勝 9、負 12？調整：讓 11 勝 10 負
+    entries.push(resolved(`B${String(i).padStart(3, "0")}`, win ? "win" : "loss", win ? 5 : -3, d(1 + Math.floor(i / 2))));
+  }
+  entries.push(resolved("C001", "win", 5, d(9)), resolved("C002", "win", 5, d(9)));
+  // 4 筆分盤撮合（處置股）全勝：不可灌進 headline
+  for (let i = 0; i < 4; i += 1) entries.push(resolved(`P${i}`, "win", 8, d(9), { fillModel: "periodicCall5" }));
+  db.swingVerification = { [day]: entries };
+  mod.invalidateSwingVerifySummaryCache();
+  const summary = await mod.buildSwingVerificationSummary();
+  const s = summary.scenarios.find((item) => item.scenario === "midBandDefense");
+  // 連續競價：3 負 + 9 勝 9 負 + 2 勝 = 11 勝 12 負 = 23 筆
+  assert.equal(s.continuousResolved, 23);
+  assert.equal(s.resolved, 27, "計數含處置股");
+  assert.equal(s.winRate, Math.round((11 / 23) * 1000) / 10, "headline 勝率分母只算連續競價");
+  assert.equal(s.withPeriodicCall.resolved, 27);
+  assert.equal(s.withPeriodicCall.wins, 15);
+  assert.equal(s.withPeriodicCall.winRate, Math.round((15 / 27) * 1000) / 10);
+  // PF ＝ 11×5 ÷ 12×3 ＝ 55/36
+  assert.equal(s.profitFactor, Math.round((55 / 36) * 100) / 100);
+  assert.equal(s.medianResultPct, -3, "23 筆裡 12 筆 −3、11 筆 +5 → 中位數落在 −3");
+  assert.equal(s.maxConsecutiveLosses, 3, "同一天的 3 筆停損連續（同日以 code 排序）");
+  assert.deepEqual(s.worstDay, { day: d(0), avgResultPct: -3, count: 3 });
+  assert.equal(s.avgResultPct, Math.round(((55 - 36) / 23) * 100) / 100, "平均也只算連續競價");
+  // 純函式
+  assert.equal(mod.median([3, 1, 2]), 2);
+  assert.equal(mod.median([4, 1, 2, 3]), 2.5);
+  assert.equal(mod.median([]), null);
+  assert.equal(mod.maxConsecutiveLosses([{ status: "loss", resolvedAt: "20260101", code: "a" }, { status: "win", resolvedAt: "20260102", code: "a" }, { status: "loss", resolvedAt: "20260103", code: "a" }, { status: "loss", resolvedAt: "20260104", code: "a" }]), 2);
+  assert.equal(mod.worstResolvedDay([]), null);
+});

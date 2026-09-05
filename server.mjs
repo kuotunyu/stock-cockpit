@@ -11221,6 +11221,43 @@ function isStalledVerificationEntry(entry, todayCompact) {
   return Number.isFinite(gap) && gap > SWING_VERIFY_STALLED_DAYS;
 }
 
+// ---- 波段統計的分佈指標（等權平均看不出「策略壞了」還是「那兩週大盤跌」）----
+function median(values) {
+  const sorted = (values || []).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : roundTo((sorted[mid - 1] + sorted[mid]) / 2);
+}
+// 依結案日排序後最長的連續停損；同一天結案的以 code 排序固定順序。
+function maxConsecutiveLosses(results) {
+  const ordered = [...(results || [])].sort((a, b) => String(a.resolvedAt).localeCompare(String(b.resolvedAt)) || String(a.code).localeCompare(String(b.code)));
+  let best = 0;
+  let run = 0;
+  for (const item of ordered) {
+    run = item.status === "loss" ? run + 1 : 0;
+    if (run > best) best = run;
+  }
+  return best;
+}
+// 同一結案日的平均報酬最低的那天：讓「某一天整批被掃掉」看得見。
+function worstResolvedDay(results) {
+  const byDay = new Map();
+  for (const item of results || []) {
+    const day = String(item.resolvedAt || "");
+    if (!day || !Number.isFinite(item.resultPct)) continue;
+    const bucket = byDay.get(day) || { day, sum: 0, count: 0 };
+    bucket.sum += item.resultPct;
+    bucket.count += 1;
+    byDay.set(day, bucket);
+  }
+  let worst = null;
+  for (const bucket of byDay.values()) {
+    const avg = bucket.sum / bucket.count;
+    if (!worst || avg < worst.avgResultPct) worst = { day: bucket.day, avgResultPct: roundTo(avg), count: bucket.count };
+  }
+  return worst;
+}
+
 async function buildSwingVerificationSummary() {
   if (swingVerifySummaryCache.value && swingVerifySummaryCache.expiresAt > Date.now()) {
     return swingVerifySummaryCache.value;
@@ -11248,6 +11285,8 @@ async function buildSwingVerificationSummary() {
         samples: 0, wins: 0, losses: 0, expired: 0, pending: 0, stalled: 0,
         resolved: 0, sumResultPct: 0, sumDaysHeld: 0,
         periodicCallSamples: 0, periodicCallResolved: 0,
+        // 每筆結案的明細：算 PF／中位數／連虧／最差單日，並把分盤撮合（處置股）從 headline 分母拿掉。
+        results: [],
         // 依驗證單建立當天的大盤位階分層（同一批紀錄拆兩欄，不改選股）；舊紀錄沒有 regime → unknown。
         regimes: {
           aboveMa60: { resolved: 0, wins: 0 },
@@ -11275,36 +11314,67 @@ async function buildSwingVerificationSummary() {
         const bucket = s.regimes[regimeBucket(entry.regime)];
         bucket.resolved += 1;
         if (entry.status === "win") bucket.wins += 1;
+        s.results.push({
+          code: entry.code,
+          status: entry.status,
+          resultPct: Number.isFinite(entry.resultPct) ? entry.resultPct : 0,
+          daysHeld: Number(entry.daysHeld) || 0,
+          resolvedAt: entry.resolvedAt || day,
+          periodic: Boolean(entry.fillModel && entry.fillModel !== "continuous"),
+        });
       }
       byScenario.set(entry.scenario, s);
       all.push({ day, ...entry });
     }
   }
-  const scenarios = [...byScenario.values()].map((s) => ({
-    scenario: s.scenario,
-    samples: s.samples,
-    wins: s.wins,
-    losses: s.losses,
-    expired: s.expired,
-    pending: s.pending,
-    stalled: s.stalled,
-    resolved: s.resolved,
-    // 低於最小樣本時回 null——不是「沒有資料」，而是「還不足以當成結論」。
-    winRate: s.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((s.wins / s.resolved) * 1000) / 10 : null,
-    winRateMinSamples: WIN_RATE_MIN_SAMPLES,
-    avgResultPct: s.resolved ? Math.round((s.sumResultPct / s.resolved) * 100) / 100 : null,
-    avgResultPctNet: s.resolved ? netReturnPct(s.sumResultPct / s.resolved) : null,
-    avgDaysHeld: s.resolved ? Math.round((s.sumDaysHeld / s.resolved) * 10) / 10 : null,
-    // 分盤撮合（處置期間）的樣本數：仍計入上面的勝率，但要能單獨看見。
-    periodicCallSamples: s.periodicCallSamples,
-    periodicCallResolved: s.periodicCallResolved,
-    // 大盤季線上／下分層；各自也套最小樣本門檻，低於門檻只給筆數不給百分比。
-    byRegime: Object.fromEntries(Object.entries(s.regimes).map(([bucket, value]) => [bucket, {
-      resolved: value.resolved,
-      wins: value.wins,
-      winRate: value.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((value.wins / value.resolved) * 1000) / 10 : null,
-    }])),
-  }));
+  const scenarios = [...byScenario.values()].map((s) => {
+    // headline 的分母只算連續競價：處置期間是分盤集合競價，日 K 高低價只是幾十次撮合的極值，
+    // 「觸價」判定的前提在那些樣本上不成立，而且處置股要預收款券、觀察用的散戶多半不會做。
+    // 計數（resolved／wins／losses／expired）仍是全部，另回 withPeriodicCall 讓含處置股的口徑也看得到。
+    const continuous = s.results.filter((item) => !item.periodic);
+    const cWins = continuous.filter((item) => item.status === "win").length;
+    const cSum = continuous.reduce((sum, item) => sum + item.resultPct, 0);
+    const cDays = continuous.reduce((sum, item) => sum + item.daysHeld, 0);
+    const gains = continuous.filter((item) => item.resultPct > 0).reduce((sum, item) => sum + item.resultPct, 0);
+    const lossesAbs = continuous.filter((item) => item.resultPct < 0).reduce((sum, item) => sum + Math.abs(item.resultPct), 0);
+    const allWins = s.results.filter((item) => item.status === "win").length;
+    return {
+      scenario: s.scenario,
+      samples: s.samples,
+      wins: s.wins,
+      losses: s.losses,
+      expired: s.expired,
+      pending: s.pending,
+      stalled: s.stalled,
+      resolved: s.resolved,
+      continuousResolved: continuous.length,
+      // 低於最小樣本時回 null——不是「沒有資料」，而是「還不足以當成結論」。
+      winRate: continuous.length >= WIN_RATE_MIN_SAMPLES ? Math.round((cWins / continuous.length) * 1000) / 10 : null,
+      winRateMinSamples: WIN_RATE_MIN_SAMPLES,
+      avgResultPct: continuous.length ? Math.round((cSum / continuous.length) * 100) / 100 : null,
+      avgResultPctNet: continuous.length ? netReturnPct(cSum / continuous.length) : null,
+      avgDaysHeld: continuous.length ? Math.round((cDays / continuous.length) * 10) / 10 : null,
+      // 分佈指標：等權平均會把「一週內 75/88 筆停損」和「平穩小虧」混成同一個數字。
+      profitFactor: lossesAbs > 0 ? roundTo(gains / lossesAbs) : null,
+      medianResultPct: median(continuous.map((item) => item.resultPct)),
+      maxConsecutiveLosses: maxConsecutiveLosses(continuous),
+      worstDay: worstResolvedDay(continuous),
+      // 分盤撮合（處置期間）的樣本數：不進 headline 分母，但要能單獨看見（含處置股的口徑另列）。
+      periodicCallSamples: s.periodicCallSamples,
+      periodicCallResolved: s.periodicCallResolved,
+      withPeriodicCall: {
+        resolved: s.resolved,
+        wins: allWins,
+        winRate: s.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((allWins / s.resolved) * 1000) / 10 : null,
+      },
+      // 大盤季線上／下分層；各自也套最小樣本門檻，低於門檻只給筆數不給百分比。
+      byRegime: Object.fromEntries(Object.entries(s.regimes).map(([bucket, value]) => [bucket, {
+        resolved: value.resolved,
+        wins: value.wins,
+        winRate: value.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((value.wins / value.resolved) * 1000) / 10 : null,
+      }])),
+    };
+  });
   all.sort((a, b) => String(b.resolvedAt || b.day).localeCompare(String(a.resolvedAt || a.day)));
   const body = {
     ok: true,
@@ -11328,7 +11398,8 @@ async function buildSwingVerificationSummary() {
       `勝率需累積 ${WIN_RATE_MIN_SAMPLES} 筆結案才顯示：分母只含已結案，而達標／停損常 1~3 天就結案、超時要等第 ${SWING_VERIFY_MAX_DAYS} 個交易日，初期分母偏向快速觸價的極端樣本。同一天選出的標的也高度共享大盤走勢，有效樣本數遠小於檔數。`,
       `因官方日 K 缺漏而停在缺口前超過 ${SWING_VERIFY_STALLED_DAYS} 天的驗證單會標為「卡住」：它們不會自行結案，也永遠不會進入勝率分母，因此分母會比實際發出的訊號數少。`,
       "除權息／減資當天，若交易所公告說有事件但官方比率還沒發布（計算結果表約次一營業日才有），該張驗證單會暫停推進而不是拿事件前的進場／停損／目標去比事件後的價格——否則除息當天必然被記成假停損。等比率到齊後會自動接著判，觀察天數不會被停等吃掉。",
-      "處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到。這些樣本仍計入上面的勝率，但會單獨標示筆數；2026-07-27 之前建立的驗證單沒有記錄撮合方式，一律當成連續競價。",
+      "處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到。這些樣本不進主要勝率的分母，改在「含處置股」另列；2026-07-27 之前建立的驗證單沒有記錄撮合方式，一律當成連續競價。",
+      "PF（profit factor）＝連續競價樣本的獲利總和 ÷ 虧損總和；中位數與最長連虧用來看分佈，等權平均會把「一週內整批停損」和「平穩小虧」混成同一個數字。",
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
@@ -13762,6 +13833,7 @@ export {
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification,
   swingAdvanceTargetDate,
   buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
+  median, maxConsecutiveLosses, worstResolvedDay,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,
   normalizeDividendMarketRows, DIVIDEND_RATIO_MAX_PLAUSIBLE, appendDividendHistory,
