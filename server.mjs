@@ -13941,6 +13941,8 @@ function summarizeMarketBreadth(quotes, asOfCompact) {
   let flat = 0;
   for (const quote of quotes || []) {
     if (asOfCompact && toCompactDate(quote?.rawDate || quote?.asOf) !== asOfCompact) continue;
+    // 只算普通股：整批收盤含 ETF／ETN／DR／特別股，債券 ETF 近百檔跟利率同向，升息日整批下跌會把家數拉偏。
+    if (!isOrdinaryStock(quote)) continue;
     // Number(null)===0 的陷阱：除權息日還沒補參考價的列 change／previousClose 都是 null，不可算成平盤。
     if (quote?.change === null || quote?.change === undefined || quote?.previousClose === null || quote?.previousClose === undefined) continue;
     const change = Number(quote.change);
@@ -13966,14 +13968,30 @@ async function buildMarketBreadth() {
     const [regime, summary, calendar] = await Promise.all([
       getCurrentRegime(asOf),
       getMarketSummary().catch((error) => { warnings.push(`大盤／期指摘要抓取失敗：${error.message}`); return null; }),
-      getTradingCalendarEvidence().catch(() => ({ holidayRows: [] })),
+      getTradingCalendarEvidence().catch(() => null),
     ]);
     if (!regime) warnings.push("加權指數歷史暫時抓不到，位階（季線上／下）本輪無法判定。");
     const taiex = summary?.markets?.taiex;
     const tx = summary?.markets?.tx;
+    // 15:00 後期交所 MIS 給的是夜盤價：減 13:30 的加權收盤 ＝ 夜盤變動 ＋ 真基差。時段與合約月份一律帶出去，
+    // 前端只在日盤才稱「基差」；結算週換月時基差會跳一個月的持有成本，看得到月份才分得出來。
     const basis = Number.isFinite(Number(taiex?.price)) && Number.isFinite(Number(tx?.price)) && !tx?.stale
-      ? { points: roundTo(Number(tx.price) - Number(taiex.price)), pct: roundTo(((Number(tx.price) - Number(taiex.price)) / Number(taiex.price)) * 100, 3), txAsOf: tx.asOf || null, taiexAsOf: taiex.asOf || null }
+      ? {
+          points: roundTo(Number(tx.price) - Number(taiex.price)),
+          pct: roundTo(((Number(tx.price) - Number(taiex.price)) / Number(taiex.price)) * 100, 3),
+          session: tx.session || "",
+          contractMonth: tx.contractMonth || "",
+          txAsOf: tx.asOf || null,
+          taiexAsOf: taiex.asOf || null,
+        }
       : null;
+    // 開休市表抓不到時事件日期沒辦法順延（春節休市那週的結算日會直接印成休市日）：不能靜默，
+    // 要警告並把每個事件標 rolled: "unknown"。
+    const holidayStatus = calendar?.sources?.holidays?.status || "unavailable";
+    const calendarKnown = Boolean(calendar) && holidayStatus !== "unavailable";
+    if (!calendarKnown) warnings.push("開休市表暫時抓不到，事件日期未依休市順延（遇假日可能顯示成休市日）。");
+    const events = upcomingMarketEvents(toTaipeiCompactDate(), calendar?.holidayRows || [], 7)
+      .map((event) => (calendarKnown ? event : { ...event, rolled: "unknown" }));
     const body = {
       ok: true,
       generatedAt: new Date().toISOString(),
@@ -13981,7 +13999,7 @@ async function buildMarketBreadth() {
       taiex: regime,
       breadth: summarizeMarketBreadth([...reference.byCode.values()], asOf),
       basis,
-      events: upcomingMarketEvents(toTaipeiCompactDate(), calendar?.holidayRows || [], 7),
+      events,
       warnings: unique(warnings),
     };
     marketBreadthCache = { expiresAt: Date.now() + 5 * 60 * 1000, value: body, inFlight: null };

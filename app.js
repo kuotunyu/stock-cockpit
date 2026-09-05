@@ -5836,8 +5836,11 @@ function renderMarketStanceLine() {
   const breadth = b.total
     ? `漲 <span class="positive">${b.up}</span>／跌 <span class="negative">${b.down}</span>／平 ${b.flat}${Number.isFinite(b.upRatio) ? `（上漲 ${Math.round(b.upRatio * 100)}%）` : ""}`
     : "漲跌家數未知";
+  // 夜盤價減現貨收盤不是基差（多了夜盤自己的變動），只有日盤才用「基差」這個詞；合約月份一起顯示。
+  const basisLabel = data.basis?.session === "夜盤" ? "夜盤 vs 現貨收盤" : "期指基差";
+  const basisMonth = data.basis?.contractMonth ? `（${escapeHtml(data.basis.contractMonth)}）` : "";
   const basis = data.basis && Number.isFinite(data.basis.points)
-    ? `期指基差 ${data.basis.points >= 0 ? "+" : ""}${formatNumber(data.basis.points)}`
+    ? `${basisLabel} ${data.basis.points >= 0 ? "+" : ""}${formatNumber(data.basis.points)}${basisMonth}`
     : "";
   const events = (data.events || []).length
     ? `本週事件：${data.events.map((e) => `${String(e.date).slice(4, 6)}/${String(e.date).slice(6, 8)} ${escapeHtml(e.label)}`).join("、")}`

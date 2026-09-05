@@ -28,11 +28,16 @@ test("upcomingMarketEvents：7 天窗、只列未來、休市順延到次一營�
 
 test("summarizeMarketBreadth：只算資料日等於基準日、有昨收的列；平盤不算漲跌", () => {
   const quotes = [
-    { code: "1", change: 1, previousClose: 100, rawDate: "20260904" },
-    { code: "2", change: -0.5, previousClose: 50, rawDate: "20260904" },
-    { code: "3", change: 0, previousClose: 20, rawDate: "20260904" },
-    { code: "4", change: 3, previousClose: 30, rawDate: "20260903" }, // 落後市場的舊價不算
-    { code: "5", change: null, previousClose: null, rawDate: "20260904" }, // 除權息日還沒補參考價
+    { code: "1101", name: "台泥", change: 1, previousClose: 100, rawDate: "20260904" },
+    { code: "2201", name: "裕隆", change: -0.5, previousClose: 50, rawDate: "20260904" },
+    { code: "3301", name: "泰安", change: 0, previousClose: 20, rawDate: "20260904" },
+    { code: "4401", name: "勤益", change: 3, previousClose: 30, rawDate: "20260903" }, // 落後市場的舊價不算
+    { code: "5501", name: "祥豐", change: null, previousClose: null, rawDate: "20260904" }, // 除權息日還沒補參考價
+    // 非普通股不進分母：債券 ETF 近百檔跟利率同向，升息日整批下跌會把「漲跌家數」拉偏
+    { code: "0050", name: "元大台灣50", change: 1, previousClose: 100, rawDate: "20260904" },
+    { code: "00679B", name: "元大美債20年", change: -0.1, previousClose: 30, rawDate: "20260904" },
+    { code: "2002A", name: "中鋼特", change: 0.5, previousClose: 20, rawDate: "20260904" },
+    { code: "910322", name: "康師傅-DR", change: -1, previousClose: 10, rawDate: "20260904" },
   ];
   assert.deepEqual(mod.summarizeMarketBreadth(quotes, "20260904"), { up: 1, down: 1, flat: 1, total: 3, upRatio: 0.3333 });
   assert.deepEqual(mod.summarizeMarketBreadth([], "20260904"), { up: 0, down: 0, flat: 0, total: 0, upRatio: null });

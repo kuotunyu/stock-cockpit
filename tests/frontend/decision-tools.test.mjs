@@ -70,6 +70,11 @@ test("市場位階一行：位階、漲跌家數、基差、事件；位階未�
   assert.match(unknown, /大盤位階未知/);
   assert.match(unknown, /本週無結算／財報截止事件/);
   assert.match(unknown, /market-stance-warn/);
+  // 15:00 後期交所 MIS 給的是夜盤價：減 13:30 的加權收盤 ＝ 夜盤變動 ＋ 真基差，不可再叫「基差」
+  const night = String(app.evalIn(`(() => { marketBreadthState.data = { ok: true, taiex: null, breadth: { total: 0 }, basis: { points: 120, session: "夜盤", contractMonth: "2026/09" }, events: [], warnings: [] }; return renderMarketStanceLine(); })()`));
+  assert.match(night, /夜盤 vs 現貨收盤 \+120/);
+  assert.doesNotMatch(night.replace(/title="[^"]*"/g, ""), /期指基差/, "可見文字不可再叫基差（title 裡的定義說明不算）");
+  assert.match(night, /2026\/09/, "合約月份要看得到（結算週換月時基差會跳一個月持有成本）");
 });
 
 test("持股面板：前三大占比；≥60% 標警告色", () => {
