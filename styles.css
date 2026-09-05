@@ -9044,9 +9044,61 @@ body.is-locked .app-shell {
 .holdings-panel[hidden] { display: none; }
 .hold-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 8px;
 }
+.hold-summary strong.is-warn { color: var(--warn-text); }
+
+/* 市場位階一行（隔日沖總覽與策略雷達共用）：資訊列，不是警告 */
+.market-stance {
+  margin: 6px 0 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
+}
+.market-stance.is-muted { color: var(--muted); }
+.market-stance .positive { color: var(--up-text); }
+.market-stance .negative { color: var(--down-text); }
+.market-stance-warn { margin-left: 6px; color: var(--warn-text); cursor: help; }
+
+/* 部位控管列：資金＋單筆風險 % */
+.swing-risk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 8px 16px 10px;
+}
+.swing-risk-bar label { display: inline-flex; align-items: center; gap: 6px; font-size: 15px; color: var(--muted-2); }
+.swing-risk-bar input {
+  width: 128px;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #202326;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 15px;
+}
+.swing-risk-bar label:last-of-type input { width: 72px; }
+.swing-risk-bar small { flex: 1 1 100%; color: var(--muted); font-size: var(--fs-note); }
+.swing-stat-size strong { color: var(--info-text); }
+
+/* 波段卡片動作列 */
+.swing-actions { display: flex; justify-content: flex-end; padding: 0 14px 12px; }
+.swing-plan-alerts {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 15px;
+  font-weight: 700;
+}
+.swing-plan-alerts:hover { color: var(--text); border-color: var(--muted); }
 @media (max-width: 560px) {
   .hold-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -2399,7 +2399,7 @@ function alertsForCode(code) {
   return priceAlertsState.alerts.filter((alert) => alert.code === clean);
 }
 
-function addPriceAlert(code, op, price) {
+function addPriceAlert(code, op, price, { silent = false, note = "" } = {}) {
   const clean = String(code || "").trim();
   const value = Number(price);
   if (!clean || !Number.isFinite(value) || value <= 0) {
@@ -2419,13 +2419,13 @@ function addPriceAlert(code, op, price) {
     code: clean,
     op: op === "<=" ? "<=" : ">=",
     price: Math.round(value * 100) / 100,
-    note: "",
+    note: String(note || "").slice(0, 60),
     active: true,
     createdAt: new Date().toISOString(),
     triggeredAt: "",
   });
   scheduleAlertSync();
-  showToast(`已設定 ${clean} 到價提醒`);
+  if (!silent) showToast(`已設定 ${clean} 到價提醒`);
   // 設定提醒是要求通知權限最自然的時機：使用者剛剛才表達「這件事發生時要通知我」。
   // 不在開啟頁面時就問——那種時機瀏覽器會懲罰，使用者也搞不懂為什麼要問。
   void requestPriceAlertNotifications({ silent: true });
@@ -3336,6 +3336,7 @@ function renderHoldingsPanel() {
   let totalUnrealized = 0;
   let pricedCost = 0; // 報酬率的分母只能算「有報價、已計入市值與未實現」的那部分成本
   let unpriced = 0;
+  const holdingValues = []; // 有報價的各檔市值，算集中度用
   const holdRows = holdings
     .map((h) => {
       const stock = byCode.get(h.code);
@@ -3348,6 +3349,7 @@ function renderHoldingsPanel() {
         totalValue += value;
         totalUnrealized += unrealized;
         pricedCost += h.cost;
+        holdingValues.push(value);
       } else {
         unpriced += 1;
       }
@@ -3506,9 +3508,14 @@ function renderHoldingsPanel() {
         ${closedPositionDividendActions.map(quickDividendButton).join("")}
       </div>`
     : "";
+  // 集中度：前三大持股占已報價市值的比例——散戶最常忽略的風險是「三檔就佔了八成」。
+  const top3Share = totalValue > 0 && holdingValues.length > 1
+    ? Math.round(([...holdingValues].sort((a, b) => b - a).slice(0, 3).reduce((sum, v) => sum + v, 0) / totalValue) * 100)
+    : null;
   panel.innerHTML = `
     <div class="hold-summary">
       <div><span>總市值</span><strong>${formatMoney(totalValue)}</strong></div>
+      ${top3Share != null ? `<div title="前三大持股市值 ÷ 已報價總市值；超過 60% 代表少數幾檔決定了整個組合的漲跌"><span>前三大占比</span><strong class="${top3Share >= 60 ? "is-warn" : ""}">${top3Share}%</strong></div>` : ""}
       <div><span>總成本</span><strong>${formatMoney(totalCost)}</strong></div>
       <div><span>未實現損益</span><strong class="${upTone}">${formatMoney(totalUnrealized, { signed: true })}${totalPct != null ? `（${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(1)}%）` : ""}</strong></div>
       <div><span>已實現累計</span><strong class="${realizedPnl >= 0 ? "is-up" : "is-down"}">${formatMoney(realizedPnl, { signed: true })}</strong></div>
@@ -5534,6 +5541,7 @@ function renderOvernightGroups() {
         <span><b>來源</b><span class="provenance-badge" data-kind="official">${escapeHtml(overnightState.source)}</span></span>
         <span><b>注意／處置</b>${state.showSurveillance ? `標示中 ${overnightState.surveillanceCount} 檔` : "目前隱藏"}</span>
         <span><b>週轉率</b>依官方發行股數</span>
+        ${state.overnightView === "overview" ? renderMarketStanceLine() : ""}
         ${state.overnightView !== "overview" ? `<span>${activeGroup?.[2] || ""}</span>` : ""}
       </div>
       ${warnings ? `<div class="overnight-summary-warnings">${warnings}</div>` : ""}
@@ -5793,9 +5801,129 @@ function renderBacktestPerformance() {
   `;
 }
 
+// ===== 市場位階／事件日曆（/api/market/breadth；只用官方源）=====
+// 兩個引擎的多頭結構只看個股 MA60，使用者以前完全看不到「今天大盤在哪」；這一行把大盤位階、
+// 漲跌家數、期指基差與未來 7 天的事件放在隔日沖總覽與策略雷達上方。5 分鐘內不重抓（伺服器同樣 5 分鐘快取）。
+const marketBreadthState = { loaded: false, loading: false, loadedAt: 0, data: null, error: "" };
+async function loadMarketBreadth({ force = false } = {}) {
+  if (marketBreadthState.loading) return;
+  if (!force && marketBreadthState.loaded && Date.now() - marketBreadthState.loadedAt < 5 * 60 * 1000) return;
+  marketBreadthState.loading = true;
+  try {
+    marketBreadthState.data = await fetchApi("/api/market/breadth");
+    marketBreadthState.error = "";
+    marketBreadthState.loaded = true;
+    marketBreadthState.loadedAt = Date.now();
+  } catch (error) {
+    marketBreadthState.error = error.message;
+  } finally {
+    marketBreadthState.loading = false;
+    renderLiveDataUpdate();
+  }
+}
+
+function renderMarketStanceLine() {
+  const data = marketBreadthState.data;
+  if (!data) {
+    if (marketBreadthState.error) return `<p class="market-stance is-muted">市場位階暫時無法取得：${escapeHtml(marketBreadthState.error)}</p>`;
+    return marketBreadthState.loading ? `<p class="market-stance is-muted">市場位階載入中…</p>` : "";
+  }
+  const t = data.taiex;
+  const stance = t
+    ? `大盤 ${Number(t.close).toLocaleString("en-US", { maximumFractionDigits: 2 })}・${t.aboveMa60 ? "季線上" : "季線下"}${t.aboveMa20 ? "・月線上" : "・月線下"}`
+    : "大盤位階未知";
+  const b = data.breadth || {};
+  const breadth = b.total
+    ? `漲 <span class="positive">${b.up}</span>／跌 <span class="negative">${b.down}</span>／平 ${b.flat}${Number.isFinite(b.upRatio) ? `（上漲 ${Math.round(b.upRatio * 100)}%）` : ""}`
+    : "漲跌家數未知";
+  const basis = data.basis && Number.isFinite(data.basis.points)
+    ? `期指基差 ${data.basis.points >= 0 ? "+" : ""}${formatNumber(data.basis.points)}`
+    : "";
+  const events = (data.events || []).length
+    ? `本週事件：${data.events.map((e) => `${String(e.date).slice(4, 6)}/${String(e.date).slice(6, 8)} ${escapeHtml(e.label)}`).join("、")}`
+    : "本週無結算／財報截止事件";
+  const title = "大盤位階＝加權指數相對 20／60 日均線（只用來分層看成績單，不是選股濾網）；漲跌家數只算資料日等於基準日的上市櫃股票；期指基差＝台指期近月 − 加權指數（正＝正價差）。事件：台指期最後結算日（第三個週三，遇休市順延）、月營收公告截止（10 日）、季報截止。";
+  return `<p class="market-stance" title="${escapeHtml(title)}">${[stance, breadth, basis, events].filter(Boolean).join("｜")}${(data.warnings || []).length ? `<span class="market-stance-warn" title="${escapeHtml(data.warnings.join("\n"))}">⚠</span>` : ""}</p>`;
+}
+
+// ===== 部位控管：單筆風險 % → 建議張數 =====
+// 波段計畫給了進場與結構停損，卻沒說「買幾張」——這是散戶最常做錯的一件事。
+// 建議張數 = floor(資金 × 風險% ÷ (每張的進場−停損損失))；停損不在進場下方或資金未填就不建議。
+const CAPITAL_KEY = "stock1.capital.v1";
+const RISK_PCT_KEY = "stock1.riskPct.v1";
+const positionSizingState = { capital: 0, riskPct: 1 };
+try {
+  positionSizingState.capital = Math.max(0, Number(localStorage.getItem(CAPITAL_KEY)) || 0);
+  const savedRisk = Number(localStorage.getItem(RISK_PCT_KEY));
+  if (Number.isFinite(savedRisk) && savedRisk > 0) positionSizingState.riskPct = Math.min(5, savedRisk);
+} catch {
+  // localStorage 不可用時用預設。
+}
+function positionSizeLots(capital, riskPct, entry, stop) {
+  // Number(null)===0 的陷阱：缺停損或缺進場一律「算不出來」，不是 0 元停損。
+  if ([capital, riskPct, entry, stop].some((value) => value === null || value === undefined || value === "")) return null;
+  const cap = Number(capital);
+  const risk = Number(riskPct);
+  const e = Number(entry);
+  const s = Number(stop);
+  if (![cap, risk, e, s].every(Number.isFinite) || cap <= 0 || risk <= 0 || e <= s || e <= 0) return null;
+  const perLotLoss = (e - s) * 1000;
+  const budget = cap * (risk / 100);
+  const lots = Math.floor(budget / perLotLoss);
+  return { lots, budget: Math.round(budget), perLotLoss: Math.round(perLotLoss), lotCost: Math.round(e * 1000) };
+}
+function savePositionSizing({ capital, riskPct }) {
+  if (capital !== undefined) positionSizingState.capital = Math.max(0, Number(capital) || 0);
+  if (riskPct !== undefined) positionSizingState.riskPct = Math.min(5, Math.max(0.1, Number(riskPct) || 1));
+  try {
+    localStorage.setItem(CAPITAL_KEY, String(positionSizingState.capital));
+    localStorage.setItem(RISK_PCT_KEY, String(positionSizingState.riskPct));
+  } catch {
+    // 不影響顯示。
+  }
+}
+function renderPositionSizeStat(plan) {
+  const sizing = positionSizeLots(positionSizingState.capital, positionSizingState.riskPct, plan?.entry, plan?.structuralStop);
+  if (!sizing) return "";
+  const affordable = Math.floor(positionSizingState.capital / sizing.lotCost);
+  const lots = Math.min(sizing.lots, affordable);
+  const text = lots >= 1
+    ? `${lots} 張`
+    : "不到 1 張";
+  return `<div class="swing-stat swing-stat-size" title="依「資金 × 單筆風險 %」÷「每張的進場−結構停損損失」算出的建議張數（${formatMoney(sizing.budget)} ÷ ${formatMoney(sizing.perLotLoss)}／張）；再以資金買得起的張數封頂。零股不在此計算內。"><span>建議張數 <i class="swing-stat-hint">風險 ${positionSizingState.riskPct}%</i></span><strong>${text}</strong></div>`;
+}
+
+// ===== 計畫 → 到價提醒一鍵 =====
+function createPlanAlerts(code, plan) {
+  if (!authState.user) {
+    showToast("到價提醒需要登入（更多 → 帳號管理）");
+    return { created: 0, skipped: 0 };
+  }
+  const wanted = [
+    ["<=", plan?.structuralStop, "結構停損"],
+    [">=", plan?.target, "目標"],
+    [">=", plan?.trailingTrigger, "啟動移停"],
+  ].filter(([, price]) => Number.isFinite(Number(price)) && Number(price) > 0);
+  let created = 0;
+  let skipped = 0;
+  for (const [op, price, label] of wanted) {
+    const rounded = Math.round(Number(price) * 100) / 100;
+    const exists = priceAlertsState.alerts.some((alert) => alert.code === code && alert.op === op && Number(alert.price) === rounded);
+    if (exists) {
+      skipped += 1;
+      continue;
+    }
+    if (addPriceAlert(code, op, rounded, { silent: true, note: label })) created += 1;
+    else break; // 上限或其他原因；addPriceAlert 已 toast
+  }
+  if (created || skipped) showToast(`${code} 已建立 ${created} 筆計畫提醒${skipped ? `（${skipped} 筆已存在）` : ""}`);
+  return { created, skipped };
+}
+
 async function loadOvernightSignals({ notify = false } = {}) {
   overnightState.loading = true;
   overnightState.error = "";
+  void loadMarketBreadth();
   try {
     const payload = await fetchApi("/api/overnight?limit=20");
     if (!payload.ok || !payload.groups) throw new Error(payload.error || "API 回傳格式不正確");
@@ -5842,6 +5970,7 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
   renderStrategyBoard();
   try {
     const refreshParam = refresh ? "&refresh=1" : "";
+    void loadMarketBreadth();
     const payload = await fetchApi(`/api/swing?scenario=${encodeURIComponent(requestedScenario)}&limit=40${refreshParam}`);
     if (requestId !== strategyLoadSeq) return; // 已過期：有更新的請求接手了
     if (!payload.ok || !Array.isArray(payload.picks)) throw new Error(payload.error || "API 回傳格式不正確");
@@ -6021,8 +6150,12 @@ function renderSwingCard(pick) {
         <div class="swing-stat swing-rr ${rrTone}" title="盈虧比＝(目標−進場)÷(進場−結構停損)。括號內是扣掉一買一賣手續費與證交稅之後的淨值，選股門檻用的是淨值（毛值會讓「剛好過關」的設定其實賠錢）"><span>${glossLink("盈虧比")}</span><strong>${Number.isFinite(rr) ? rr.toFixed(1) : "—"}${
           Number.isFinite(pick.plan?.rrNet) ? `<i class="swing-stat-hint">淨 ${pick.plan.rrNet.toFixed(1)}</i>` : ""
         }</strong></div>
+        ${renderPositionSizeStat(pick.plan)}
       </div>
       ${riskRewardBar}
+      <div class="swing-actions">
+        <button type="button" class="swing-plan-alerts" data-plan-alerts="${pick.code}" data-plan-stop="${Number(pick.plan?.structuralStop) || ""}" data-plan-target="${Number(pick.plan?.target) || ""}" data-plan-trailing="${Number(pick.plan?.trailingTrigger) || ""}" title="一鍵建立三筆到價提醒：跌到結構停損、漲到目標、漲到啟動移停（需登入；已存在的不重複）">建立三筆到價提醒</button>
+      </div>
     </article>
   `;
 }
@@ -6125,6 +6258,14 @@ function swingDistributionLine(s) {
   return `<small class="sv-regime" title="PF＝獲利總和 ÷ 虧損總和；中位數與最長連虧看分佈，等權平均會把「整批停損的一週」和「平穩小虧」混成同一個數字。處置期間是分盤集合競價，那些樣本不進主要勝率的分母。">${[parts.join("・"), periodic].filter(Boolean).join("<br>")}</small>`;
 }
 
+// 口徑並陳：「次日開盤進場」——訊號要等收盤後才算得出，真實進場多半是次日開盤；只有新推進的單有。
+function swingNextOpenLine(nextOpen) {
+  if (!nextOpen || !Number(nextOpen.resolved)) return "";
+  const rate = nextOpen.winRate != null ? `${nextOpen.winRate}%` : `${nextOpen.wins}/${nextOpen.resolved}`;
+  const avg = nextOpen.avgResultPct != null ? `・平均 ${nextOpen.avgResultPct >= 0 ? "+" : ""}${nextOpen.avgResultPct}%` : "";
+  return `<small class="sv-regime" title="同一批驗證單改以「第一個交易日的開盤價」當進場價重算（扣費稅後淨報酬 > 0 算勝）。訊號依賴收盤後才發布的整批收盤，真實進場多半是次日開盤，所以並陳這個口徑；只有 2026-09-05 之後推進的單有這個數字。">次日開盤進場 ${rate}（${nextOpen.resolved} 筆）${avg}</small>`;
+}
+
 // 場景勝率依驗證單建立當天的大盤位階（季線上／下）分兩欄；未達最小樣本只給筆數。
 function swingRegimeLine(byRegime) {
   if (!byRegime) return "";
@@ -6176,6 +6317,7 @@ function renderSwingVerifyPanel() {
           <small>結案 ${resolved}（達標 ${s.wins}・停損 ${s.losses}・超時 ${s.expired}）・追蹤中 ${s.pending}${s.stalled ? `<span class="sv-stalled" title="這些單因官方日 K 長期缺漏而停在缺口前，不會自行結案，也永遠不會進入上面的勝率分母。">（含卡住 ${s.stalled}）</span>` : ""}${s.avgResultPct != null ? `・平均 ${s.avgResultPct >= 0 ? "+" : ""}${s.avgResultPct}%${s.avgResultPctNet != null ? `（淨 ${s.avgResultPctNet >= 0 ? "+" : ""}${s.avgResultPctNet}%）` : ""}` : ""}${s.avgDaysHeld != null ? `・平均持有 ${s.avgDaysHeld} 天` : ""}</small>
           ${swingDistributionLine(s)}
           ${swingRegimeLine(s.byRegime)}
+          ${swingNextOpenLine(s.nextOpenEntry)}
         </div>`;
     })
     .join("");
@@ -6198,7 +6340,7 @@ function renderSwingVerifyPanel() {
   panel.innerHTML = `
     <div class="sv-head">
       <strong>場景勝率（前向驗證）</strong>
-      <small title="每天的選股依官方日 K 逐日對答案：先碰目標＝達標、先碰結構停損＝停損；同一天兩邊都碰到，保守記停損。漏開 App 會按日期補判，中間缺 K 則停住、不跳日。&#10;處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到；這些樣本仍計入勝率，但會單獨標出筆數。&#10;除權息當天若官方比率還沒發布（計算結果表約次一營業日才有），該單會暫停推進而不是拿事件前的停損價去比事件後的價格；等比率到齊會自動接著判，觀察天數不會被吃掉。">官方日 K 逐日補驗・雙觸保守記停損${data.dataGapCount ? `・${data.dataGapCount} 筆待補缺口` : ""}${data.corporateActionPendingCount ? `・${data.corporateActionPendingCount} 筆等官方除權息比率` : ""}${data.periodicCallCount ? `・${data.periodicCallCount} 筆分盤撮合` : ""}${data.haltedCount ? `・${data.haltedCount} 筆停牌中` : ""}${data.deferredExitCount ? `・${data.deferredExitCount} 筆跌停鎖死順延出場` : ""}${legacySamples ? `・舊版 ${legacySamples} 筆另存` : ""}</small>
+      <small title="每天的選股依官方日 K 逐日對答案：先碰目標＝達標、先碰結構停損＝停損；同一天兩邊都碰到，保守記停損。漏開 App 會按日期補判，中間缺 K 則停住、不跳日。&#10;處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到；這些樣本仍計入勝率，但會單獨標出筆數。&#10;除權息當天若官方比率還沒發布（計算結果表約次一營業日才有），該單會暫停推進而不是拿事件前的停損價去比事件後的價格；等比率到齊會自動接著判，觀察天數不會被吃掉。">官方日 K 逐日補驗・雙觸保守記停損${data.dataGapCount ? `・${data.dataGapCount} 筆待補缺口` : ""}${data.corporateActionPendingCount ? `・${data.corporateActionPendingCount} 筆等官方除權息比率` : ""}${data.periodicCallCount ? `・${data.periodicCallCount} 筆分盤撮合` : ""}${data.haltedCount ? `・${data.haltedCount} 筆停牌中` : ""}${data.deferredExitCount ? `・${data.deferredExitCount} 筆跌停鎖死順延出場` : ""}${legacySamples ? `・舊版 ${legacySamples} 筆另存` : ""}${data.allVersions && data.allVersions.versions > 1 ? `・全版本合併 ${data.allVersions.winRate != null ? `${data.allVersions.winRate}%` : `${data.allVersions.wins}/${data.allVersions.resolved}`}（${data.allVersions.resolved} 筆結案）` : ""}</small>
     </div>
     <div class="sv-chips">${chips}</div>
     ${recentRows ? `
@@ -6250,6 +6392,7 @@ function renderStrategyBoard() {
     el.strategyMeta.innerHTML = strategyState.loaded
       ? `
         <div class="strategy-statpanel">
+          ${renderMarketStanceLine()}
           <div class="strategy-statbar">
             <span class="m" title="從流動性最好的 ${strategyState.candidateCount || "—"} 檔全市場個股中（依當日成交量每日重選、非固定名單），掃出符合型態的 ${strategyState.matchedCount} 檔（畫面顯示前 ${strategyState.picks.length} 檔）">命中 <span class="m-v">${strategyState.matchedCount}</span>／${strategyState.candidateCount || "—"} 檔</span>
             <span class="m-sep" aria-hidden="true"></span>
@@ -12722,6 +12865,35 @@ function openScreenHelp(trigger = document.activeElement) {
   openGlossary(SCREEN_HELP_TERMS[state.screen] || "", false, trigger, "畫面說明");
 }
 document.getElementById("screenHelp")?.addEventListener("click", (event) => openScreenHelp(event.currentTarget));
+
+// 波段卡片的「建立三筆到價提醒」：用 capture 階段攔下並停止傳遞，否則同一個點擊會順便把卡片打開。
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest("[data-plan-alerts]");
+  if (!button) return;
+  event.stopPropagation();
+  event.preventDefault();
+  createPlanAlerts(button.dataset.planAlerts, {
+    structuralStop: Number(button.dataset.planStop),
+    target: Number(button.dataset.planTarget),
+    trailingTrigger: Number(button.dataset.planTrailing),
+  });
+}, true);
+
+// 部位控管輸入：資金與單筆風險 % 只存在這台裝置（localStorage），改了就重繪波段卡片的建議張數。
+function syncPositionSizingInputs() {
+  const capital = document.getElementById("swingCapital");
+  const risk = document.getElementById("swingRiskPct");
+  if (capital && document.activeElement !== capital) capital.value = positionSizingState.capital ? String(positionSizingState.capital) : "";
+  if (risk && document.activeElement !== risk) risk.value = String(positionSizingState.riskPct);
+}
+syncPositionSizingInputs();
+document.addEventListener("input", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target || (target.id !== "swingCapital" && target.id !== "swingRiskPct")) return;
+  savePositionSizing(target.id === "swingCapital" ? { capital: target.value } : { riskPct: target.value });
+  if (strategyState.loaded) renderStrategyBoard();
+});
 
 // 常駐說明條的收合（看過一次就不用每次佔四行）與手機版資料來源 pill 的展開。
 const SCOPE_NOTE_COLLAPSED_KEY = "stock1.scopeNoteCollapsed.v1";

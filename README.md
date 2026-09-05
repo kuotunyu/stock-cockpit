@@ -126,7 +126,7 @@ sequenceDiagram
 |---|---|---|
 | **服務健康** | `GET /api/health`、`GET /api/app-version` | 系統狀態、上游資料品質警告與數據源連線稽核；本機 build commit 與 GitHub 更新比對 |
 | **身分驗證** | `/api/auth/*`、`/api/admin/users` | 管理者帳號登入、Session 管理與權限控制 |
-| **行情與大盤** | `/api/quotes`、`/api/markets`、`/api/technical-analysis` | 即時大盤、三大法人、融資融券與技術分析 K 線 |
+| **行情與大盤** | `/api/quotes`、`/api/markets`、`/api/market/breadth`、`/api/technical-analysis` | 即時大盤、三大法人、融資融券與技術分析 K 線；`market/breadth` 回大盤位階（相對 20／60 日均線）、上市櫃漲跌家數、期指基差與未來 7 天的結算／營收／財報截止事件 |
 | **選股引擎** | `/api/overnight*`、`/api/swing*` | 隔日沖、波段選股訊號與每日歷史前向驗證成績單 |
 | **注意處置** | `/api/surveillance-board` | 官方注意股票、處置股票與全額交割即時看板 |
 | **個人帳本** | `/api/watchlists`、`/api/alerts`、`/api/trades` | 自選股、到價提醒、交易帳本與備份匯出復原 |
