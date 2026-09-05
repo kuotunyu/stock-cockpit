@@ -10,7 +10,9 @@ import { installFetchMock } from "./fetch-mock.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 export const SERVER_PATH = resolve(here, "../../server.mjs");
 
-async function configureTestEnvironment({ dataDir, dbPath } = {}) {
+// env：在預設值之後套用的覆寫；值為 undefined 代表刪除該變數（例如 { APP_SECRET: undefined }
+// 讓 server 以「沒設 APP_SECRET」的狀態載入）。
+async function configureTestEnvironment({ dataDir, dbPath, env = {} } = {}) {
   const isolatedDataDir = dataDir
     ? resolve(dataDir)
     : await mkdtemp(join(tmpdir(), "stock1-test-"));
@@ -29,21 +31,25 @@ async function configureTestEnvironment({ dataDir, dbPath } = {}) {
   if (dbPath === undefined) delete process.env.DB_PATH;
   else process.env.DB_PATH = resolve(dbPath);
   process.env.PORT = "0";
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = String(value);
+  }
 
   return isolatedDataDir;
 }
 
 // 純函式測試用：設好環境後 import server.mjs（不開伺服器、不打網路）。
-export async function importServer({ routes = [], dataDir, dbPath } = {}) {
-  const isolatedDataDir = await configureTestEnvironment({ dataDir, dbPath });
+export async function importServer({ routes = [], dataDir, dbPath, env } = {}) {
+  const isolatedDataDir = await configureTestEnvironment({ dataDir, dbPath, env });
   const mock = installFetchMock(routes); // 空表＝tripwire，任何外部呼叫都會 throw
   const mod = await import(pathToFileURL(SERVER_PATH).href);
   return { mod, mock, dataDir: isolatedDataDir };
 }
 
 // HTTP 整合測試用：真的把伺服器綁上臨時埠並登入。
-export async function bootServer({ routes = [], dataDir: requestedDataDir, dbPath } = {}) {
-  const dataDir = await configureTestEnvironment({ dataDir: requestedDataDir, dbPath });
+export async function bootServer({ routes = [], dataDir: requestedDataDir, dbPath, env } = {}) {
+  const dataDir = await configureTestEnvironment({ dataDir: requestedDataDir, dbPath, env });
   const mock = installFetchMock(routes);
   let mod = null;
   let server = null;

@@ -1826,10 +1826,50 @@ function sanitizeUser(user) {
   };
 }
 
+// 憑證檔一律放在 DATA_DIR/certs/ 底下，DB 只存檔名。
+// 任意路徑會變成「本機檔案存在 oracle」（existsSync 對任何路徑回答有沒有），
+// Windows 上指到 \\攻擊者\share 還會讓伺服器主動對外發 SMB／NTLM 連線。
+const brokerCertDir = join(dataDir, "certs");
+const LEGACY_CERT_PATH_HINT = "這筆設定用的是舊版的完整路徑；請把憑證檔放到 .data/certs/ 並重新儲存（填檔名即可）。";
+
+function brokerCertFilePath(credentials) {
+  const name = String(credentials?.certPath || "");
+  // 舊格式存的是絕對路徑：不再跟著去讀（那正是 oracle），要求使用者重存。
+  if (!name || name !== basename(name)) return null;
+  return join(brokerCertDir, name);
+}
+
+async function resolveBrokerCertPath(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return { error: "需要憑證檔名（檔案放在 .data/certs/ 裡）。" };
+  if (/^(\\\\|\/\/)/.test(raw) || /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    return { error: "憑證檔不可是網路路徑或網址，請把 .pfx 放到 .data/certs/ 並填檔名。" };
+  }
+  const candidate = isAbsolute(raw) ? raw : join(brokerCertDir, raw);
+  let certDirReal;
+  try {
+    certDirReal = await realpath(brokerCertDir);
+  } catch {
+    return { error: `找不到憑證資料夾 ${brokerCertDir}：請建立它、把 .pfx 放進去，再填檔名。` };
+  }
+  let fileReal;
+  try {
+    fileReal = await realpath(candidate);
+  } catch {
+    return { error: `在 ${brokerCertDir} 裡找不到 ${basename(candidate)}。憑證檔必須放在這個資料夾，欄位填檔名即可。` };
+  }
+  const rel = relative(certDirReal, fileReal);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel) || rel.includes(sep) || rel.includes("/")) {
+    return { error: `憑證檔必須直接放在 ${brokerCertDir} 裡（不可在子資料夾或其他位置）。` };
+  }
+  return { fileName: basename(fileReal) };
+}
+
 function safeBrokerCredentialStatus(credentials, savedPayload) {
+  const certFile = brokerCertFilePath(credentials);
   let certPathExists = false;
   try {
-    certPathExists = Boolean(credentials?.certPath) && existsSync(credentials.certPath);
+    certPathExists = Boolean(certFile) && existsSync(certFile);
   } catch {
     certPathExists = false;
   }
@@ -1840,6 +1880,9 @@ function safeBrokerCredentialStatus(credentials, savedPayload) {
     username: credentials?.personalId ? maskSecret(credentials.personalId) : "",
     certPathSet: Boolean(credentials?.certPath),
     certPathExists,
+    certPathHint: credentials?.certPath && !certFile ? LEGACY_CERT_PATH_HINT : "",
+    // 沒設 APP_SECRET 時派生金鑰是公開 repo 裡寫死的，UI 要能說「這等同明文」。
+    weakEncryption: usingDefaultAppSecret,
     updatedAt: savedPayload?.updatedAt || "",
   };
 }
@@ -7049,11 +7092,15 @@ async function getFubonStockClient(credentials, userId, updatedAt = "") {
   if (pending) await closeFubonClient(userId);
   if (cached) await closeFubonClient(userId);
   const promise = (async () => {
+    const certFile = brokerCertFilePath(credentials);
+    if (!certFile) {
+      throw new Error("憑證檔設定是舊格式（完整路徑）。請到「更多 → 富邦 API」把憑證放進 .data/certs/ 後重新儲存（填檔名即可）。");
+    }
     const { FubonSDK } = await import("fubon-neo");
     const sdk = new FubonSDK();
     try {
       await withPromiseTimeout(
-        Promise.resolve(sdk.login(credentials.personalId, credentials.password, credentials.certPath, credentials.certPassword)),
+        Promise.resolve(sdk.login(credentials.personalId, credentials.password, certFile, credentials.certPassword)),
         8000,
         "富邦登入",
       );
@@ -7252,6 +7299,8 @@ async function getBrokerSettingsStatus(userId) {
       providerLabel: "富邦新一代 API",
       status: saved?.decryptError ? "credential_error" : "not_configured",
       error: saved?.decryptError || "",
+      certPathHint: "",
+      weakEncryption: usingDefaultAppSecret,
       updatedAt: saved?.updatedAt || "",
     };
   }
@@ -7263,18 +7312,28 @@ async function getBrokerSettingsStatus(userId) {
 }
 
 async function saveBrokerSettings(auth, input) {
+  if (usingDefaultAppSecret) {
+    throw Object.assign(
+      new Error("尚未設定 APP_SECRET，券商憑證會以公開的預設金鑰加密（等同明文）。請先執行 npm run secret，把結果寫進 .env 的 APP_SECRET 後重啟伺服器，再儲存。"),
+      { status: 400, code: "BROKER_SECRET_REQUIRED" },
+    );
+  }
   const provider = input.provider === "fubon" ? "fubon" : "fubon";
+  const certResolved = await resolveBrokerCertPath(input.certPath);
+  if (certResolved.error) {
+    throw Object.assign(new Error(certResolved.error), { status: 400, code: "BROKER_CERT_PATH_INVALID" });
+  }
   const credentials = {
     provider,
     personalId: String(input.personalId || "").trim(),
     password: String(input.password || ""),
-    certPath: String(input.certPath || "").trim(),
+    certPath: certResolved.fileName,
     certPassword: String(input.certPassword || ""),
     apiKey: String(input.apiKey || "").trim(),
     apiSecret: String(input.apiSecret || ""),
   };
-  if (!credentials.personalId || !credentials.password || !credentials.certPath || !credentials.certPassword) {
-    throw new Error("富邦 API 設定不完整：需要身分證字號、登入密碼、憑證檔路徑與憑證密碼。");
+  if (!credentials.personalId || !credentials.password || !credentials.certPassword) {
+    throw new Error("富邦 API 設定不完整：需要身分證字號、登入密碼、憑證檔名與憑證密碼。");
   }
 
   const now = new Date().toISOString();
@@ -13329,6 +13388,8 @@ export {
   normalizeTwseMarginRow, normalizeTpexMarginRow, getInstitutionalData, getMarginData,
   // Host 白名單／來源位址（api-host-allowlist.test）
   isAllowedHost, hostnameOfHeader, clientAddressOf,
+  // 券商憑證檔（broker-settings-guard.test）
+  resolveBrokerCertPath, brokerCertFilePath,
   // 認證／加解密
   parseCookies, hashPassword, verifyPassword, hashToken, encryptJson, decryptJson,
   isValidUsername, LOGIN_FAIL_WINDOW_MS, LOGIN_FAILURE_MAX_ENTRIES, MAX_SESSIONS_PER_USER,

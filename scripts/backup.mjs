@@ -14,14 +14,31 @@
 //   npm run backup                                    之後可改設環境變數 STOCK1_BACKUP_DIR
 //
 // 要自動化就交給 Windows 工作排程器：程式填 npm、引數填 run backup、起始位置填專案資料夾。
-import { copyFile, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dataDir = process.env.DATA_DIR || join(root, ".data");
 const KEEP = 30;
+
+// APP_SECRET 沒設（或還是範例值、太短）時，DB 裡的券商憑證是用公開 repo 裡寫死的金鑰加密的，
+// 等同明文：身分證字號、富邦登入密碼、憑證密碼。把它複製到雲端同步資料夾等於把這些送出去，
+// 所以這種情況預設剝掉 brokerCredentials（其餘完整）。這支 script 不經 --env-file 啟動，自己讀 .env。
+const UNSAFE_SECRETS = new Set(["", "replace-with-a-long-random-secret"]);
+function readAppSecret() {
+  if (process.env.APP_SECRET !== undefined) return String(process.env.APP_SECRET);
+  const envFile = process.env.STOCK1_ENV_FILE || join(root, ".env");
+  if (!existsSync(envFile)) return "";
+  for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
+    const match = /^\s*APP_SECRET\s*=\s*(.*?)\s*$/.exec(line);
+    if (match) return match[1].replace(/^["']|["']$/g, "");
+  }
+  return "";
+}
+const appSecret = readAppSecret().trim();
+const appSecretWeak = UNSAFE_SECRETS.has(appSecret) || appSecret.length < 32;
 
 // 只帶不可重建的。risk-cache.json 是純 last-good 快取（重抓就有），backups/ 是同地備援
 // （異地備份的情境是「本機整個沒了」，那時一份完整主檔就夠），兩者都刻意不帶。
@@ -69,6 +86,7 @@ if (!target) {
 
   const copied = [];
   let failed = false;
+  let strippedBroker = false;
   for (const source of SOURCES) {
     const from = join(dataDir, source.file);
     if (!existsSync(from)) {
@@ -81,7 +99,23 @@ if (!target) {
       continue;
     }
     const to = join(destination, source.file);
-    await copyFile(from, to);
+    if (source.file === "stock1-db.json" && appSecretWeak) {
+      let parsed;
+      try {
+        parsed = JSON.parse(await readFile(from, "utf8"));
+      } catch (error) {
+        console.error(`[Stock1] ${source.file} 無法解析（${error.message}）——來源可能已損壞，備份中止。`);
+        failed = true;
+        break;
+      }
+      if (parsed && typeof parsed === "object" && parsed.brokerCredentials) {
+        delete parsed.brokerCredentials;
+        strippedBroker = true;
+      }
+      await writeFile(to, JSON.stringify(parsed));
+    } else {
+      await copyFile(from, to);
+    }
     // 複製完一定要重讀＋解析一次：**parse 不了的備份不是備份**。
     // 這也順便擋住「主檔已經壞掉了，卻把壞檔複製過去蓋掉好備份」這個更糟的情況。
     try {
@@ -121,8 +155,15 @@ if (!target) {
     console.log(`  保留最新 ${KEEP} 份，目前 ${Math.min(entries.length, KEEP)} 份。`);
     console.log("  要還原：把這些檔案複製回 .data/ 蓋掉原檔，然後重啟伺服器。");
     console.log("");
-    console.log("  ⚠ 主資料庫裡有密碼 hash 與加密後的券商憑證（解密金鑰 APP_SECRET 不在備份裡）。");
-    console.log("    放到雲端同步資料夾前請自行斟酌。");
+    if (strippedBroker) {
+      console.log("  ⚠ 這台沒有設定 APP_SECRET，券商憑證等同明文，本次備份已略過 brokerCredentials（其餘完整）。");
+      console.log("    要連憑證一起備份：先 npm run secret，把結果寫進 .env 的 APP_SECRET，再到 App 裡重新儲存富邦設定。");
+    } else if (appSecretWeak) {
+      console.log("  ⚠ 這台沒有設定 APP_SECRET（目前 DB 裡也沒有券商憑證，所以沒有東西需要略過）。");
+    } else {
+      console.log("  ⚠ 主資料庫裡有密碼 hash 與加密後的券商憑證（解密金鑰 APP_SECRET 不在備份裡）。");
+      console.log("    放到雲端同步資料夾前請自行斟酌。");
+    }
     console.log("");
   }
 }

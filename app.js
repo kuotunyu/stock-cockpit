@@ -4379,8 +4379,13 @@ function renderBrokerSettingsPanel() {
   const certStatus = !status.certPathSet
     ? "未設定"
     : status.certPathExists
-      ? "路徑存在 ✓"
-      : "找不到檔案 ✗（請確認路徑）";
+      ? "已放在 .data/certs/ ✓"
+      : status.certPathHint
+        ? `需重新儲存 ✗（${status.certPathHint}）`
+        : "在 .data/certs/ 找不到檔案 ✗";
+  const weakEncryptionNote = status.weakEncryption
+    ? `<p class="api-warning">這台伺服器還沒設定 APP_SECRET，券商憑證會以公開的預設金鑰加密（等同明文），所以儲存會被拒絕。先在終端機執行 <code>npm run secret</code>，把結果寫進專案根目錄 <code>.env</code> 的 <code>APP_SECRET=</code>，重啟伺服器後再回來儲存。</p>`
+    : "";
   return `
     <header>
       <span class="more-kicker">選用的進階資料來源</span>
@@ -4418,11 +4423,12 @@ function renderBrokerSettingsPanel() {
 
     <h3 class="broker-guide-title">三、回到這個 App 怎麼串</h3>
     <ol class="api-step-list">
-      <li><strong>1. 把憑證檔放到「跑網站的那台電腦」上</strong><span>API 連線是後端伺服器發出的，所以 .pfx 檔要放在跑這個網站的電腦裡（例如 <code>C:\\fubon\\我的憑證.pfx</code>），下面「憑證檔路徑」填的是那台電腦上的完整路徑，<strong>不是你手機裡的路徑</strong>。</span></li>
+      <li><strong>1. 把憑證檔放到「跑網站的那台電腦」的 <code>.data/certs/</code> 資料夾</strong><span>API 連線是後端伺服器發出的，所以 .pfx 檔要放在跑這個網站的電腦裡：專案資料夾底下的 <code>.data\\certs\\</code>（沒有就自己建一個）。下面「憑證檔名」只填檔名（例如 <code>我的憑證.pfx</code>），<strong>不接受其他位置的完整路徑</strong>。</span></li>
       <li><strong>2. 登入自己的帳號，填好下面四欄 → 儲存</strong><span>密碼與憑證密碼會在後端加密保存，不會回傳到任何人的瀏覽器。</span></li>
       <li><strong>3. 按「測試行情」</strong><span>成功會顯示一檔股票的即時報價；失敗會顯示原因（最常見：路徑打錯、憑證密碼錯、API 還沒生效）。</span></li>
       <li><strong>4. 把頂部的資料來源切到「券商資料」</strong><span>之後個股報價就走富邦。任何時候都能切回官方資料。</span></li>
     </ol>
+    ${weakEncryptionNote}
     <form class="broker-settings-form" data-broker-settings-form autocomplete="off">
       <label>
         <span>身分證字號 / 富邦登入 ID</span>
@@ -4433,8 +4439,8 @@ function renderBrokerSettingsPanel() {
         <input name="password" type="password" autocomplete="new-password" placeholder="${isConfigured ? "已儲存，重新輸入才會覆蓋" : "輸入富邦登入密碼"}" />
       </label>
       <label>
-        <span>憑證檔路徑</span>
-        <input name="certPath" type="text" autocomplete="off" placeholder="例如 /secure-certs/fubon/user.pfx" />
+        <span>憑證檔名（放在 .data/certs/ 裡）</span>
+        <input name="certPath" type="text" autocomplete="off" placeholder="例如 我的憑證.pfx" />
       </label>
       <label>
         <span>憑證密碼</span>
