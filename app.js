@@ -5872,6 +5872,8 @@ try {
 } catch {
   // localStorage 不可用時用預設。
 }
+// 與 server.mjs 的 VERIFY_ROUND_TRIP_COST_PCT 同一個數：手續費 0.0855% × 2 ＋ 證交稅 0.3%。
+const ROUND_TRIP_COST_PCT = 0.471;
 function positionSizeLots(capital, riskPct, entry, stop) {
   // Number(null)===0 的陷阱：缺停損或缺進場一律「算不出來」，不是 0 元停損。
   if ([capital, riskPct, entry, stop].some((value) => value === null || value === undefined || value === "")) return null;
@@ -5880,10 +5882,21 @@ function positionSizeLots(capital, riskPct, entry, stop) {
   const e = Number(entry);
   const s = Number(stop);
   if (![cap, risk, e, s].every(Number.isFinite) || cap <= 0 || risk <= 0 || e <= s || e <= 0) return null;
-  const perLotLoss = (e - s) * 1000;
+  // 打到停損的真實損失＝價差＋一買一賣的費稅；不算費稅時 4 張＝風險預算的 1.10%，停損越近超得越多（1% 停損超 47%）。
+  const perShareLoss = (e - s) + e * (ROUND_TRIP_COST_PCT / 100);
+  const perLotLoss = perShareLoss * 1000;
   const budget = cap * (risk / 100);
   const lots = Math.floor(budget / perLotLoss);
-  return { lots, budget: Math.round(budget), perLotLoss: Math.round(perLotLoss), lotCost: Math.round(e * 1000) };
+  // 不到 1 張時給零股股數：盤中零股每分鐘撮合，千元股對 50 萬資金不該只寫「不到 1 張」。
+  const shares = Math.floor(budget / perShareLoss);
+  return {
+    lots,
+    shares,
+    budget: Math.round(budget),
+    perLotLoss: Math.round(perLotLoss),
+    perShareLoss: Math.round(perShareLoss * 1000) / 1000,
+    lotCost: Math.round(e * 1000),
+  };
 }
 function savePositionSizing({ capital, riskPct }) {
   if (capital !== undefined) positionSizingState.capital = Math.max(0, Number(capital) || 0);
@@ -5900,10 +5913,14 @@ function renderPositionSizeStat(plan) {
   if (!sizing) return "";
   const affordable = Math.floor(positionSizingState.capital / sizing.lotCost);
   const lots = Math.min(sizing.lots, affordable);
-  const text = lots >= 1
-    ? `${lots} 張`
-    : "不到 1 張";
-  return `<div class="swing-stat swing-stat-size" title="依「資金 × 單筆風險 %」÷「每張的進場−結構停損損失」算出的建議張數（${formatMoney(sizing.budget)} ÷ ${formatMoney(sizing.perLotLoss)}／張）；再以資金買得起的張數封頂。零股不在此計算內。"><span>建議張數 <i class="swing-stat-hint">風險 ${positionSizingState.riskPct}%</i></span><strong>${text}</strong></div>`;
+  const entry = Number(plan?.entry) || 0;
+  const affordableShares = entry > 0 ? Math.floor(positionSizingState.capital / entry) : 0;
+  const shares = Math.min(sizing.shares, affordableShares);
+  const odd = lots < 1 && shares >= 1
+    ? `<small class="swing-stat-odd">零股 <strong>${shares} 股</strong>・手續費最低額依券商</small>`
+    : "";
+  const text = lots >= 1 ? `${lots} 張` : "不到 1 張";
+  return `<div class="swing-stat swing-stat-size" title="依「資金 × 單筆風險 %」÷「每張的進場−結構停損損失＋來回費稅 ${ROUND_TRIP_COST_PCT}%」算出的建議張數（${formatMoney(sizing.budget)} ÷ ${formatMoney(sizing.perLotLoss)}／張）；再以資金買得起的張數封頂。不到 1 張時改建議零股股數（盤中零股每分鐘撮合；手續費最低額依券商）。"><span>建議張數 <i class="swing-stat-hint">風險 ${positionSizingState.riskPct}%</i></span><strong>${text}</strong>${odd}</div>`;
 }
 
 // ===== 計畫 → 到價提醒一鍵 =====

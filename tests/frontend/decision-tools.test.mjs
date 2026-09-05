@@ -12,9 +12,12 @@ after(() => app.cleanup());
 
 const json = (expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 
-test("positionSizeLots：資金 × 風險% ÷ 每張損失，向下取整；停損不在進場下方或資金未填回 null", () => {
-  assert.deepEqual(json(`positionSizeLots(500000, 1, 100, 95)`), { lots: 1, budget: 5000, perLotLoss: 5000, lotCost: 100000 });
-  assert.deepEqual(json(`positionSizeLots(1000000, 2, 50, 47)`), { lots: 6, budget: 20000, perLotLoss: 3000, lotCost: 50000 });
+test("positionSizeLots：每張損失含來回費稅（0.471%）；不到 1 張時給零股股數；停損不在進場下方或資金未填回 null", () => {
+  // 進場 100／停損 95：每張真實損失 = (5 + 100×0.471%) × 1000 = 5,471，不是 5,000——
+  // 舊算法 4 張 = 風險預算的 1.10%，停損越近超得越多（1% 停損時超 47%）。
+  assert.deepEqual(json(`positionSizeLots(500000, 1, 100, 95)`), { lots: 0, shares: 913, budget: 5000, perLotLoss: 5471, perShareLoss: 5.471, lotCost: 100000 });
+  assert.deepEqual(json(`positionSizeLots(1000000, 2, 50, 47)`), { lots: 6, shares: 6181, budget: 20000, perLotLoss: 3236, perShareLoss: 3.236, lotCost: 50000 });
+  assert.equal(json(`ROUND_TRIP_COST_PCT`), 0.471, "與 server.mjs 的 VERIFY_ROUND_TRIP_COST_PCT 同一個數");
   assert.equal(json(`positionSizeLots(0, 1, 100, 95)`), null);
   assert.equal(json(`positionSizeLots(500000, 1, 95, 100)`), null);
   assert.equal(json(`positionSizeLots(500000, 1, 100, null)`), null);
@@ -28,10 +31,14 @@ test("波段卡片：填了資金才顯示建議張數，且以買得起的張�
   assert.match(without, /data-plan-stop="95"/);
   const withCapital = String(app.evalIn(`(() => { savePositionSizing({ capital: 2000000, riskPct: 1 }); return renderSwingCard(${JSON.stringify(pick)}, 1); })()`));
   assert.match(withCapital, /建議張數/);
-  assert.match(withCapital, /<strong>4 張<\/strong>/, "20000 ÷ 5000 ＝ 4 張，且 200 萬買得起");
+  assert.match(withCapital, /<strong>3 張<\/strong>/, "20000 ÷ 5471 ＝ 3.66 → 3 張（含費稅；舊算法會給 4 張＝超出風險預算）");
   const capped = String(app.evalIn(`(() => { savePositionSizing({ capital: 250000, riskPct: 5 }); return renderSwingCard(${JSON.stringify(pick)}, 1); })()`));
-  assert.match(capped, /<strong>2 張<\/strong>/, "12500 ÷ 5000 ＝ 2.5 → 2；25 萬買得起 2 張");
-  assert.equal(json(`localStorage.getItem("stock1.capital.v1")`), "250000");
+  assert.match(capped, /<strong>2 張<\/strong>/, "12500 ÷ 5471 ＝ 2.28 → 2；25 萬買得起 2 張");
+  // 不到 1 張：盤中零股每分鐘撮合，改建議股數（千元股對 50 萬資金以前只寫「不到 1 張」）
+  const odd = String(app.evalIn(`(() => { savePositionSizing({ capital: 500000, riskPct: 1 }); return renderSwingCard(${JSON.stringify({ ...pick, price: 1000, plan: { ...pick.plan, entry: 1000, structuralStop: 970, initialStop: 970, trailingTrigger: 1050, target: 1100 } })}, 1); })()`));
+  assert.match(odd, /零股 <strong>144 股<\/strong>/, "5000 ÷ (30 + 4.71) ＝ 144.05 → 144 股");
+  assert.match(odd, /手續費最低額依券商/);
+  assert.equal(json(`localStorage.getItem("stock1.capital.v1")`), "500000");
   app.evalIn(`savePositionSizing({ capital: 0, riskPct: 1 })`);
 });
 

@@ -153,7 +153,7 @@
             <div class="swing-risk-bar" aria-label="部位控管">
               <label><span>資金</span><input id="swingCapital" type="number" inputmode="numeric" min="0" step="10000" placeholder="例如 500000" aria-label="可投入資金（元）" /></label>
               <label><span>單筆風險</span><input id="swingRiskPct" type="number" inputmode="decimal" min="0.1" max="5" step="0.1" value="1" aria-label="單筆風險百分比" /><em>%</em></label>
-              <small>填了資金，每張波段卡會顯示「建議張數」＝資金 × 風險% ÷ 每張的進場−結構停損損失。只存在這台裝置。</small>
+              <small>填了資金，每張波段卡會顯示「建議張數」＝資金 × 風險% ÷ 每張的（進場−結構停損＋來回費稅）損失；不到 1 張改建議零股股數。只存在這台裝置。</small>
             </div>
           </div>
           <div class="strategy-search">
