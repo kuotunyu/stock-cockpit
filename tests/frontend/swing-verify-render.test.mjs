@@ -128,3 +128,16 @@ test("摘要行的 tooltip 要說明分盤撮合為什麼會讓觸價判定失�
   assert.match(title, /分盤集合競價/);
   assert.match(title, /未必真的撮得到/, "要講清楚後果，不能只丟名詞");
 });
+
+test("場景卡：依大盤季線上／下分層；未達最小樣本只給筆數", () => {
+  const html = String(app.evalIn(`(() => {
+    state.screen = "strategy";
+    swingVerifyState.data = { ok: true, currentFormulaVersion: "v", formulaVersions: [], recent: [], pendingCount: 0,
+      scenarios: [{ scenario: "midBandDefense", samples: 30, wins: 12, losses: 8, expired: 2, pending: 8, resolved: 22, winRate: 54.5, winRateMinSamples: 20,
+        byRegime: { aboveMa60: { resolved: 20, wins: 12, winRate: 60 }, belowMa60: { resolved: 2, wins: 0, winRate: null }, unknown: { resolved: 0, wins: 0, winRate: null } } }] };
+    renderSwingVerifyPanel();
+    return document.getElementById("swingVerify").innerHTML;
+  })()`)).replace(/\s+/g, " ");
+  assert.match(html, /大盤季線上 60%・季線下 0\/2/);
+  assert.doesNotMatch(html, /位階未知/);
+});

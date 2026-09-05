@@ -5613,6 +5613,18 @@ async function loadVerifyHistory() {
   }
 }
 
+// 成績單依「快照建立當天大盤在季線上／下」分兩欄：同一批紀錄拆開看，才看得出是策略有效還是大盤在漲。
+function renderVerifyRegimeLine(totals) {
+  const by = totals?.byRegime;
+  if (!by) return "";
+  const rate = (hit, total) => (total ? `${Math.round((hit / total) * 100)}%` : "--");
+  const part = (label, bucket) => (bucket?.days
+    ? `${label} ${bucket.days} 天：開盤賣 ${rate(bucket.winAtOpen, bucket.signals)}・收盤賣 ${rate(bucket.winAtClose, bucket.signals)}`
+    : `${label} 0 天`);
+  const unknown = by.unknown?.days ? `・位階未知 ${by.unknown.days} 天` : "";
+  return `<p class="verify-regime" title="以快照建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改任何選股">大盤${part("季線上", by.aboveMa60)}｜${part("季線下", by.belowMa60)}${unknown}</p>`;
+}
+
 function renderVerifyHistory() {
   if (verifyHistoryState.loading && !verifyHistoryState.data) {
     return `<div class="overnight-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span>驗證紀錄計算中…</div>`;
@@ -5676,6 +5688,7 @@ function renderVerifyHistory() {
           </div>
         ` : ""}
       </header>
+      ${renderVerifyRegimeLine(totals)}
       <div class="verify-history-row is-head">
         <span>訊號→觀察</span>
         <span>驗證檔數</span>
@@ -6051,6 +6064,16 @@ function swingScenarioName(key) {
   return { midBandDefense: "中軌攻防", strongContinuation: "上軌續攻" }[key] || key;
 }
 
+// 場景勝率依驗證單建立當天的大盤位階（季線上／下）分兩欄；未達最小樣本只給筆數。
+function swingRegimeLine(byRegime) {
+  if (!byRegime) return "";
+  const above = byRegime.aboveMa60 || {};
+  const below = byRegime.belowMa60 || {};
+  if (!(above.resolved || below.resolved)) return "";
+  const part = (label, bucket) => `${label} ${bucket.winRate != null ? `${bucket.winRate}%` : `${bucket.wins || 0}/${bucket.resolved || 0}`}`;
+  return `<small class="sv-regime" title="以驗證單建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改選股。未達最小樣本只顯示筆數。">大盤${part("季線上", above)}・${part("季線下", below)}${byRegime.unknown?.resolved ? `・位階未知 ${byRegime.unknown.resolved} 筆` : ""}</small>`;
+}
+
 function renderSwingVerifyPanel() {
   const panel = el.swingVerify;
   if (!panel) return;
@@ -6090,6 +6113,7 @@ function renderSwingVerifyPanel() {
             <span class="sv-rate ${tone}"><small>勝率</small> ${rate}</span>
           </div>
           <small>結案 ${resolved}（達標 ${s.wins}・停損 ${s.losses}・超時 ${s.expired}）・追蹤中 ${s.pending}${s.stalled ? `<span class="sv-stalled" title="這些單因官方日 K 長期缺漏而停在缺口前，不會自行結案，也永遠不會進入上面的勝率分母。">（含卡住 ${s.stalled}）</span>` : ""}${s.avgResultPct != null ? `・平均 ${s.avgResultPct >= 0 ? "+" : ""}${s.avgResultPct}%${s.avgResultPctNet != null ? `（淨 ${s.avgResultPctNet >= 0 ? "+" : ""}${s.avgResultPctNet}%）` : ""}` : ""}${s.avgDaysHeld != null ? `・平均持有 ${s.avgDaysHeld} 天` : ""}</small>
+          ${swingRegimeLine(s.byRegime)}
         </div>`;
     })
     .join("");

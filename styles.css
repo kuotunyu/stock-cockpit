@@ -7884,6 +7884,14 @@ body.is-locked .app-shell {
 .verify-history-row .positive { color: var(--up-text); }
 .verify-history-row .negative { color: var(--down-text); }
 
+/* 成績單的大盤位階分層（季線上／下）：資訊，不是警告 */
+.verify-regime {
+  margin: 0 0 8px;
+  color: var(--muted-2);
+  font-size: var(--fs-note);
+  line-height: 1.5;
+}
+
 /* ===== 備註動態牆 ===== */
 .note-feed-list {
   display: grid;
@@ -9363,6 +9371,7 @@ body.is-locked .app-shell {
 .sv-chip small { color: #bcc6d0; font-size: 15px; line-height: 1.5; }
 /* 卡住的驗證單：它不會自行結案，也不在勝率分母裡。用黃色——這是分母損耗的資訊，不是錯誤。 */
 .sv-stalled { color: var(--yellow); }
+.sv-regime { display: block; margin-top: 4px; color: var(--muted-2); font-size: var(--fs-note); line-height: 1.5; }
 .sv-rate small { font-size: var(--fs-note); font-weight: 800; color: var(--muted); }
 .sv-details summary {
   cursor: pointer;

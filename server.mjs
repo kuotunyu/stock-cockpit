@@ -8331,6 +8331,8 @@ async function saveSignalSnapshot(body) {
   }));
   if (!picks.length) return;
   const formulaVersion = String(body.formulaVersion || OVERNIGHT_FORMULA_VERSION);
+  // 建立當天的大盤位階一起存：之後成績單才能分「季線上／下」兩欄。抓不到就 null（成績單歸 unknown）。
+  const regime = regimeStamp(await getCurrentRegime(body.asOf));
   await commitDbMutation((db) => {
     db.signalSnapshots ||= [];
     const existing = db.signalSnapshots.find((item) => (
@@ -8349,6 +8351,7 @@ async function saveSignalSnapshot(body) {
       existing.savedAt = new Date().toISOString();
       existing.coverage = body.coverage || { complete: true };
       existing.formulaVersion = formulaVersion;
+      if (regime && !existing.regime) existing.regime = regime;
       return undefined;
     }
     db.signalSnapshots.push({
@@ -8356,6 +8359,7 @@ async function saveSignalSnapshot(body) {
       savedAt: new Date().toISOString(),
       coverage: body.coverage || { complete: true },
       formulaVersion,
+      regime,
       picks,
     });
     db.signalSnapshots = db.signalSnapshots
@@ -8384,6 +8388,73 @@ const tradingCalendarSourceCache = {
 };
 let tradingCalendarCache = { expiresAt: 0, value: null };
 let tradingCalendarInFlight = null;
+
+// ===== 大盤 regime（加權指數 vs MA20／MA60）=====
+// 兩個選股引擎的「多頭結構」只看個股 MA60，成績單把多頭與空頭母體混成一個（Simpson）。
+// 這裡**只做分層、不做濾網**：濾網會改變選股結果、必須升版；分層只是把同一批紀錄拆成兩欄。
+// 資料源：TWSE rwd FMTQIK 逐月（OpenAPI 版只回當月，算不到 MA60），與 TWT49U 同族端點。
+const TAIEX_HISTORY_URL = (yyyymm) => `https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date=${yyyymm}01&response=json`;
+const TAIEX_HISTORY_MONTHS = 5; // 60 根交易日約 3 個月，多抓兩個月保險
+const taiexHistoryCache = { value: null, expiresAt: 0, retryAt: 0, lastError: "", inFlight: null };
+
+function parseTaiexMonthlyPayload(payload) {
+  if (payload?.stat !== "OK" || !Array.isArray(payload.data)) {
+    throw new Error(`加權指數月資料抓取失敗：${payload?.stat || "回應沒有 data"}`);
+  }
+  return payload.data
+    .map((row) => ({
+      date: toCompactDate(String(row?.[0] || "")),
+      close: parseNumber(String(row?.[4] || "").replace(/,/g, "")),
+    }))
+    .filter((row) => row.date && Number.isFinite(row.close) && row.close > 0);
+}
+
+async function getTaiexHistory() {
+  return loadWithLastGood(taiexHistoryCache, {
+    ttlMs: 24 * 60 * 60 * 1000,
+    retryMs: 30 * 60 * 1000,
+    load: async () => {
+      const today = toTaipeiCompactDate();
+      const rows = [];
+      for (let back = TAIEX_HISTORY_MONTHS - 1; back >= 0; back -= 1) {
+        const month = compactMonthsBefore(today, back).slice(0, 6);
+        rows.push(...parseTaiexMonthlyPayload(await fetchJson(TAIEX_HISTORY_URL(month))));
+      }
+      const byDate = new Map(rows.map((row) => [row.date, row]));
+      return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+    },
+  });
+}
+
+function taiexRegime(history, asOf) {
+  const rows = (history || []).filter((row) => row?.date && row.date <= asOf && Number.isFinite(row.close));
+  if (rows.length < 60) return null;
+  const closes = rows.slice(-60).map((row) => row.close);
+  const close = closes.at(-1);
+  const ma20 = roundTo(average(closes.slice(-20)), 2);
+  const ma60 = roundTo(average(closes), 2);
+  return { asOf: rows.at(-1).date, close, ma20, ma60, aboveMa20: close > ma20, aboveMa60: close > ma60 };
+}
+
+// 成績單分層鍵：只認 aboveMa60 這個布林；缺值（沒抓到、舊紀錄）一律 unknown，不猜。
+function regimeBucket(regime) {
+  if (regime && typeof regime.aboveMa60 === "boolean") return regime.aboveMa60 ? "aboveMa60" : "belowMa60";
+  return "unknown";
+}
+
+// 寫進快照／驗證單的精簡版：只留分層用得到的兩個布林，不把整段均線塞進不可回溯的歷史。
+function regimeStamp(regime) {
+  return regime ? { asOf: regime.asOf, aboveMa20: regime.aboveMa20, aboveMa60: regime.aboveMa60 } : null;
+}
+
+async function getCurrentRegime(asOf) {
+  try {
+    const result = await getTaiexHistory();
+    return taiexRegime(result.value, toCompactDate(asOf) || toTaipeiCompactDate());
+  } catch {
+    return null;
+  }
+}
 
 function parseTradingCalendarSource(key, rows) {
   const source = TRADING_CALENDAR_SOURCES[key];
@@ -8874,6 +8945,7 @@ async function buildVerificationHistory() {
     return {
       asOf: snapshot.asOf,
       formulaVersion: overnightSnapshotFormulaVersion(snapshot),
+      regime: regimeBucket(snapshot.regime),
       observationDate: observed.observationDate,
       observationPhase: observed.observationPhase,
       status: observed.status,
@@ -8918,6 +8990,21 @@ async function buildVerificationHistory() {
           winAtOpen: dayClusterCi(done, "winAtOpen"),
           winAtClose: dayClusterCi(done, "winAtClose"),
         },
+        // 依「快照建立當天大盤在季線上／下」分層——同一批紀錄拆兩欄，不改任何選股。
+        byRegime: Object.fromEntries(["aboveMa60", "belowMa60", "unknown"].map((bucket) => {
+          const subset = done.filter((record) => record.regime === bucket);
+          const signals = subset.reduce((sum, record) => sum + record.verified, 0);
+          return [bucket, {
+            days: subset.length,
+            signals,
+            hitPlus2: subset.reduce((sum, record) => sum + record.hitPlus2, 0),
+            winAtOpen: subset.reduce((sum, record) => sum + record.winAtOpen, 0),
+            winAtClose: subset.reduce((sum, record) => sum + record.winAtClose, 0),
+            avgCloseReturn: signals
+              ? subset.reduce((sum, record) => sum + (record.avgCloseReturn || 0) * record.verified, 0) / signals
+              : null,
+          }];
+        })),
       }
     : null;
 
@@ -10717,6 +10804,8 @@ function recordSwingVerification(db, body) {
       formulaVersion: bodyVersion,
       surveillance,
       fillModel: swingVerificationFillModel(surveillance),
+      // 建立當天的大盤位階（只分層、不濾網）；沒抓到就 null → 成績單歸 unknown。
+      regime: regimeStamp(body.regime) ,
       status: "pending", // pending | win | loss | expired
       resolvedAt: null,
       resultPct: null,
@@ -11159,6 +11248,12 @@ async function buildSwingVerificationSummary() {
         samples: 0, wins: 0, losses: 0, expired: 0, pending: 0, stalled: 0,
         resolved: 0, sumResultPct: 0, sumDaysHeld: 0,
         periodicCallSamples: 0, periodicCallResolved: 0,
+        // 依驗證單建立當天的大盤位階分層（同一批紀錄拆兩欄，不改選股）；舊紀錄沒有 regime → unknown。
+        regimes: {
+          aboveMa60: { resolved: 0, wins: 0 },
+          belowMa60: { resolved: 0, wins: 0 },
+          unknown: { resolved: 0, wins: 0 },
+        },
       };
       s.samples += 1;
       // D-30：分盤撮合的樣本照舊計入勝率（改口徑要另外決策），但必須數得出來。
@@ -11177,6 +11272,9 @@ async function buildSwingVerificationSummary() {
         if (entry.status === "win") s.wins += 1;
         else if (entry.status === "loss") s.losses += 1;
         else s.expired += 1;
+        const bucket = s.regimes[regimeBucket(entry.regime)];
+        bucket.resolved += 1;
+        if (entry.status === "win") bucket.wins += 1;
       }
       byScenario.set(entry.scenario, s);
       all.push({ day, ...entry });
@@ -11200,6 +11298,12 @@ async function buildSwingVerificationSummary() {
     // 分盤撮合（處置期間）的樣本數：仍計入上面的勝率，但要能單獨看見。
     periodicCallSamples: s.periodicCallSamples,
     periodicCallResolved: s.periodicCallResolved,
+    // 大盤季線上／下分層；各自也套最小樣本門檻，低於門檻只給筆數不給百分比。
+    byRegime: Object.fromEntries(Object.entries(s.regimes).map(([bucket, value]) => [bucket, {
+      resolved: value.resolved,
+      wins: value.wins,
+      winRate: value.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((value.wins / value.resolved) * 1000) / 10 : null,
+    }])),
   }));
   all.sort((a, b) => String(b.resolvedAt || b.day).localeCompare(String(a.resolvedAt || a.day)));
   const body = {
@@ -11470,6 +11574,8 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
   }
 
   // 4) 寫入快照：先比較掃描覆蓋率，再比較命中數，不能再把 picks 多寡當成資料完整度。
+  // 建立驗證單前先拿當天的大盤位階（只分層、不濾網；抓不到就 null）——recordSwingVerification 是同步的。
+  body.regime = regimeStamp(await getCurrentRegime(latestDate));
   try {
     const persistedBody = await commitDbMutation((db) => {
       db.swingSnapshots ||= {};
@@ -13597,6 +13703,8 @@ export {
   buildOvernightSignals, buildBacktest, OVERNIGHT_CACHE_MAX_ENTRIES, BACKTEST_CACHE_MAX_ENTRIES,
   // 前向驗證（signal-verify.test）
   OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, OVERNIGHT_MIN_DAYS, dayClusterCi, overnightSnapshotFormulaVersion,
+  // 大盤 regime 分層（taiex-regime.test）
+  parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
   holidayCalendarCoversYear,
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,

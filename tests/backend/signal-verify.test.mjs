@@ -186,6 +186,8 @@ test("buildVerificationHistory：已驗證日＋今日 pending、totals 用驗�
     const day = compactTradingDay(DAY_SHIFT + index - 14);
     return {
       asOf: iso(day), savedAt: "", formulaVersion: mod.OVERNIGHT_FORMULA_VERSION,
+      // 前 6 份季線上、接著 4 份季線下、其餘沒有 regime（舊紀錄）→ 成績單要分三層
+      regime: index < 6 ? { asOf: day, aboveMa20: true, aboveMa60: true } : index < 10 ? { asOf: day, aboveMa20: false, aboveMa60: false } : null,
       picks: [pickOf(day === TODAY ? 102 : 100)],
     };
   });
@@ -212,4 +214,14 @@ test("buildVerificationHistory：已驗證日＋今日 pending、totals 用驗�
   assert.equal(body.totals.days, completed.length, "pending 的不進 totals");
   assert.equal(body.totals.signals, completed.reduce((sum, record) => sum + record.verified, 0));
   assert.equal(body.totals.avgCloseReturn, 2);
+  // 大盤位階分層：三層的天數加起來等於 totals.days，且每筆 record 帶分層鍵
+  const by = body.totals.byRegime;
+  assert.ok(by.aboveMa60 && by.belowMa60 && by.unknown, "三層都要存在");
+  assert.equal(by.aboveMa60.days + by.belowMa60.days + by.unknown.days, body.totals.days);
+  // 這個 fixture 只有昨日那一份能完成驗證（其餘沒有隔日行情），而它沒有 regime → 唯一的完成日在 unknown
+  assert.equal(by.unknown.days, body.totals.days, JSON.stringify(by));
+  assert.equal(older.regime, "unknown", "沒有 regime 的舊快照歸 unknown，不猜");
+  assert.ok(body.records.some((record) => record.regime === "aboveMa60"), "季線上的快照要帶分層鍵");
+  assert.ok(body.records.some((record) => record.regime === "belowMa60"));
+  assert.equal(typeof by.aboveMa60.winAtOpen, "number");
 });

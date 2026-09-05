@@ -333,3 +333,20 @@ test("批次推進＋場景統計：相鄰交易日用整批收盤，缺個股�
   assert.ok(summary.notes.some((n) => n.includes("保守記停損")), "規則要寫給使用者看");
   assert.ok(summary.notes.some((n) => n.includes("漏開 App") && n.includes("補判")), "漏日補驗規則要透明");
 });
+
+test("regime 分層：建單時記錄大盤位階（精簡版），summary 依季線上／下分層且各自套最小樣本", async () => {
+  const db = {};
+  const day = compactTradingDay(0);
+  const pick = (code, scenario) => ({ code, name: code, scenario: { key: scenario }, score: 80, plan: { entry: 100, structuralStop: 95, target: 110, rr: 2 } });
+  mod.recordSwingVerification(db, {
+    asOf: day, formulaVersion: mod.SWING_FORMULA_VERSION,
+    regime: { asOf: day, close: 1, ma20: 1, ma60: 1, aboveMa20: true, aboveMa60: false },
+    picks: [pick("1101", "midBandDefense")],
+  });
+  const entry = db.swingVerification[day][0];
+  assert.deepEqual(entry.regime, { asOf: day, aboveMa20: true, aboveMa60: false }, "只留分層用得到的欄位，不塞整段均線");
+  mod.recordSwingVerification(db, { asOf: day, formulaVersion: mod.SWING_FORMULA_VERSION, picks: [pick("1102", "midBandDefense")] });
+  assert.equal(db.swingVerification[day][1].regime, null, "抓不到 regime 就 null，不猜");
+  assert.equal(mod.regimeBucket(entry.regime), "belowMa60");
+  assert.equal(mod.regimeBucket(db.swingVerification[day][1].regime), "unknown");
+});
