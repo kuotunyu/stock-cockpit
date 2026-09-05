@@ -193,7 +193,17 @@ test("交易日期以台北今天為上限，且提交時會攔截無效或未�
   await app.settle(1);
   const writesAfter = app.fetchLog.filter((entry) => entry.path.startsWith("/api/trades") && entry.method === "PUT").length;
   assert.equal(writesAfter, writesBefore, "前端攔截後不可送出帳本寫入");
-  assert.equal(app.evalIn(`document.querySelector("#toastStack .toast:last-child")?.textContent`), "請選擇有效的成交日，且不可晚於台北今天");
+  // 錯誤走表單內的 role=alert 錯誤列＋aria-describedby，不再同時 toast（讀屏會把同一句唸兩遍）
+  const inline = JSON.parse(app.evalIn(`(() => {
+    const form = el.holdingsPanel.querySelector('[data-trade-form]');
+    const box = form.querySelector('[data-trade-form-error]');
+    return JSON.stringify({ text: box.textContent, hidden: box.hidden, describedBy: form.elements.date.getAttribute("aria-describedby"), boxId: box.id, invalid: form.elements.date.getAttribute("aria-invalid") });
+  })()`));
+  assert.equal(inline.text, "請選擇有效的成交日，且不可晚於台北今天");
+  assert.equal(inline.hidden, false);
+  assert.equal(inline.invalid, "true");
+  assert.ok(inline.boxId && inline.describedBy === inline.boxId, JSON.stringify(inline));
+  assert.notEqual(app.evalIn(`document.querySelector("#toastStack .toast:last-child")?.textContent`), "請選擇有效的成交日，且不可晚於台北今天", "有錯誤列就不再 toast");
 });
 
 test("空庫存與未登入的空狀態", () => {

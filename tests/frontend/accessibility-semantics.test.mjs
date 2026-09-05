@@ -230,3 +230,21 @@ test("shared-note and company-summary textareas have accessible names", () => {
     company: "公司簡介內容",
   });
 });
+
+// ---- 第二輪第二批：波段卡不再是 role=button（children-presentational 會把內層按鈕壓平）----
+test("swing card is a plain article with a native 查看明細 button; nested controls stay exposed", () => {
+  const result = json(`(() => {
+    const html = renderSwingCard({ code: "2330", name: "台積電", price: 100, changePct: 1, score: 80, scenario: { key: "midBandDefense", name: "中軌攻防" }, plan: { entry: 100, structuralStop: 95, initialStop: 95, trailingTrigger: 105, target: 110, rr: 2, rrNet: 1.8 }, reasons: [], warnings: [] }, 1);
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    const article = host.querySelector("article.swing-card");
+    const open = host.querySelector("button.swing-open[data-swing-code='2330']");
+    return { role: article?.getAttribute("role"), tabIndex: article?.getAttribute("tabindex"), tapTarget: article?.dataset.swingCode, openButton: Boolean(open), openLabel: open?.textContent.trim(), alerts: Boolean(host.querySelector("button.swing-plan-alerts")) };
+  })()`);
+  assert.equal(result.role, null, "article 不可再是 role=button：ARIA button 的子節點對輔助科技是 presentational，讀屏搆不到內層的提醒鈕");
+  assert.equal(result.tabIndex, null);
+  assert.equal(result.tapTarget, "2330", "整張卡仍可用滑鼠／觸控點開（data-swing-code 留在 article）");
+  assert.equal(result.openButton, true, "鍵盤與讀屏走原生按鈕");
+  assert.equal(result.openLabel, "查看明細");
+  assert.equal(result.alerts, true);
+});

@@ -2112,12 +2112,32 @@ function clearUserScopedState({ renderNow = true } = {}) {
   if (renderNow) render();
 }
 
+// 「這台裝置曾經登入過」：PWA 冷啟動時 /me 401，有旗標才講「登入已到期」並開登入閘；
+// 從沒登入過的人（朋友第一次開頁）維持安靜的未登入看盤模式。講過一次就清掉，重整不重複吵。
+const HAD_SESSION_KEY = "stock1.hadSession.v1";
+function rememberHadSession(had) {
+  try {
+    if (had) localStorage.setItem(HAD_SESSION_KEY, "1");
+    else localStorage.removeItem(HAD_SESSION_KEY);
+  } catch {
+    // localStorage 不可用時沒有到期提示，不影響看盤。
+  }
+}
+function hadSessionBefore() {
+  try {
+    return localStorage.getItem(HAD_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function activateAuthenticatedUser(user) {
   const nextUser = user || null;
   if (String(authState.user?.id || "") !== String(nextUser?.id || "")) {
     clearUserScopedState({ renderNow: false });
   }
   authState.user = nextUser;
+  if (nextUser) rememberHadSession(true);
 }
 
 function handleAuthRequired(error) {
@@ -2143,6 +2163,14 @@ async function loadCurrentUser({ showLogin = false } = {}) {
     authState.checked = true;
     clearUserScopedState({ renderNow: false });
     authState.error = error.message;
+    if (error.status === 401 && hadSessionBefore()) {
+      // 兩週後再開 PWA：以前畫面靜靜變成未登入模式，庫存變「需要登入」、提醒不再同步，沒有任何地方說「到期」。
+      rememberHadSession(false);
+      authState.sessionExpired = true;
+      showToast("登入已到期：自選股與到價提醒暫停同步，重新登入後恢復。", 8000);
+      setLoginGateVisible(true, "登入已到期，請重新登入（自選股與到價提醒暫停同步中）");
+      return false;
+    }
     setLoginGateVisible(showLogin, showLogin ? (error.status === 401 ? "請先登入" : error.message) : "");
     return false;
   }
@@ -2184,6 +2212,7 @@ async function loginWithCredentials(username, password) {
 
 async function logout() {
   clearUserScopedState({ renderNow: false });
+  rememberHadSession(false);
   await fetchApi("/api/auth/logout", { method: "POST" }).catch(() => null);
   authState.error = "";
   authState.warnings = {};
@@ -2792,21 +2821,28 @@ function clearTradeFormError(form) {
     box.textContent = "";
     box.hidden = true;
   }
-  form?.querySelectorAll('[aria-invalid="true"]').forEach((field) => field.removeAttribute("aria-invalid"));
+  form?.querySelectorAll('[aria-invalid="true"]').forEach((field) => {
+    field.removeAttribute("aria-invalid");
+    field.removeAttribute("aria-describedby");
+  });
 }
 
 function showTradeFormError(form, fieldName, message) {
   const box = form?.querySelector("[data-trade-form-error]");
   if (box) {
+    box.id ||= "tradeFormError";
     box.textContent = message;
     box.hidden = false;
   }
   const field = fieldName && form?.elements ? form.elements[fieldName] : null;
   if (field && typeof field.focus === "function") {
     field.setAttribute("aria-invalid", "true");
+    // 讀屏回到欄位時不只聽到「invalid」，還聽得到錯在哪。
+    if (box) field.setAttribute("aria-describedby", box.id);
     field.focus();
   }
-  showToast(message);
+  // 錯誤列本身是 role=alert：再 toast 一次讀屏會把同一句唸兩遍。只有沒有錯誤列的表單才退回 toast。
+  if (!box) showToast(message);
 }
 
 function syncTradeFormControls(form, { focusDividend = false } = {}) {
@@ -6134,7 +6170,7 @@ function renderSwingCard(pick) {
     ? ' title="股名後的 * 是官方標記的「彈性面額股」：每股面額不是新台幣 10 元（可能 0.25／1／5 元…）。因此它的股價高低不能直接跟一般股票（面額 10 元）相比，看市值才準。這不是風險警示。"'
     : "";
   return `
-    <article class="swing-card" data-swing-code="${pick.code}" role="button" tabindex="0" aria-label="${escapeHtml(pick.name)} ${pick.code} 策略明細">
+    <article class="swing-card" data-swing-code="${escapeHtml(pick.code)}">
       <div class="swing-rank-badge ${scoreTier}" style="--score:${Math.max(6, Math.min(100, score))}%" title="策略評分 0–100：趨勢＋MACD動能＋貼近中軌＋量能＋流動性＋盈虧比綜合計算，越高代表型態越好且越划算；扣掉一買一賣手續費與證交稅之後的淨盈虧比小於 1 的設定不列入。RANK 依評分由高到低排名。">
         <small>RANK</small>
         <strong>${pick.rank}</strong>
@@ -6186,6 +6222,7 @@ function renderSwingCard(pick) {
       </div>
       ${riskRewardBar}
       <div class="swing-actions">
+        <button type="button" class="swing-open" data-swing-code="${escapeHtml(pick.code)}" aria-label="${escapeHtml(pick.name)} ${escapeHtml(pick.code)} 策略明細">查看明細</button>
         <button type="button" class="swing-plan-alerts" data-plan-alerts="${escapeHtml(pick.code)}" data-plan-stop="${Number(pick.plan?.structuralStop) || ""}" data-plan-target="${Number(pick.plan?.target) || ""}" data-plan-trailing="${Number(pick.plan?.trailingTrigger) || ""}" title="一鍵建立三筆到價提醒：跌到結構停損、漲到目標、漲到啟動移停（需登入；已存在的不重複）">${authState.user ? "建立三筆到價提醒" : "登入後建立提醒"}</button>
       </div>
     </article>

@@ -9162,8 +9162,20 @@ body.is-locked .app-shell {
 .market-stance-events::before { content: "｜"; }
 .swing-stat-size strong { color: var(--info-text); }
 
-/* 波段卡片動作列 */
-.swing-actions { display: flex; justify-content: flex-end; padding: 0 14px 12px; }
+/* 波段卡片動作列：原生「查看明細」鈕給鍵盤與讀屏（卡片本身不再是 role=button），提醒鈕在右 */
+.swing-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 14px 12px; }
+.swing-open {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.swing-open:hover { color: var(--text); border-color: var(--muted); }
 .swing-plan-alerts {
   min-height: 40px;
   padding: 0 14px;

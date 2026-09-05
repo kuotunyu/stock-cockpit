@@ -133,7 +133,8 @@ test("v2 表單：配對股數超過成交股數時前端攔截，不送 PUT", a
   await app.settle(1);
   const putsAfter = app.fetchLog.filter((entry) => entry.path === "/api/trades" && entry.method === "PUT").length;
   assert.equal(putsAfter, putsBefore);
-  assert.match(app.evalIn(`document.querySelector("#toastStack .toast:last-child")?.textContent || ""`), /配對股數/);
+  // 錯誤走表單內的 role=alert 錯誤列（不再同時 toast，讀屏會唸兩遍）
+  assert.match(app.evalIn(`el.holdingsPanel.querySelector('[data-trade-form-error]')?.textContent || ""`), /配對股數/);
 });
 
 test("v2 紀錄 render：商品、當沖股數、0 元費稅來源與待覆核都可見", () => {

@@ -109,9 +109,11 @@ test("波段卡片的 aria-label 也必須跳脫（屬性上下文）", () => {
       scenario: { name: "中軌防守", desc: "" },
     });
     const card = host.querySelector(".swing-card");
+    // aria-label 在原生「查看明細」鈕上（卡片本身不再是 role=button）；屬性上下文的跳脫要求不變
+    const open = host.querySelector(".swing-open");
     return JSON.stringify({
-      hasHandler: card.hasAttribute("onmouseover"),
-      ariaLabel: card.getAttribute("aria-label"),
+      hasHandler: card.hasAttribute("onmouseover") || open.hasAttribute("onmouseover"),
+      ariaLabel: open.getAttribute("aria-label"),
     });
   })()`);
   const parsed = JSON.parse(label);
