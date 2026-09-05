@@ -171,6 +171,8 @@ npm run start:lan
 
 `npm run secret` 會印一組隨機字串，貼到 `.env` 的 `APP_SECRET=` 後面；`ADMIN_PASSWORD` 也用同樣方式產生（至少 12 字元）。`npm run start:lan` 啟動後會把手機該輸入的網址印出來。第一次啟動時 Windows 防火牆會跳提示，要選「允許存取」。
 
+> LAN 模式是純 http：同一個 Wi-Fi 上的任何裝置都能攔到流量，包括登入密碼與 cookie。只在自己信任的網路（家裡）用；咖啡廳、公司 Wi-Fi 不要開。
+
 > PWA 的「加到主畫面」需要 HTTPS（`localhost` 例外），所以純 http 的區域網路位址只能用瀏覽器開。想要完整 PWA 體驗得自備憑證或走 Tailscale 之類的方案。
 
 ### 4. 備份（建議設定一次就好）
@@ -214,6 +216,10 @@ PUBLIC_ORIGIN=https://你的正式網域
 COOKIE_SECURE=true
 DATA_DIR=/var/app/data
 UPDATE_CHECK=on   # 設 off 可關閉「跟 GitHub 比對版本」的對外查詢
+ALLOWED_HOSTS=    # 額外允許的 Host 名稱（逗號分隔）；預設只認 127.0.0.1／localhost 與 LAN 模式列舉的本機位址，其餘回 421
+TRUST_PROXY=off   # 只有放在反向代理後面才設 on，代理的 x-forwarded-* 才會被採信
 ```
+
+伺服器只回應 Host 在允許清單內的請求（其他一律 `421 Misdirected Request`）。這是為了擋 DNS rebinding：瀏覽器裡任何網頁都能把自己的網域指到 127.0.0.1 再打本機 API，Host 是唯一分得出「這是不是你自己開的網址」的線索。
 
 只在自己電腦上跑（綁 `127.0.0.1`）時這些全部可以留空；**一旦綁到非 loopback 位址或設了 `PUBLIC_ORIGIN`，`ADMIN_PASSWORD` 與 `APP_SECRET` 就是啟動的硬性條件**，不足時伺服器會直接拒絕啟動而不是降級執行。

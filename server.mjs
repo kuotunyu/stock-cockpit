@@ -3,6 +3,7 @@ import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
 import { constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
+import { networkInterfaces } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
@@ -72,6 +73,62 @@ function isLoopbackHost(value) {
   let normalized = String(value || "").trim().toLowerCase();
   if (normalized.startsWith("[") && normalized.endsWith("]")) normalized = normalized.slice(1, -1);
   return normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost";
+}
+
+// ---- Host 白名單（DNS rebinding 防線）----
+// 瀏覽器裡任何網頁都能把自己的網域指到 127.0.0.1，再對本機伺服器發 same-origin 請求；
+// 那時 Origin 與 Host 都是攻擊者的網域，舊寫法的 requestPublicOrigin 拿 Host 當「預期來源」
+// 反而讓 CSRF 檢查通過。唯一分得出「這是不是使用者自己打開的位址」的線索就是 Host header：
+// 不在白名單一律 421（Misdirected Request），API 與靜態都套，而且要在 OPTIONS 之前。
+// 白名單＝loopback、PUBLIC_ORIGIN 的 host、ALLOWED_HOSTS 環境變數，以及非 loopback listen
+// （start:lan）時由 startServer 列舉的本機介面位址。port 刻意不比對（同一台機器可能換 port）。
+const trustProxy = ["1", "true", "yes", "on"].includes(String(process.env.TRUST_PROXY || "").trim().toLowerCase());
+const runtimeAllowedHosts = new Set();
+
+function hostnameOfHeader(value) {
+  let text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text.startsWith("[")) {
+    const end = text.indexOf("]");
+    return end > 0 ? text.slice(1, end) : "";
+  }
+  const colon = text.indexOf(":");
+  if (colon >= 0 && text.indexOf(":", colon + 1) === -1) text = text.slice(0, colon);
+  return text;
+}
+
+const configuredAllowedHosts = new Set(
+  String(process.env.ALLOWED_HOSTS || "")
+    .split(",")
+    .map((item) => hostnameOfHeader(item))
+    .filter(Boolean),
+);
+
+function isAllowedHost(hostHeader) {
+  const name = hostnameOfHeader(hostHeader);
+  if (!name) return false;
+  if (isLoopbackHost(name)) return true;
+  if (configuredAllowedHosts.has(name)) return true;
+  if (runtimeAllowedHosts.has(name)) return true;
+  const publicOrigin = String(process.env.PUBLIC_ORIGIN || "").trim();
+  if (publicOrigin) {
+    try {
+      if (new URL(publicOrigin).hostname.toLowerCase() === name) return true;
+    } catch {
+      // 無效的 PUBLIC_ORIGIN 由 validateStartupSecurity 擋在啟動時。
+    }
+  }
+  return false;
+}
+
+// 登入限流的第二層鍵。只有明確放在反向代理後面（TRUST_PROXY=true）才信 x-forwarded-for，
+// 否則任何人都能靠自填 header 換一個「來源」繞過計次。
+function clientAddressOf(request) {
+  if (trustProxy) {
+    const forwarded = String(request.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    if (forwarded) return forwarded;
+  }
+  return String(request.socket?.remoteAddress || "");
 }
 
 function validateStartupSecurity(listenHost) {
@@ -376,18 +433,22 @@ function parseCookies(cookieHeader = "") {
 }
 
 function isSecureRequest(request) {
-  return request.headers["x-forwarded-proto"] === "https" || process.env.COOKIE_SECURE === "true";
+  const forwardedProto = trustProxy ? String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim() : "";
+  return forwardedProto === "https" || process.env.COOKIE_SECURE === "true";
 }
 
 const mutationMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+// 走到這裡的請求都已通過 isAllowedHost（handler 入口就擋），所以由 Host 推導預期來源是安全的；
+// x-forwarded-* 只在 TRUST_PROXY 時採信——否則任何人送 x-forwarded-proto: https 就能讓 cookie
+// 被標 Secure、在 http 下被瀏覽器丟掉（自我阻斷）。
 function requestPublicOrigin(request) {
   const configured = String(process.env.PUBLIC_ORIGIN || "").trim();
   if (configured) {
     try { return new URL(configured).origin; } catch { return ""; }
   }
-  const forwardedProto = String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const forwardedProto = trustProxy ? String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim() : "";
   const proto = forwardedProto || (request.socket?.encrypted ? "https" : "http");
-  const forwardedHost = String(request.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const forwardedHost = trustProxy ? String(request.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
   const requestHost = forwardedHost || String(request.headers.host || "").trim();
   if (!requestHost) return "";
   try { return new URL(`${proto}://${requestHost}`).origin; } catch { return ""; }
@@ -12991,6 +13052,14 @@ async function releaseDataDirLease() {
 
 const server = createServer(async (request, response) => {
   try {
+    if (!isAllowedHost(request.headers.host)) {
+      jsonResponse(response, 421, {
+        ok: false,
+        code: "HOST_NOT_ALLOWED",
+        error: "這個網址不在允許清單內。請用 http://127.0.0.1 或啟動時列出的區域網路位址開啟；需要別的名稱請設定 ALLOWED_HOSTS。",
+      });
+      return;
+    }
     if (request.method === "OPTIONS") {
       response.writeHead(204, jsonHeaders);
       response.end();
@@ -13180,6 +13249,19 @@ function startServer(listenPort = port, listenHost = host) {
   } catch (error) {
     return Promise.reject(error);
   }
+  // 非 loopback listen（start:lan）時，手機打的 Host 是這台電腦的區域網路 IP，
+  // 事先列舉本機介面位址放進白名單；純本機啟動維持只認 loopback。
+  runtimeAllowedHosts.clear();
+  if (!isLoopbackHost(listenHost)) {
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries || []) {
+        if (entry?.address) runtimeAllowedHosts.add(String(entry.address).toLowerCase());
+      }
+    }
+    if (listenHost && listenHost !== "0.0.0.0" && listenHost !== "::") {
+      runtimeAllowedHosts.add(hostnameOfHeader(listenHost));
+    }
+  }
   if (server.listening) return Promise.resolve(server);
   if (startPromise) return startPromise;
   if (lifecycleStatus === "stopping") return Promise.reject(startAbortedError());
@@ -13245,6 +13327,8 @@ export {
   // 法人／融資券（institutional-margin.test）
   normalizeTwseInstitutionalRow, normalizeTpexInstitutionalRow,
   normalizeTwseMarginRow, normalizeTpexMarginRow, getInstitutionalData, getMarginData,
+  // Host 白名單／來源位址（api-host-allowlist.test）
+  isAllowedHost, hostnameOfHeader, clientAddressOf,
   // 認證／加解密
   parseCookies, hashPassword, verifyPassword, hashToken, encryptJson, decryptJson,
   isValidUsername, LOGIN_FAIL_WINDOW_MS, LOGIN_FAILURE_MAX_ENTRIES, MAX_SESSIONS_PER_USER,
