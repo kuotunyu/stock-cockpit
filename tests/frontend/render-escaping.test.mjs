@@ -118,3 +118,14 @@ test("波段卡片的 aria-label 也必須跳脫（屬性上下文）", () => {
   assert.equal(parsed.hasHandler, false, "屬性上下文不得被引號逃逸出來掛上事件處理器");
   assert.ok(parsed.ariaLabel.includes('2330" onmouseover='), "跳脫後的 aria-label 仍應保留原始文字");
 });
+
+test("個股健檢卡：場景名稱（伺服器字串）不得直接進 innerHTML", () => {
+  const result = probe(`renderInspectCard({
+    verdict: { status: "match", name: ${JSON.stringify(PAYLOAD)} },
+    name: "測試", code: "2330", market: "上市", asOf: "2026-09-04",
+    score: 80, rr: 1.5, changePct: 1.2, plan: { entry: 100, structuralStop: 95, target: 110 },
+    scenarios: [],
+  })`);
+  assert.equal(result.injected, 0, "verdict.name 不得產生元素");
+  assert.ok(result.text.includes(PAYLOAD), "跳脫後仍要把原字串當純文字顯示");
+});

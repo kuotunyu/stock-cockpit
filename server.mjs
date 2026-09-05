@@ -186,12 +186,12 @@ const securityHeaders = {
   "referrer-policy": "same-origin",
 };
 
+// 刻意沒有任何 access-control-allow-*：這個 API 只給同源前端用，不開 CORS。
+// 以前帶著 allow-methods／allow-headers 卻沒有 allow-origin，是「看起來開了一半」的殘件。
 const jsonHeaders = {
   ...securityHeaders,
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
-  "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-  "access-control-allow-headers": "content-type",
 };
 
 const mimeTypes = {
@@ -1826,6 +1826,16 @@ function sanitizeUser(user) {
   };
 }
 
+// 共享備註對外的形狀：拿掉內部 userId（免登入端點也回，會讓 LAN 上任何人枚舉到
+// PATCH/DELETE /api/admin/users 要用的 u_xxxx），改用 mine 告訴前端「這是不是我的（或我是 admin）」。
+function publicNotes(notes, auth) {
+  const viewer = auth?.user || null;
+  return (notes || []).map(({ userId, ...rest }) => ({
+    ...rest,
+    mine: Boolean(viewer) && (userId === viewer.id || viewer.role === "admin"),
+  }));
+}
+
 // 憑證檔一律放在 DATA_DIR/certs/ 底下，DB 只存檔名。
 // 任意路徑會變成「本機檔案存在 oracle」（existsSync 對任何路徑回答有沒有），
 // Windows 上指到 \\攻擊者\share 還會讓伺服器主動對外發 SMB／NTLM 連線。
@@ -2910,7 +2920,13 @@ async function commitPersonalRestore(db, auth, input, clientAddress = "") {
         throw portableError("REAUTH_FAILED", "目前密碼已變更，請重新輸入並再次預覽", 403);
       }
 
-      await mkdir(dbBackupDir, { recursive: true });
+      // 檔案系統錯誤（EACCES／ENOSPC…）以前會原樣帶著絕對路徑回給客戶端；
+      // 統一包成 PERSISTENCE_FAILED（503，訊息不含路徑），比照 health 的 coarse errno 原則。
+      try {
+        await mkdir(dbBackupDir, { recursive: true });
+      } catch (error) {
+        throw persistenceFailure(error);
+      }
       let stableRestorePoint = false;
       for (let attempt = 0; attempt < 3 && !stableRestorePoint; attempt += 1) {
         createdAt = new Date().toISOString();
@@ -2918,7 +2934,11 @@ async function commitPersonalRestore(db, auth, input, clientAddress = "") {
         restorePointPath = join(dbBackupDir, fileName);
         const snapshotEpoch = dbMutationEpoch;
         const preCommitSnapshot = `${JSON.stringify(currentDb, null, 2)}\n`;
-        await writeFileAtomic(restorePointPath, preCommitSnapshot);
+        try {
+          await writeFileAtomic(restorePointPath, preCommitSnapshot);
+        } catch (error) {
+          throw persistenceFailure(error);
+        }
         const stillValid = currentDb.sessions.some(
           (session) => session.id === entry.sessionId
             && session.userId === entry.userId
@@ -11835,6 +11855,9 @@ async function handleApi(request, requestUrl, response) {
     } catch (error) {
       if (error instanceof SyntaxError) {
         portableErrorResponse(response, portableError("BACKUP_FORMAT_INVALID", "請求內容不是有效的 JSON", 400));
+      } else if (error?.code === "PERSISTENCE_FAILED") {
+        // 還原點寫不進去＝磁碟／權限問題，統一 503 且不帶路徑（restore mutator 已把 fs 錯誤包好）。
+        mutationErrorResponse(response, error, 503);
       } else if (error?.code) {
         // stale 回應把 currentRevisions 提升到頂層，方便前端直接更新本機 rev。
         if (error.code === "RESTORE_PREVIEW_STALE") {
@@ -11873,7 +11896,8 @@ async function handleApi(request, requestUrl, response) {
         const input = await readJsonBody(request);
         const username = String(input.username || "").trim();
         const password = String(input.password || "");
-        const displayName = String(input.displayName || username).trim();
+        // 顯示名會被複製進每則共享備註的 userName，設上限免得一個帳號把 DB 撐大。
+        const displayName = String(input.displayName || username).trim().slice(0, 64);
         const role = input.role === "admin" ? "admin" : "user";
         if (!isValidUsername(username)) {
           throw new Error("帳號需為 3-32 個英數字、底線、句點或連字號。");
@@ -12419,11 +12443,14 @@ async function handleApi(request, requestUrl, response) {
     } catch {
       // 名稱補不到就只顯示代號。
     }
-    const notes = Object.values(db.stockNotes)
-      .flat()
-      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-      .slice(0, limit)
-      .map((note) => ({ ...note, name: reference?.byCode.get(note.code)?.name || "" }));
+    const notes = publicNotes(
+      Object.values(db.stockNotes)
+        .flat()
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .slice(0, limit)
+        .map((note) => ({ ...note, name: reference?.byCode.get(note.code)?.name || "" })),
+      auth,
+    );
     jsonResponse(response, 200, { ok: true, notes });
     return true;
   }
@@ -12437,7 +12464,7 @@ async function handleApi(request, requestUrl, response) {
         jsonResponse(response, 400, { ok: false, error: "缺少股票代號" });
         return true;
       }
-      jsonResponse(response, 200, { ok: true, code, notes: db.stockNotes[code] || [] });
+      jsonResponse(response, 200, { ok: true, code, notes: publicNotes(db.stockNotes[code] || [], auth) });
       return true;
     }
     if (!ensureAuthed(auth, response)) return true;
@@ -12448,6 +12475,9 @@ async function handleApi(request, requestUrl, response) {
         const code = cleanCode(input.code);
         const text = String(input.text || "").trim().slice(0, 500);
         if (!code || !text) throw new Error("需要股票代號與備註內容");
+        if (!SECURITY_CODE_PATTERN.test(code)) {
+          throw Object.assign(new Error("股票代號需為 4～6 碼英數"), { status: 400 });
+        }
         const committed = await commitDbMutation((currentDb) => {
           const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
           if (rejectPersonalRestoreBusy(response)) return skipDbMutation(null);
@@ -12474,7 +12504,7 @@ async function handleApi(request, requestUrl, response) {
           return cloneJson(currentDb.stockNotes[code]);
         });
         if (!committed) return true;
-        jsonResponse(response, 201, { ok: true, code, notes: committed });
+        jsonResponse(response, 201, { ok: true, code, notes: publicNotes(committed, auth) });
       } catch (error) {
         mutationErrorResponse(response, error, 400);
       }
@@ -12499,7 +12529,7 @@ async function handleApi(request, requestUrl, response) {
           return cloneJson(currentDb.stockNotes[code]);
         });
         if (!notes) return true;
-        jsonResponse(response, 200, { ok: true, code, notes });
+        jsonResponse(response, 200, { ok: true, code, notes: publicNotes(notes, auth) });
       } catch (error) {
         mutationErrorResponse(response, error, 400);
       }
@@ -12549,6 +12579,9 @@ async function handleApi(request, requestUrl, response) {
         const input = await readJsonBody(request);
         const code = cleanCode(input.code);
         if (!code) throw new Error("需要股票代號");
+        if (!SECURITY_CODE_PATTERN.test(code)) {
+          throw Object.assign(new Error("股票代號需為 4～6 碼英數"), { status: 400 });
+        }
         const summary = String(input.summary || "").trim().slice(0, 800);
         await commitDbMutation((currentDb) => {
           const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
@@ -12635,6 +12668,14 @@ async function handleApi(request, requestUrl, response) {
       const forceRefresh = requestUrl.searchParams.get("refresh") === "1";
       if (forceRefresh && !ensureAuthed(auth, response)) return true;
       if (forceRefresh) {
+        // 有副作用的 GET：SameSite=Lax 在跨站「頂層導覽」時仍會帶 cookie，惡意頁 window.open 這個
+        // 網址就能觸發全市場重掃（CPU＋官方配額）。只接受 App 內的 fetch。
+        const fetchMode = String(request.headers["sec-fetch-mode"] || "").toLowerCase();
+        const fetchSite = String(request.headers["sec-fetch-site"] || "").toLowerCase();
+        if (fetchMode === "navigate" || fetchSite === "cross-site") {
+          jsonResponse(response, 403, { ok: false, code: "SWING_REFRESH_FORBIDDEN", error: "重新掃描只能從 App 內觸發。" });
+          return true;
+        }
         const elapsed = Date.now() - lastSwingForceRefreshAt;
         if (elapsed < SWING_FORCE_REFRESH_COOLDOWN_MS) {
           jsonResponse(response, 429, {

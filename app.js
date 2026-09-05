@@ -2033,6 +2033,9 @@ async function restorePersonalBackup() {
 }
 
 function clearUserScopedState({ renderNow = true } = {}) {
+  // 備註的「能不能刪」（mine）是伺服器依當時登入者算的；換人或登出就重抓，不沿用上一個人的答案。
+  notesState.code = "";
+  notesState.notes = [];
   authScopeGeneration += 1;
   resetPersonalBackupRestoreState({ closeModal: true });
   authState.user = null;
@@ -6252,9 +6255,9 @@ function renderInspectCard(d) {
   const vClass = v.status === "match" ? "is-match" : v.status === "near" ? "is-near" : "is-none";
   const vIcon = v.status === "match" ? "✅" : v.status === "near" ? "⚠️" : "❌";
   const vText = v.status === "match"
-    ? `符合 ${v.name}`
+    ? `符合 ${escapeHtml(v.name)}`
     : v.status === "near"
-      ? `接近 ${v.name}（差 ${v.failCount} 項）`
+      ? `接近 ${escapeHtml(v.name)}（差 ${Number(v.failCount) || 0} 項）`
       : "目前不符合任一波段型態";
   const changeTone = toneFromNet(d.changePct);
   const md = String(d.asOf || "").slice(5).replace("-", "/");
@@ -10041,7 +10044,8 @@ function renderStockNotes(stock) {
     loadStockNotes(stock.code);
   }
   const notes = notesState.code === stock.code ? notesState.notes : [];
-  const canDelete = (note) => authState.user && (note.userId === authState.user.id || authState.user.role === "admin");
+  // 伺服器不再回 userId（免登入端點會外洩內部 id），改由它算好的 mine 決定能不能刪。
+  const canDelete = (note) => Boolean(authState.user && note.mine);
   const list = notes.length
     ? [...notes]
         .reverse()

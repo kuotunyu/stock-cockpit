@@ -537,8 +537,11 @@ test("restore：原子 replace 私有資料、保留 quarantine、安全 merge �
 
   const notes = await readJson(await srv.api("/api/notes?code=1101"), 200);
   assert.equal(notes.notes.length, 50, "49 則他人備註＋1 則還原備註都必須保留");
-  assert.equal(notes.notes.filter((note) => note.userId === otherUser.id).length, 49, "不得淘汰他人的既有備註");
-  const restoredOwnNote = notes.notes.find((note) => note.id === ADMIN_NOTE_ID);
+  assert.ok(notes.notes.every((note) => note.userId === undefined), "API 不再外洩內部作者 id");
+  // 作者綁定要看 DB（API 回應已拿掉 userId，改回 mine）。
+  const storedNotes = (await srv.mod.loadDb()).stockNotes["1101"];
+  assert.equal(storedNotes.filter((note) => note.userId === otherUser.id).length, 49, "不得淘汰他人的既有備註");
+  const restoredOwnNote = storedNotes.find((note) => note.id === ADMIN_NOTE_ID);
   assert.ok(restoredOwnNote);
   assert.equal(restoredOwnNote.userId, admin.id, "來源作者 id 不可信，必須重新綁定目前登入者");
   assert.equal(restoredOwnNote.userName, admin.displayName);

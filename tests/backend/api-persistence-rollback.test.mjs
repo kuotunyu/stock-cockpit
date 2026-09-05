@@ -1,7 +1,7 @@
 // API 持久化失敗：回 503，完整回滾 RAM／rev，且下一筆成功寫入不得夾帶失敗資料。
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { bootServer } from "../helpers/test-server.mjs";
 
@@ -187,6 +187,9 @@ test("各類 DB mutation 在 atomic write 失敗時皆 fail-closed 並可恢復"
     }),
   );
 
+  // certPath 現在只接受 .data/certs/ 內的檔案，先把假憑證放好，讓失敗真的來自 atomic write。
+  await mkdir(join(srv.dataDir, "certs"), { recursive: true });
+  await writeFile(join(srv.dataDir, "certs", "cert.pfx"), "x");
   await expectPersistenceRollback(
     "broker credentials",
     () => srv.api("/api/broker/settings", {
@@ -195,7 +198,7 @@ test("各類 DB mutation 在 atomic write 失敗時皆 fail-closed 並可恢復"
         provider: "fubon",
         personalId: "A123456789",
         password: "broker-password",
-        certPath: "C:\\missing\\cert.pfx",
+        certPath: "cert.pfx",
         certPassword: "cert-password",
       }),
     }),
