@@ -41,6 +41,7 @@ test("計畫→提醒：登入後一鍵建立三筆（停損 ≤、目標 ≥、
     authState.user = null;
     priceAlertsState.alerts = [];
     const anon = createPlanAlerts("2330", { structuralStop: 95, target: 110, trailingTrigger: 105 });
+    closeDialogLayer(document.getElementById("loginGate")); // 未登入會開登入閘（ux-structure 另測）
     authState.user = { id: "u1", username: "me", role: "user" };
     const first = createPlanAlerts("2330", { structuralStop: 95, target: 110, trailingTrigger: 105 });
     const alerts = priceAlertsState.alerts.map((a) => [a.code, a.op, a.price, a.note]);
@@ -50,7 +51,7 @@ test("計畫→提醒：登入後一鍵建立三筆（停損 ≤、目標 ≥、
     authState.user = prevUser;
     return { anon, first, alerts, second, count };
   })()`);
-  assert.deepEqual(result.anon, { created: 0, skipped: 0 });
+  assert.deepEqual(result.anon, { created: 0, skipped: 0, loginRequired: true });
   assert.deepEqual(result.first, { created: 3, skipped: 0 });
   assert.deepEqual(result.alerts, [["2330", "<=", 95, "結構停損"], ["2330", ">=", 110, "目標"], ["2330", ">=", 105, "啟動移停"]]);
   assert.deepEqual(result.second, { created: 0, skipped: 3 });
@@ -69,7 +70,18 @@ test("市場位階一行：位階、漲跌家數、基差、事件；位階未�
   const unknown = String(app.evalIn(`(() => { marketBreadthState.data = { ok: true, taiex: null, breadth: { total: 0 }, basis: null, events: [], warnings: ["加權指數歷史暫時抓不到"] }; return renderMarketStanceLine(); })()`));
   assert.match(unknown, /大盤位階未知/);
   assert.match(unknown, /本週無結算／財報截止事件/);
-  assert.match(unknown, /market-stance-warn/);
+  assert.match(unknown, /<button type="button" class="market-stance-warn" aria-label="資料警告"/, "⚠ 要是可聚焦、有名字的按鈕，不是只有 title 的 span");
+  // 點 ⚠ 要把 warnings 用 toast 講出來（觸控沒有 hover、讀屏拿不到 title）
+  const toast = String(app.evalIn(`(() => {
+    const host = document.createElement("div");
+    host.innerHTML = renderMarketStanceLine();
+    document.body.appendChild(host);
+    host.querySelector(".market-stance-warn").click();
+    const text = document.getElementById("toastStack").lastElementChild?.textContent || "";
+    host.remove();
+    return text;
+  })()`));
+  assert.match(toast, /加權指數歷史暫時抓不到/);
   // 15:00 後期交所 MIS 給的是夜盤價：減 13:30 的加權收盤 ＝ 夜盤變動 ＋ 真基差，不可再叫「基差」
   const night = String(app.evalIn(`(() => { marketBreadthState.data = { ok: true, taiex: null, breadth: { total: 0 }, basis: { points: 120, session: "夜盤", contractMonth: "2026/09" }, events: [], warnings: [] }; return renderMarketStanceLine(); })()`));
   assert.match(night, /夜盤 vs 現貨收盤 \+120/);

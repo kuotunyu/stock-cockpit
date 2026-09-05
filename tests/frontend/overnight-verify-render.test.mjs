@@ -134,8 +134,10 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   const enough = render({ days: 25, signals: 300, hitPlus2: 200, brokeMinus2: 50, winAtOpen: 225, winAtClose: 120, avgOpenReturn: 0.5, avgCloseReturn: 0.3, minDays: 20,
     ci: { hitPlus2: { n: 25, mean: 0.66, low: 0.45, high: 0.87 }, winAtOpen: { n: 25, mean: 0.75, low: 0.6, high: 0.9 }, winAtClose: null } });
   // 括號要有「區間」標籤：散戶第一眼會把「75%（60～90%）」讀成範圍勝率或某種區間報酬。
-  assert.match(enough, /開盤賣勝率 75%（區間 60～90%）/);
-  assert.match(enough, /曾達\+2% 67%（區間 45～87%）/);
+  const enoughText = enough.replace(/<[^>]+>/g, "");
+  assert.match(enoughText, /開盤賣勝率 75%（區間 60～90%）/);
+  assert.match(enoughText, /曾達\+2% 67%（區間 45～87%）/);
+  assert.match(enough, /data-glossary-term="開盤賣勝率"/, "標籤要能點開名詞解釋");
   host = app.doc.createElement("div");
   host.innerHTML = enough;
   const chips = [...host.querySelectorAll(".verify-stats span")];
@@ -153,7 +155,7 @@ test("策略表現面板：明講 look-ahead 取樣與偏誤量級，卡片回�
       summary: { strongContinuation: { groupName: "強勢續攻", sampleSize: 12, hitPlus2Rate: 0.5, brokeMinus2Rate: 0.2, winAtOpenRate: 0.4, winAtCloseRate: 0.3, avgOpenReturn: 0.3, avgHighReturn: 1.5, avgCloseReturn: 0.2 } } };
     return renderBacktestPerformance();
   })()`));
-  assert.match(html, /look-ahead/);
+  assert.match(html, /事後挑樣本（look-ahead）/, "先講白話再放原文");
   assert.match(html, /\+0\.3～0\.5/);
   assert.match(html, /候選股自身的歷史統計/);
   assert.doesNotMatch(html, /策略表現（近/);

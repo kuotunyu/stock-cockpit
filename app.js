@@ -5731,8 +5731,8 @@ function renderVerifyHistory() {
         ${totals ? `
           <div class="verify-stats">
             <span>累計 ${totals.days} 天 / ${totals.signals} 檔${enoughDays ? "" : `・累積中 ${totals.days}/${minDays} 天`}</span>
-            <span class="${ciTone(totals.ci?.winAtOpen)}" title="開盤價賣出、扣費稅後淨報酬 > 0 的比例；括號是以日為叢集的 95% 信賴區間">開盤賣勝率 ${rate(totals.winAtOpen, totals.signals)}${ciText(totals.ci?.winAtOpen)}</span>
-            <span class="${ciTone(totals.ci?.winAtClose)}" title="收盤價賣出、扣費稅後淨報酬 > 0 的比例">收盤賣勝率 ${rate(totals.winAtClose, totals.signals)}${ciText(totals.ci?.winAtClose)}</span>
+            <span class="${ciTone(totals.ci?.winAtOpen)}" title="開盤價賣出、扣費稅後淨報酬 > 0 的比例；括號是以日為叢集的 95% 信賴區間">${glossLink("開盤賣勝率")} ${rate(totals.winAtOpen, totals.signals)}${ciText(totals.ci?.winAtOpen)}</span>
+            <span class="${ciTone(totals.ci?.winAtClose)}" title="收盤價賣出、扣費稅後淨報酬 > 0 的比例">${glossLink("收盤賣勝率")} ${rate(totals.winAtClose, totals.signals)}${ciText(totals.ci?.winAtClose)}</span>
             <span class="${ciTone(totals.ci?.hitPlus2)}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">曾達+2% ${rate(totals.hitPlus2, totals.signals)}${ciText(totals.ci?.hitPlus2)}</span>
             <span title="觀察日最低價曾碰到 −2%">曾破−2% ${rate(totals.brokeMinus2, totals.signals)}</span>
             <span>平均開盤 ${formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
@@ -5796,7 +5796,7 @@ function renderBacktestPerformance() {
     </div>
     <section class="performance-grid">${cards}</section>
     <div class="overnight-field-guide" aria-label="回測說明">
-      <span><strong>這不是回測，是 look-ahead 取樣</strong>樣本只涵蓋「今天收盤後符合條件」的股票，再回頭看它們過去 30 天——入選條件（收在均線上）本身建立在未來價格路徑上，所以每個過去訊號的隔日報酬都被抬高。用零漂移隨機漫步實測，這種取樣法會把真實 edge 為 0 的策略算出 +0.3～0.5 個百分點的平均隔日報酬，與來回費稅 0.471% 同量級。請以上方「實際驗證紀錄（前向）」為準。</span>
+      <span><strong>這不是回測，是事後挑樣本（look-ahead）</strong>樣本只涵蓋「今天收盤後符合條件」的股票，再回頭看它們過去 30 天——入選條件（收在均線上）本身建立在未來價格路徑上，所以每個過去訊號的隔日報酬都被抬高。用零漂移隨機漫步實測，這種取樣法會把真實 edge 為 0 的策略算出 +0.3～0.5 個百分點的平均隔日報酬，與來回費稅 0.471% 同量級。請以上方「實際驗證紀錄（前向）」為準。</span>
     </div>
   `;
 }
@@ -5846,7 +5846,11 @@ function renderMarketStanceLine() {
     ? `本週事件：${data.events.map((e) => `${String(e.date).slice(4, 6)}/${String(e.date).slice(6, 8)} ${escapeHtml(e.label)}`).join("、")}`
     : "本週無結算／財報截止事件";
   const title = "大盤位階＝加權指數相對 20／60 日均線（只用來分層看成績單，不是選股濾網）；漲跌家數只算資料日等於基準日的上市櫃股票；期指基差＝台指期近月 − 加權指數（正＝正價差）。事件：台指期最後結算日（第三個週三，遇休市順延）、月營收公告截止（10 日）、季報截止。";
-  return `<p class="market-stance" title="${escapeHtml(title)}">${[stance, breadth, basis, events].filter(Boolean).join("｜")}${(data.warnings || []).length ? `<span class="market-stance-warn" title="${escapeHtml(data.warnings.join("\n"))}">⚠</span>` : ""}</p>`;
+  // ⚠ 是按鈕不是 span：觸控沒有 hover、讀屏拿不到 title，點了用 toast 把 warnings 講出來。
+  const warn = (data.warnings || []).length
+    ? `<button type="button" class="market-stance-warn" aria-label="資料警告" data-stance-warnings="${escapeHtml(data.warnings.join("\n"))}" title="${escapeHtml(data.warnings.join("\n"))}">⚠</button>`
+    : "";
+  return `<p class="market-stance" title="${escapeHtml(title)}">${[stance, breadth, basis, events].filter(Boolean).join("｜")}${warn}</p>`;
 }
 
 // ===== 部位控管：單筆風險 % → 建議張數 =====
@@ -5899,8 +5903,9 @@ function renderPositionSizeStat(plan) {
 // ===== 計畫 → 到價提醒一鍵 =====
 function createPlanAlerts(code, plan) {
   if (!authState.user) {
-    showToast("到價提醒需要登入（更多 → 帳號管理）");
-    return { created: 0, skipped: 0 };
+    // 登入閘就在手邊，不要叫人自己走「更多 → 帳號管理」三層。
+    setLoginGateVisible(true, "登入後即可一鍵建立這三筆到價提醒（停損、目標、啟動移停）。");
+    return { created: 0, skipped: 0, loginRequired: true };
   }
   const wanted = [
     ["<=", plan?.structuralStop, "結構停損"],
@@ -6157,7 +6162,7 @@ function renderSwingCard(pick) {
       </div>
       ${riskRewardBar}
       <div class="swing-actions">
-        <button type="button" class="swing-plan-alerts" data-plan-alerts="${pick.code}" data-plan-stop="${Number(pick.plan?.structuralStop) || ""}" data-plan-target="${Number(pick.plan?.target) || ""}" data-plan-trailing="${Number(pick.plan?.trailingTrigger) || ""}" title="一鍵建立三筆到價提醒：跌到結構停損、漲到目標、漲到啟動移停（需登入；已存在的不重複）">建立三筆到價提醒</button>
+        <button type="button" class="swing-plan-alerts" data-plan-alerts="${escapeHtml(pick.code)}" data-plan-stop="${Number(pick.plan?.structuralStop) || ""}" data-plan-target="${Number(pick.plan?.target) || ""}" data-plan-trailing="${Number(pick.plan?.trailingTrigger) || ""}" title="一鍵建立三筆到價提醒：跌到結構停損、漲到目標、漲到啟動移停（需登入；已存在的不重複）">${authState.user ? "建立三筆到價提醒" : "登入後建立提醒"}</button>
       </div>
     </article>
   `;
@@ -6249,13 +6254,13 @@ function swingScenarioName(key) {
 function swingDistributionLine(s) {
   const parts = [];
   const signed = (value) => `${value >= 0 ? "+" : ""}${value}%`;
-  if (s.profitFactor != null) parts.push(`PF ${s.profitFactor}`);
+  if (s.profitFactor != null) parts.push(`${glossLink("獲利因子")} ${s.profitFactor}`);
   if (s.medianResultPct != null) parts.push(`中位 ${signed(s.medianResultPct)}`);
   if (s.maxConsecutiveLosses) parts.push(`最長連虧 ${s.maxConsecutiveLosses}`);
   if (s.worstDay?.day) parts.push(`最差單日 ${String(s.worstDay.day).slice(4, 6)}/${String(s.worstDay.day).slice(6, 8)} ${signed(s.worstDay.avgResultPct)}（${s.worstDay.count} 筆）`);
   const wp = s.withPeriodicCall;
   const periodic = wp && Number(wp.resolved) > Number(s.continuousResolved ?? wp.resolved)
-    ? `含處置股 ${wp.winRate != null ? `${wp.winRate}%` : `${wp.wins}/${wp.resolved}`}（${wp.resolved} 筆）・主要勝率分母 ${s.continuousResolved} 筆連續競價`
+    ? `含處置股 ${wp.winRate != null ? `${wp.winRate}%` : `${wp.wins}/${wp.resolved}`}（${wp.resolved} 筆）・主要勝率只算 ${s.continuousResolved} 筆連續競價的單`
     : "";
   if (!parts.length && !periodic) return "";
   return `<small class="sv-regime" title="PF＝獲利總和 ÷ 虧損總和；中位數與最長連虧看分佈，等權平均會把「整批停損的一週」和「平穩小虧」混成同一個數字。處置期間是分盤集合競價，那些樣本不進主要勝率的分母。">${[parts.join("・"), periodic].filter(Boolean).join("<br>")}</small>`;
@@ -12376,7 +12381,7 @@ window.addEventListener("popstate", (event) => {
 // === 名詞 / 觀念解釋（全站可開的詞彙表）===
 // 目的：朋友看不懂某些功能/名詞時，從 header「📖」或「更多」點開即可查；可搜尋、可依分類篩。
 // def 內含刻意排版的 HTML（<strong> 等）→ 輸出時不 escape；term/aliases/分類值才 escape。
-const GLOSSARY_CATS = ["畫面說明", "看盤基礎", "隔日沖（短線）", "策略雷達（波段）", "技術指標", "風險與制度"];
+const GLOSSARY_CATS = ["畫面說明", "看盤基礎", "隔日沖（短線）", "策略雷達（波段）", "技術指標", "風險與制度", "成績單與決策"];
 const GLOSSARY = [
   // —— 畫面說明（原本只在分頁的 title 提示裡，手機沒有 hover 看不到）——
   { term: "隔日沖（畫面）", aliases: ["隔日沖頁", "隔日沖"], cat: "畫面說明", def: "看<strong>訊號日收盤後</strong>的短線型態，觀察<strong>實際下一交易日</strong>的慣性（通常抱約 1 個交易日）。「總覽」把三種型態合在一起看；「策略表現」是候選股自身的歷史統計，不是前向驗證。和「策略雷達」的波段（抱數天～數週、附完整進出場計畫）是不同維度的工具。" },
@@ -12430,6 +12435,15 @@ const GLOSSARY = [
   { term: "彈性面額股（股名帶 *）", aliases: ["彈性面額", "星號", "*"], cat: "風險與制度", def: "股名後的「<strong>*</strong>」是官方標記「每股面額不是新台幣 10 元」的股票，<strong>不是錯字、也不是風險警示</strong>。它的股價高低不能直接和一般股（面額 10 元）相比，要看市值才準。" },
   { term: "還原股價（除權息）", aliases: ["還原股價", "除權息", "除息", "除權"], cat: "風險與制度", def: "除權息當天股價會因配息／配股產生制度性跳空，<strong>不等於真的大跌</strong>。App 優先用官方現金股利、股票股利與現增資料還原歷史價；舊區段若只有大跳空可推估，會明示「<strong>疑似／估算還原</strong>」，不把推測冒充官方事件。官方公告欄位未齊時，策略雷達會暫停該檔判定，避免錯算均線。<br><strong>偵測範圍的界線</strong>：官方只提供除權息的機器可讀資料，<strong>沒有減資、面額變更、股票分割的端點</strong>。這幾類事件靠「跳空超過 10.5%」推估——減資 10% 以上與所有股票分割都會被抓到並標成估算，但<strong>幅度小於 10.5% 的減資偵測不到</strong>，那段圖會保留原始跳空。所以技術分析頁寫「沒有偵測到公司行動」是指<strong>沒查到</strong>，不是保證沒發生。" },
   { term: "流動性", aliases: ["流動性", "滑價", "低流動性"], cat: "風險與制度", def: "一檔股票好不好買賣、進出會不會大幅影響價格。量太小（低流動性）容易<strong>滑價</strong>、想賣卻賣不掉，不適合波段，所以策略雷達只掃<strong>流動性前 240 檔</strong>（這 240 檔依當日成交量<strong>每個交易日重選</strong>，不是固定名單）。" },
+  // —— 成績單與決策（第二輪：這些數字以前只在 title 裡解釋，觸控與讀屏拿不到）——
+  { term: "開盤賣勝率／收盤賣勝率", aliases: ["開盤賣勝率", "收盤賣勝率", "勝率"], cat: "成績單與決策", def: "隔日沖成績單的勝率：訊號日收盤買進、<strong>實際下一交易日</strong>的開盤價（或收盤價）賣出，扣掉一買一賣的手續費與證交稅（來回約 0.471%）後<strong>淨報酬 > 0</strong> 才算勝。「盤中曾達 +2%／曾破 −2%」只是盤中曾觸及的價位，不是可實現損益，不要當勝率讀。" },
+  { term: "信賴區間（成績單的括號）", aliases: ["信賴區間", "區間"], cat: "成績單與決策", def: "括號裡的「區間 60～90%」是 95% 信賴區間：同一批條件再來一次，真實勝率有 95% 的機會落在這個範圍。本 App 以「日」為單位算（同一天選出的幾十檔共享大盤走勢，不能當獨立樣本），未滿 20 天不顯示。<strong>看下界</strong>：下界高於 50% 才染色。" },
+  { term: "獲利因子（PF）", aliases: ["獲利因子", "PF"], cat: "成績單與決策", def: "所有獲利單的報酬總和 ÷ 所有虧損單的虧損總和。<strong>大於 1</strong> 代表賺的比賠的多，1.5 以上算健康。它看的是「幅度」不是「次數」：勝率不高但賺大賠小的策略，獲利因子仍可能很好。" },
+  { term: "中位數與最長連虧", aliases: ["中位數", "中位", "最長連虧", "最差單日"], cat: "成績單與決策", def: "<strong>中位數</strong>是把所有結案報酬排序後正中間的那個值，不像平均會被一兩筆極端值拉走。<strong>最長連虧</strong>是連續虧損最長的一串，用來想像最壞時要撐多久；「最差單日」是同一天結案的單平均最差的那一天。" },
+  { term: "大盤位階（季線上／下）", aliases: ["大盤位階", "位階", "季線上", "季線下", "月線上", "月線下"], cat: "成績單與決策", def: "加權指數收盤相對 20 日（月線）與 60 日（季線）均線的位置。只用來把成績單<strong>分層看</strong>（季線上／季線下各算一組），不是選股濾網——它不會改變任何選股結果。" },
+  { term: "期指基差", aliases: ["基差", "夜盤 vs 現貨收盤", "夜盤"], cat: "成績單與決策", def: "台指期近月價格減加權指數。正數（正價差）通常代表期貨偏多、負數偏空。只有<strong>日盤</strong>同一交易日的數字才叫基差；15:00 後期交所給的是夜盤價，減 13:30 的現貨收盤等於「夜盤自己的漲跌＋基差」，畫面上會改標「夜盤 vs 現貨收盤」。結算週換月時基差會跳一個月的持有成本，所以合約月份一起顯示。" },
+  { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "策略雷達頂部填「資金」與「單筆風險 %」後，每張波段卡算 <strong>建議張數＝資金 × 風險% ÷（進場 − 結構停損）× 1000</strong>，再以買得起的張數封頂。意思是：這筆若打到停損，最多賠掉資金的那個百分比。資金只存在這台裝置。" },
+  { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "跳空略過"], cat: "成績單與決策", def: "波段驗證的另一個口徑：同一批驗證單改以<strong>第一個交易日的開盤價</strong>當進場價重算。訊號要等收盤後的整批資料才算得出來，真實進場多半是次日開盤，所以並陳。開盤已經在停損下方或目標上方的單，這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];
 const glossaryState = { cat: "", q: "" };
 
@@ -12883,6 +12897,15 @@ document.addEventListener("click", (event) => {
     trailingTrigger: Number(button.dataset.planTrailing),
   });
 }, true);
+
+// 市場位階的 ⚠：把 warnings 用 toast 講出來（title 只有滑鼠看得到）。
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest("[data-stance-warnings]");
+  if (!button) return;
+  event.preventDefault();
+  showToast(button.dataset.stanceWarnings || "市場位階資料有警告", 8000);
+});
 
 // 部位控管輸入：資金與單筆風險 % 只存在這台裝置（localStorage），改了就重繪波段卡片的建議張數。
 function syncPositionSizingInputs() {

@@ -9071,7 +9071,23 @@ body.is-locked .app-shell {
 .market-stance.is-muted { color: var(--muted); }
 .market-stance .positive { color: var(--up-text); }
 .market-stance .negative { color: var(--down-text); }
-.market-stance-warn { margin-left: 6px; color: var(--warn-text); cursor: help; }
+/* ⚠ 是按鈕：可聚焦、有名字，點了 toast 出 warnings；外觀維持行內符號 */
+.market-stance-warn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  margin: -6px 0 -6px 4px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--warn-text);
+  font: inherit;
+  cursor: pointer;
+}
+.market-stance-warn:hover { background: rgba(255, 177, 44, 0.12); }
 
 /* 部位控管列：資金＋單筆風險 % */
 .swing-risk-bar {

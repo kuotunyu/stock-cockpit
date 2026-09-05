@@ -191,3 +191,37 @@ test("隔日沖摘要 chip 樣式只套在 facts 的直接子元素（.market-st
   assert.match(css, /\.overnight-summary-facts\s*>\s*span\s*\{/);
   assert.match(css, /\.overnight-summary\s+\.market-stance\s*\{[^}]*flex-basis:\s*100%/, "位階行在摘要條裡要獨佔一行");
 });
+
+// ---- 第二輪第一批：決策工具的登入閘、名詞表補條目 ----
+const samplePick = JSON.stringify({ code: "2330", name: "台積電", price: 100, changePct: 1, score: 80, scenario: { key: "midBandDefense", name: "中軌攻防" }, plan: { entry: 100, structuralStop: 95, initialStop: 95, trailingTrigger: 105, target: 110, rr: 2, rrNet: 1.8 }, reasons: [], warnings: [] });
+
+test("未登入按「建立三筆到價提醒」→ 直接開登入閘並說明原因；卡片按鈕文案也講明要登入", () => {
+  const result = json(`(() => {
+    const prevUser = authState.user;
+    authState.user = null;
+    const out = createPlanAlerts("2330", { structuralStop: 95, target: 110, trailingTrigger: 105 });
+    const gate = document.getElementById("loginGate");
+    const open = !gate.hidden;
+    const message = document.getElementById("loginMessage")?.textContent || "";
+    const anonCard = renderSwingCard(${samplePick}, 1);
+    closeDialogLayer(gate);
+    authState.user = { id: "u1", username: "me", role: "user" };
+    const inCard = renderSwingCard(${samplePick}, 1);
+    authState.user = prevUser;
+    return { out, open, message, anonLabel: /登入後建立提醒/.test(anonCard), inLabel: /建立三筆到價提醒/.test(inCard) };
+  })()`);
+  assert.deepEqual(result.out, { created: 0, skipped: 0, loginRequired: true });
+  assert.equal(result.open, true, "setLoginGateVisible 就在手邊，不該叫人自己走「更多 → 帳號管理」三層");
+  assert.match(result.message, /登入後/);
+  assert.equal(result.anonLabel, true);
+  assert.equal(result.inLabel, true);
+});
+
+test("名詞表：新分類「成績單與決策」補齊 8 條（成績單與決策工具的數字以前只在 title 裡解釋）", () => {
+  assert.ok(json(`GLOSSARY_CATS.includes("成績單與決策")`));
+  const terms = json(`GLOSSARY.filter((g) => g.cat === "成績單與決策").map((g) => g.term + "|" + (g.aliases || []).join("|"))`);
+  for (const needle of ["開盤賣勝率", "信賴區間", "獲利因子", "最長連虧", "大盤位階", "期指基差", "建議張數", "次日開盤進場"]) {
+    assert.ok(terms.some((t) => t.includes(needle)), `缺 ${needle}`);
+  }
+  assert.ok(terms.length >= 8, terms.join(" | "));
+});

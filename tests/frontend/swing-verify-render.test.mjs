@@ -152,6 +152,8 @@ test("場景卡：分佈指標一行（PF／中位／最長連虧／最差單日
     renderSwingVerifyPanel();
     return document.getElementById("swingVerify").innerHTML;
   })()`)).replace(/\s+/g, " ");
-  assert.match(html, /PF 1\.53・中位 -3%・最長連虧 3・最差單日 08\/25 -3%（3 筆）/);
-  assert.match(html, /含處置股 55\.6%（27 筆）・主要勝率分母 23 筆連續競價/);
+  const text = html.replace(/<[^>]+>/g, "");
+  assert.match(text, /獲利因子 1\.53・中位 -3%・最長連虧 3・最差單日 08\/25 -3%（3 筆）/, "「PF」對散戶是術語");
+  assert.doesNotMatch(text, /PF 1\.53/);
+  assert.match(text, /含處置股 55\.6%（27 筆）・主要勝率只算 23 筆連續競價的單/);
 });
