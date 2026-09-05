@@ -4798,19 +4798,41 @@ function rocYearMonthToIso(value) {
 }
 
 // 各維度共用的 TTL 快取殼：抓失敗且無快取 → 回空 Map（呼叫端補 warning，不擋整頁）。
+// 每個來源這一輪的狀態：fresh（剛抓到）／stale（這輪失敗、沿用過期快取）／unavailable（失敗且沒有快取）。
+// 以前 catch 全吞、回舊值不帶狀態，呼叫端分不出「來源掛了」和「官方沒這檔」，
+// 畫面把幾小時前的快取當成新鮮資料顯示，沒有任何揭露。
+const fundamentalsSourceStatus = new Map(); // key → { status, at, error }
+
 async function fetchFundamentalsSource(key, ttlMs, fetcher) {
   const cached = fundamentalsSourceCache.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const at = new Date().toISOString();
   try {
     const value = await fetcher();
     if (value.size) {
       fundamentalsSourceCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+      fundamentalsSourceStatus.set(key, { status: "fresh", at, error: "" });
       return value;
     }
+    fundamentalsSourceStatus.set(key, { status: cached ? "stale" : "unavailable", at, error: "來源回了空資料" });
     return cached?.value || value;
-  } catch {
+  } catch (error) {
+    fundamentalsSourceStatus.set(key, { status: cached ? "stale" : "unavailable", at, error: String(error?.message || error) });
     return cached?.value || new Map();
   }
+}
+
+function fundamentalsSourceState(key) {
+  return fundamentalsSourceStatus.get(key) || { status: "unknown", at: "", error: "" };
+}
+
+function resetFundamentalsSourceCacheForTest({ expireOnly = false } = {}) {
+  if (expireOnly) {
+    for (const entry of fundamentalsSourceCache.values()) entry.expiresAt = 0;
+    return;
+  }
+  fundamentalsSourceCache.clear();
+  fundamentalsSourceStatus.clear();
 }
 
 // 月營收（TWSE t187ap05_L＋TPEx mopsfin_t187ap05_O，兩邊都是中文欄名且同名）。
@@ -5589,6 +5611,15 @@ async function buildFundamentals(codeRaw) {
   const eps = liveEps || storedEps;
   const valuation = liveValuation || storedValuation;
   const dividends = liveDividends || storedDividends;
+  // 這一輪來源失敗但快取還在（stale）：資料看起來「有」，其實是幾小時前抓到的。要說出來。
+  const sourceStatus = {
+    revenue: fundamentalsSourceState("revenue").status,
+    eps: fundamentalsSourceState("eps").status,
+    valuation: fundamentalsSourceState("valuation").status,
+  };
+  if (liveRevenue && sourceStatus.revenue === "stale") warnings.unshift("月營收來源這輪更新失敗，顯示的是最近一次成功抓到的資料（可能不是最新一期）。");
+  if (liveEps && sourceStatus.eps === "stale") warnings.unshift("EPS 來源這輪更新失敗，顯示的是最近一次成功抓到的資料（可能不是最新一季）。");
+  if (liveValuation && sourceStatus.valuation === "stale") warnings.unshift("本益比／殖利率來源這輪更新失敗，顯示的是最近一次成功抓到的資料。");
   if (!liveRevenue && storedRevenue) warnings.unshift(`月營收來源暫時抓不到，已沿用本機最後保存的 ${storedRevenue.yearMonth || storedRevenue.period} 資料。`);
   if (!liveEps && storedEps) warnings.unshift(`EPS 來源暫時抓不到，已沿用本機最後保存的 ${storedEps.period} 資料。`);
   if (!liveValuation && storedValuation) warnings.unshift(`本益比／殖利率來源暫時抓不到，已沿用本機最後保存的 ${compactToSlashDate(storedValuation.asOf || storedValuation.period)} 資料。`);
@@ -5616,6 +5647,7 @@ async function buildFundamentals(codeRaw) {
     ok: true,
     generatedAt: new Date().toISOString(),
     code,
+    sourceStatus,
     shortName: meta.shortName || "",
     industry: meta.industry || "",
     revenue: revenue ? { latest: revenue, history: fundamentalsHistoryList("revenue", code), stale: !liveRevenue } : null,
@@ -13973,6 +14005,7 @@ export {
   corporateActionResultMonthUsable, corporateActionResultPayloadRows, corporateActionResultMonthCovered, CORPORATE_ACTION_RESULT_MAX_MONTHS,
   corporateActionResultFor, corporateActionResultRatio, CORPORATE_ACTION_RESULT_URL,
   peekDividendSchedule, getCompanyDirectory, getIssuedShares, getCompanyMeta, buildFundamentals,
+  fundamentalsSourceState, resetFundamentalsSourceCacheForTest,
   // 版本與更新檢查（app-version.test）
   readAppBuildInfo, readGitHubRepo, readPackedRef, normalizeUpdateComparison,
   // 靜態資產快取（api-data.test 的 ETag／gzip 契約）
