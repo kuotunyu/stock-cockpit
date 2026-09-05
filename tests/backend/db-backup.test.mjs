@@ -46,3 +46,21 @@ test("同一天第二次 saveDb：不重複備份（lastDbBackupDay 節流）", 
   await mod.saveDb(db);
   assert.equal((await readdir(backupDir)).length, before, "同日不再新增備份");
 });
+
+test("每日備份順手複製月營收／處置快照 sidecar，各自輪替 14 份；壞掉的 sidecar 不複製", async () => {
+  await writeFile(join(dataDir, "fundamentals-cache.json"), JSON.stringify({ revenue: {} }), "utf8");
+  await writeFile(join(dataDir, "surveillance-history.json"), "{ not json", "utf8");
+  for (let i = 1; i <= 15; i += 1) {
+    await writeFile(join(backupDir, `stock1-fundamentals-202502${String(i).padStart(2, "0")}.json`), "{}", "utf8");
+  }
+  mod.resetDailyBackupThrottleForTest();
+  const db = await mod.loadDb();
+  await mod.saveDb(db);
+  const names = await readdir(backupDir);
+  const fundamentals = names.filter((n) => n.startsWith("stock1-fundamentals-")).sort();
+  assert.ok(fundamentals.includes(`stock1-fundamentals-${compactToday()}.json`), fundamentals.join(","));
+  assert.equal(fundamentals.length, 14, "sidecar 備份自己輪替 14 份");
+  assert.ok(!fundamentals.includes("stock1-fundamentals-20250201.json"));
+  assert.ok(!names.some((n) => n.startsWith("stock1-surveillance-")), "解析不了的 sidecar 不該被複製");
+  assert.equal(names.filter((n) => /^stock1-db-\d{8}\.json$/.test(n)).length, 14, "主檔備份輪替不受影響");
+});

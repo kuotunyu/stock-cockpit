@@ -2081,6 +2081,15 @@ function writeFileAtomic(path, data) {
 
 const dbBackupDir = join(dataDir, "backups");
 const DB_BACKUP_KEEP = 14;
+// 每日備份順手帶上不可重建的 sidecar（與 scripts/backup.mjs 的 SOURCES 一致；risk-cache 重抓就有，不帶）。
+// 檔名前綴刻意不落在 validateBackupWriterEntries 的 writer 命名（stock1-db-／stock1-pre-restore-）裡。
+const SIDECAR_BACKUPS = Object.freeze([
+  { file: "fundamentals-cache.json", prefix: "stock1-fundamentals" },
+  { file: "surveillance-history.json", prefix: "stock1-surveillance" },
+]);
+function resetDailyBackupThrottleForTest() {
+  lastDbBackupDay = "";
+}
 
 // 每天第一次寫入前，把「昨天最後的好版本」複製進 backups/，保留最近 14 份。
 // 備份失敗只警告不擋寫入（備份是保險，不是主流程）。
@@ -2102,6 +2111,23 @@ async function backupDbDaily() {
     const files = (await readdir(dbBackupDir)).filter((name) => /^stock1-db-\d{8}\.json$/.test(name)).sort();
     while (files.length > DB_BACKUP_KEEP) {
       await unlink(join(dbBackupDir, files.shift())).catch(() => {});
+    }
+    for (const { file, prefix } of SIDECAR_BACKUPS) {
+      const source = join(dataDir, file);
+      if (!existsSync(source)) continue;
+      try {
+        // 複製前先確認解析得了：壞掉的 sidecar 複製過去只會把好備份輪替掉。
+        JSON.parse(await readFile(source, "utf8"));
+        await copyFile(source, join(dbBackupDir, `${prefix}-${today}.json`), fsConstants.COPYFILE_EXCL);
+      } catch (error) {
+        if (error?.code !== "EEXIST") console.warn(`[Stock1] ${file} 每日備份略過：`, error.message);
+      }
+      const olds = (await readdir(dbBackupDir))
+        .filter((name) => name.startsWith(`${prefix}-`) && /-\d{8}\.json$/.test(name))
+        .sort();
+      while (olds.length > DB_BACKUP_KEEP) {
+        await unlink(join(dbBackupDir, olds.shift())).catch(() => {});
+      }
     }
   } catch (error) {
     console.warn("[Stock1] 每日備份失敗（主資料不受影響）：", error.message);
@@ -2207,8 +2233,12 @@ async function recoverDbFromBackup(parseError) {
 async function listDbBackupNames() {
   try {
     return (await readdir(dbBackupDir)).filter((name) => /^stock1-db-\d{8}\.json$/.test(name)).sort();
-  } catch {
-    return [];
+  } catch (error) {
+    // 這個函式同時是「主檔不見了」的判準：只有目錄真的不存在才算沒有備份。
+    // 權限／磁碟錯誤／backups 不是目錄若被吞成 []，會被當成第一次啟動而種下空 DB——
+    // 正是 2026-07-27 那次修法要擋的情境。
+    if (error?.code === "ENOENT") return [];
+    throw error;
   }
 }
 
@@ -2826,16 +2856,17 @@ function isRestorePreviewStale(db, entry) {
     || current.stockNotesRev !== entry.expectedStockNotesRev;
 }
 
-async function commitPersonalRestore(db, auth, input) {
+async function commitPersonalRestore(db, auth, input, clientAddress = "") {
   if (input?.confirmation !== "RESTORE") {
     throw portableError("RESTORE_CONFIRMATION_REQUIRED", "請輸入 RESTORE 確認還原", 400);
   }
   const usernameLower = auth.user.username.toLowerCase();
-  if (isLoginBlocked(usernameLower)) {
+  if (isLoginBlocked(usernameLower) || isAddressBlocked(clientAddress)) {
     throw portableError("REAUTH_RATE_LIMITED", "密碼嘗試次數過多，請稍後再試", 429);
   }
   if (!verifyPassword(String(input?.currentPassword || ""), auth.user.passwordHash)) {
     recordLoginFailure(usernameLower);
+    recordAddressFailure(clientAddress);
     throw portableError("REAUTH_FAILED", "目前密碼不正確", 403);
   }
   loginFailures.delete(usernameLower);
@@ -2985,44 +3016,69 @@ function isValidUsername(value) {
 
 // 登入防爆破：同帳號 15 分鐘內失敗 10 次先擋下（429）。
 // 記憶體版、重啟歸零；容量有上限並以 Map 插入順序維護 LRU，避免陌生帳號洪水吃光記憶體。
+// 兩層限流：同帳號 15 分鐘 10 次（防對單一帳號猜密碼），同來源 15 分鐘 50 次（防同一台機器
+// 換帳號輪流猜、或 LAN 上的裝置用 10 次錯誤把 admin 鎖住的阻斷）。兩個 store 同一套實作。
 const loginFailures = new Map(); // usernameLower → { count, firstAt }
+const addressFailures = new Map(); // clientAddress → { count, firstAt }
 const LOGIN_FAIL_LIMIT = 10;
+const ADDRESS_FAIL_LIMIT = 50;
 const LOGIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_FAILURE_MAX_ENTRIES = 2048;
 
-function pruneLoginFailures(now = Date.now()) {
-  for (const [usernameLower, entry] of loginFailures) {
-    if (now - entry.firstAt > LOGIN_FAIL_WINDOW_MS) loginFailures.delete(usernameLower);
+function pruneFailureStore(store, now = Date.now()) {
+  for (const [key, entry] of store) {
+    if (now - entry.firstAt > LOGIN_FAIL_WINDOW_MS) store.delete(key);
   }
-  while (loginFailures.size > LOGIN_FAILURE_MAX_ENTRIES) {
-    const oldestKey = loginFailures.keys().next().value;
+  while (store.size > LOGIN_FAILURE_MAX_ENTRIES) {
+    const oldestKey = store.keys().next().value;
     if (oldestKey === undefined) break;
-    loginFailures.delete(oldestKey);
+    store.delete(oldestKey);
   }
+}
+
+function isBlockedIn(store, key, limit, now = Date.now()) {
+  pruneFailureStore(store, now);
+  const entry = store.get(key);
+  if (!entry) return false;
+  // 讀取也算近期使用，避免容量滿時先淘汰正在被防護的鍵。
+  store.delete(key);
+  store.set(key, entry);
+  return entry.count >= limit;
+}
+
+function recordFailureIn(store, key, now = Date.now()) {
+  pruneFailureStore(store, now);
+  const entry = store.get(key);
+  store.delete(key);
+  store.set(key, entry
+    ? { count: entry.count + 1, firstAt: entry.firstAt }
+    : { count: 1, firstAt: now });
+  pruneFailureStore(store, now);
+}
+
+function pruneLoginFailures(now = Date.now()) {
+  pruneFailureStore(loginFailures, now);
 }
 
 function isLoginBlocked(usernameLower, now = Date.now()) {
-  pruneLoginFailures(now);
-  const entry = loginFailures.get(usernameLower);
-  if (!entry) return false;
-  // 讀取也算近期使用，避免容量滿時先淘汰正在被防護的帳號。
-  loginFailures.delete(usernameLower);
-  loginFailures.set(usernameLower, entry);
-  return entry.count >= LOGIN_FAIL_LIMIT;
+  return isBlockedIn(loginFailures, usernameLower, LOGIN_FAIL_LIMIT, now);
 }
 
 function recordLoginFailure(usernameLower, now = Date.now()) {
-  pruneLoginFailures(now);
-  const entry = loginFailures.get(usernameLower);
-  loginFailures.delete(usernameLower);
-  loginFailures.set(usernameLower, entry
-    ? { count: entry.count + 1, firstAt: entry.firstAt }
-    : { count: 1, firstAt: now });
-  pruneLoginFailures(now);
+  recordFailureIn(loginFailures, usernameLower, now);
+}
+
+function isAddressBlocked(address, now = Date.now()) {
+  return Boolean(address) && isBlockedIn(addressFailures, address, ADDRESS_FAIL_LIMIT, now);
+}
+
+function recordAddressFailure(address, now = Date.now()) {
+  if (address) recordFailureIn(addressFailures, address, now);
 }
 
 function resetLoginFailuresForTest() {
   loginFailures.clear();
+  addressFailures.clear();
 }
 
 function getLoginFailureSnapshotForTest() {
@@ -4640,6 +4696,41 @@ function canonicalizeTradeMoneyProvenance(input, existingPayload) {
 // 一律走官方 OpenAPI（欄名為 2026-07-02 實測真值，TWSE/TPEx 常不一致、還有官方拼錯的欄位）。
 // 月營收與 EPS 端點「只回最新一期」→ 每抓到新的資料年月/年季就寫進
 // .data/fundamentals-cache.json 累積歷史（技術頁長條圖用；冷啟動時歷史會從部署日開始長出來）。
+// ---- sidecar JSON 的統一載入：只有「檔案不存在」才是空白的第一次啟動 ----
+// 舊寫法 catch 全吞成 {}，於是防毒隔離／OneDrive 鎖檔／磁碟錯誤一次，
+// 月營收／EPS 的歷史累積（官方只回最新一期，過去是 App 一天一天存下來的）就被下一次 save
+// 用空物件蓋掉，而且沒有任何訊息。現在：ENOENT → 空物件可寫；壞 JSON → 另存 .corrupt-* 副本、
+// 標唯讀；其他 I/O 錯誤 → 唯讀。唯讀期間記憶體照常運作（看盤不受影響），只是不落盤，
+// /api/health 的 sidecars 會說出來。
+const sidecarState = {
+  fundamentals: { readOnly: false, reason: "" },
+  surveillance: { readOnly: false, reason: "" },
+  risk: { readOnly: false, reason: "" },
+};
+
+async function loadSidecarJson(path, label) {
+  let raw;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return { value: {}, readOnly: false, reason: "" };
+    console.warn(`[Stock1] ${label} 讀取失敗（${error?.code || error?.message}），本輪改為唯讀，不會覆寫原檔。`);
+    return { value: {}, readOnly: true, reason: coarsePersistenceErrorCode(error) };
+  }
+  try {
+    return { value: JSON.parse(raw) || {}, readOnly: false, reason: "" };
+  } catch {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    await copyFile(path, `${path}.corrupt-${stamp}`).catch(() => {});
+    console.warn(`[Stock1] ${label} 內容不是有效 JSON，已另存 .corrupt-${stamp} 副本；本輪唯讀，不會覆寫原檔。`);
+    return { value: {}, readOnly: true, reason: "corrupt" };
+  }
+}
+
+function sidecarReadOnlyWarning(label) {
+  console.warn(`[Stock1] ${label} 目前唯讀（讀取失敗保護），本輪沒存。重啟後若檔案已修復會恢復寫入。`);
+}
+
 const fundamentalsSourceCache = new Map(); // sourceKey → { expiresAt, value: Map }
 const fundamentalsHistoryPath = join(dataDir, "fundamentals-cache.json");
 let fundamentalsHistory = null;
@@ -4649,11 +4740,9 @@ let fundamentalsHistoryPromise = null;
 // 若各自惰性初始化，後完成的會把先完成那邊剛寫入的快照整個蓋掉。
 function loadFundamentalsHistory() {
   fundamentalsHistoryPromise ||= (async () => {
-    try {
-      fundamentalsHistory = JSON.parse(await readFile(fundamentalsHistoryPath, "utf8")) || {};
-    } catch {
-      fundamentalsHistory = {};
-    }
+    const loaded = await loadSidecarJson(fundamentalsHistoryPath, "fundamentals-cache.json");
+    sidecarState.fundamentals = { readOnly: loaded.readOnly, reason: loaded.reason };
+    fundamentalsHistory = loaded.value;
     fundamentalsHistory.revenue ||= {};
     fundamentalsHistory.eps ||= {};
     fundamentalsHistory.valuation ||= {};
@@ -4667,6 +4756,10 @@ function loadFundamentalsHistory() {
   return fundamentalsHistoryPromise;
 }
 async function saveFundamentalsHistory() {
+  if (sidecarState.fundamentals.readOnly) {
+    sidecarReadOnlyWarning("fundamentals-cache.json");
+    return false;
+  }
   try {
     await mkdir(dataDir, { recursive: true });
     await writeFileAtomic(fundamentalsHistoryPath, JSON.stringify(fundamentalsHistory));
@@ -5980,17 +6073,18 @@ let riskMemoryLoaded = false;
 async function loadRiskSourceMemory() {
   if (riskMemoryLoaded) return;
   riskMemoryLoaded = true;
-  try {
-    const raw = JSON.parse(await readFile(riskMemoryPath, "utf8"));
-    for (const [name, entry] of Object.entries(raw || {})) {
-      if (entry && Array.isArray(entry.codes)) riskSourceMemory.set(name, entry);
-    }
-  } catch {
-    // 第一次啟動還沒有快取檔，正常。
+  const loaded = await loadSidecarJson(riskMemoryPath, "risk-cache.json");
+  sidecarState.risk = { readOnly: loaded.readOnly, reason: loaded.reason };
+  for (const [name, entry] of Object.entries(loaded.value || {})) {
+    if (entry && Array.isArray(entry.codes)) riskSourceMemory.set(name, entry);
   }
 }
 
 function saveRiskSourceMemory() {
+  if (sidecarState.risk.readOnly) {
+    sidecarReadOnlyWarning("risk-cache.json");
+    return Promise.resolve();
+  }
   const task = mkdir(dataDir, { recursive: true })
     .then(() => writeFileAtomic(riskMemoryPath, JSON.stringify(Object.fromEntries(riskSourceMemory), null, 1)))
     .catch((error) => console.warn("[Stock1] risk-cache.json 寫入失敗（沿用記憶體快取，重啟後會重抓）：", error.message));
@@ -6003,14 +6097,16 @@ const surveillanceHistoryPath = join(dataDir, "surveillance-history.json");
 let surveillanceHistory = null;
 async function loadSurveillanceHistory() {
   if (surveillanceHistory) return surveillanceHistory;
-  try {
-    surveillanceHistory = JSON.parse(await readFile(surveillanceHistoryPath, "utf8")) || {};
-  } catch {
-    surveillanceHistory = {};
-  }
+  const loaded = await loadSidecarJson(surveillanceHistoryPath, "surveillance-history.json");
+  sidecarState.surveillance = { readOnly: loaded.readOnly, reason: loaded.reason };
+  surveillanceHistory = loaded.value;
   return surveillanceHistory;
 }
 async function saveSurveillanceHistory() {
+  if (sidecarState.surveillance.readOnly) {
+    sidecarReadOnlyWarning("surveillance-history.json");
+    return false;
+  }
   try {
     await mkdir(dataDir, { recursive: true });
     await writeFileAtomic(surveillanceHistoryPath, JSON.stringify(surveillanceHistory));
@@ -11515,6 +11611,8 @@ async function handleApi(request, requestUrl, response) {
           ? { lastFailureAt: lastPersistenceFailure.at, lastFailureCode: lastPersistenceFailure.code }
           : {}),
       },
+      // sidecar 讀檔失敗保護：readOnly 代表這一輪不落盤（記憶體照常），reason 只放 coarse code。
+      sidecars: cloneJson(sidecarState),
     });
     return true;
   }
@@ -11551,6 +11649,11 @@ async function handleApi(request, requestUrl, response) {
         return true;
       }
       const usernameLower = username.toLowerCase();
+      const clientAddress = clientAddressOf(request);
+      if (isAddressBlocked(clientAddress)) {
+        jsonResponse(response, 429, { ok: false, error: "這個來源短時間內登入失敗太多次，已暫時鎖定，請 15 分鐘後再試。" });
+        return true;
+      }
       if (isLoginBlocked(usernameLower)) {
         jsonResponse(response, 429, { ok: false, error: "嘗試次數過多，這個帳號已暫時鎖定，請 15 分鐘後再試。" });
         return true;
@@ -11560,6 +11663,7 @@ async function handleApi(request, requestUrl, response) {
       const passwordMatches = verifyPassword(password, user?.passwordHash || LOGIN_DUMMY_PASSWORD_HASH);
       if (!user || !passwordMatches) {
         recordLoginFailure(usernameLower);
+        recordAddressFailure(clientAddress);
         jsonResponse(response, 401, { ok: false, error: "帳號或密碼錯誤" });
         return true;
       }
@@ -11635,7 +11739,17 @@ async function handleApi(request, requestUrl, response) {
       const input = await readJsonBody(request);
       const currentPassword = String(input.currentPassword || "");
       const newPassword = String(input.newPassword || "");
+      // 「猜目前密碼」和登入是同一件事：拿到 cookie 的人不能在這裡無限次線上猜。
+      // 與登入、個人資料復原共用同一組 15 分鐘計次。
+      const usernameLower = authed.user.username.toLowerCase();
+      const clientAddress = clientAddressOf(request);
+      if (isLoginBlocked(usernameLower) || isAddressBlocked(clientAddress)) {
+        jsonResponse(response, 429, { ok: false, error: "密碼嘗試次數過多，請 15 分鐘後再試。" });
+        return true;
+      }
       if (!verifyPassword(currentPassword, authed.user.passwordHash)) {
+        recordLoginFailure(usernameLower);
+        recordAddressFailure(clientAddress);
         jsonResponse(response, 400, { ok: false, error: "目前密碼不正確" });
         return true;
       }
@@ -11646,6 +11760,8 @@ async function handleApi(request, requestUrl, response) {
       await commitDbMutation((db) => {
         const { user, session } = requireCurrentMutationAuth(db, authed);
         if (!verifyPassword(currentPassword, user.passwordHash)) {
+          recordLoginFailure(usernameLower);
+          recordAddressFailure(clientAddress);
           throw new Error("目前密碼不正確");
         }
         user.passwordHash = hashPassword(newPassword);
@@ -11654,6 +11770,7 @@ async function handleApi(request, requestUrl, response) {
         // 換密碼後把這個人其他裝置的 session 全登出，只留目前操作中的這個。
         db.sessions = db.sessions.filter((s) => s.userId !== user.id || s.id === session.id);
       });
+      loginFailures.delete(usernameLower);
       jsonResponse(response, 200, { ok: true });
     } catch (error) {
       mutationErrorResponse(response, error, 400);
@@ -11714,7 +11831,7 @@ async function handleApi(request, requestUrl, response) {
     try {
       const input = await readJsonBody(request);
       const db = await loadDb();
-      jsonResponse(response, 200, await commitPersonalRestore(db, auth, input));
+      jsonResponse(response, 200, await commitPersonalRestore(db, auth, input, clientAddressOf(request)));
     } catch (error) {
       if (error instanceof SyntaxError) {
         portableErrorResponse(response, portableError("BACKUP_FORMAT_INVALID", "請求內容不是有效的 JSON", 400));
@@ -13394,10 +13511,14 @@ export {
   parseCookies, hashPassword, verifyPassword, hashToken, encryptJson, decryptJson,
   isValidUsername, LOGIN_FAIL_WINDOW_MS, LOGIN_FAILURE_MAX_ENTRIES, MAX_SESSIONS_PER_USER,
   pruneLoginFailures, isLoginBlocked, recordLoginFailure,
+  isAddressBlocked, recordAddressFailure, ADDRESS_FAIL_LIMIT,
   resetLoginFailuresForTest, getLoginFailureSnapshotForTest,
   normalizeAlertsPayload, fetchJson,
   // 資料庫（測試掛鉤）
   loadDb, saveDb, writeFileAtomic, flushPersistence, commitDbMutation, skipDbMutation, getDbMutationEpochForTest,
+  // sidecar 讀檔保護與每日備份（sidecar-corruption.test／db-backup.test）
+  loadSidecarJson, saveFundamentalsHistory, loadSurveillanceHistory, loadRiskSourceMemory,
+  resetDailyBackupThrottleForTest, SIDECAR_BACKUPS,
   // 持股損益
   TRADE_SCHEMA_VERSION, MAX_TRADE_RECORDS, isValidCompactCalendarDate, validateTradesMutationInput,
   computeTradeFee, computeTradeTax, computeTradeTaxRule,

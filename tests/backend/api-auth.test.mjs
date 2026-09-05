@@ -177,3 +177,61 @@ test("logout：登出後舊 cookie 失效（放最後，會銷毀共用 session�
   const me = await srv.api("/api/auth/me");
   assert.equal(me.status, 401, "登出後舊 session 應失效");
 });
+
+test("改密碼：猜錯目前密碼 10 次後第 11 次 429（連正確密碼都不受理）", async () => {
+  srv.mod.resetLoginFailuresForTest();
+  // 上一個測試已登出共用 session，這裡重新登入拿新 cookie。
+  const login = await srv.raw("/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "test-admin-pw" }),
+  });
+  assert.equal(login.status, 200);
+  const cookie = (login.headers.get("set-cookie") || "").split(";")[0];
+  await login.text();
+  const api = (path, init = {}) => srv.raw(path, { ...init, headers: { cookie, "content-type": "application/json", ...(init.headers || {}) } });
+  for (let i = 0; i < 10; i += 1) {
+    const res = await api("/api/auth/password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword: `wrong-${i}`, newPassword: "whatever-123" }),
+    });
+    assert.equal(res.status, 400, `第 ${i + 1} 次應 400`);
+    await res.text();
+  }
+  const blocked = await api("/api/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword: "test-admin-pw", newPassword: "whatever-123" }),
+  });
+  assert.equal(blocked.status, 429, "鎖定期間連正確密碼都不受理");
+  await blocked.text();
+  srv.mod.resetLoginFailuresForTest();
+  // 鎖定解除後密碼必須還是原本的（上面那次正確嘗試不得生效）
+  const stillWorks = await srv.raw("/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "test-admin-pw" }),
+  });
+  assert.equal(stillWorks.status, 200);
+  await stillWorks.text();
+});
+
+test("登入：同一來源對 50 個不同帳號各錯一次後第 51 次 429，訊息講的是來源", async () => {
+  srv.mod.resetLoginFailuresForTest();
+  for (let i = 0; i < 50; i += 1) {
+    const res = await srv.raw("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: `ghost${String(i).padStart(2, "0")}`, password: "x" }),
+    });
+    assert.equal(res.status, 401, `第 ${i + 1} 次應 401`);
+    await res.text();
+  }
+  const blocked = await srv.raw("/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "test-admin-pw" }),
+  });
+  assert.equal(blocked.status, 429);
+  assert.ok((await blocked.json()).error.includes("來源"), "訊息要講是來源被鎖，不是帳號");
+  srv.mod.resetLoginFailuresForTest();
+});
