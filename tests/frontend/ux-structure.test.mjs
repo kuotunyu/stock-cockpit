@@ -148,3 +148,46 @@ test("手機 sheet 的關閉鈕：aria-label 是收合、備有向下箭頭；�
   assert.doesNotMatch(result.loginNote, /部署到雲端/);
   assert.match(result.loginNote, /管理者/);
 });
+
+// ---- 第二輪第一批：頂欄 grid 必須放得下全部子元素（「?」鈕曾把 4 欄 grid 撐到隱含第二列） ----
+import { readFile } from "node:fs/promises";
+const css = await readFile(new URL("../../styles.css", import.meta.url), "utf8");
+
+function gridColumnsOf(block) {
+  const match = block.match(/grid-template-columns:\s*([^;]+);/);
+  assert.ok(match, "區塊裡沒有 grid-template-columns");
+  // minmax(0, 1fr) 內含空白，先把括號內容壓成一個字再切
+  return match[1].replace(/\([^)]*\)/g, "()").trim().split(/\s+/).length;
+}
+function topbarBlockAt(mediaPrefix) {
+  // 同一個 media 條件在檔案裡出現多次；取該條件之後第一個「有 grid-template-areas」的 .topbar 區塊。
+  const start = css.indexOf(mediaPrefix);
+  assert.ok(start >= 0, `找不到 ${mediaPrefix}`);
+  const blocks = [...css.slice(start).matchAll(/\.topbar\s*\{[^}]*\}/g)].map((m) => m[0]);
+  const block = blocks.find((text) => text.includes("grid-template-areas"));
+  assert.ok(block, `${mediaPrefix} 之後沒有帶 grid-template-areas 的 .topbar 區塊`);
+  return block;
+}
+
+test("頂欄 grid：桌機欄數＝直接子元素數；760px 與 340px 的 areas 都給「?」一個位置", () => {
+  const children = json(`document.querySelector(".topbar").children.length`);
+  assert.equal(children, 5, "market-pill、h1、screenHelp、source-switch、top-actions");
+  const desktop = css.match(/\n\.topbar\s*\{[^}]*\}/)[0];
+  assert.equal(gridColumnsOf(desktop), children, "桌機 grid 欄數要等於子元素數，否則最後一個會掉到隱含第二列");
+  for (const prefix of ["@media (max-width: 760px)", "@media (max-width: 340px)"]) {
+    const block = topbarBlockAt(prefix);
+    const areas = block.match(/grid-template-areas:\s*([^;]+);/);
+    assert.ok(areas, `${prefix} 的 .topbar 要有 grid-template-areas`);
+    assert.match(areas[1], /\bhelp\b/, `${prefix} 的 areas 要含 help`);
+    const rows = areas[1].match(/"[^"]+"/g).map((row) => row.replace(/"/g, "").trim().split(/\s+/).length);
+    const columns = gridColumnsOf(block);
+    assert.ok(rows.every((count) => count === columns), `${prefix}：每一列的 area 數（${rows.join(",")}）要等於欄數 ${columns}`);
+  }
+  assert.match(css, /\.screen-help\s*\{[^}]*grid-area:\s*help/, ".screen-help 要指到 help 區");
+});
+
+test("隔日沖摘要 chip 樣式只套在 facts 的直接子元素（.market-stance 與來源徽章不再被包成 chip 套 chip）", () => {
+  assert.doesNotMatch(css, /\.overnight-summary-facts span\s*\{/, "後代選擇器會把 .market-stance 裡的漲跌數字與 ⚠ 包成小藥丸");
+  assert.match(css, /\.overnight-summary-facts\s*>\s*span\s*\{/);
+  assert.match(css, /\.overnight-summary\s+\.market-stance\s*\{[^}]*flex-basis:\s*100%/, "位階行在摘要條裡要獨佔一行");
+});

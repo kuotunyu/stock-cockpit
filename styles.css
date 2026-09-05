@@ -140,7 +140,8 @@ button {
   top: 0;
   z-index: 12;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* 五個直接子元素：市場 pill、標題、「?」、來源切換、工具鈕。欄數少一個，最後一個就掉到隱含第二列。 */
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 12px;
   min-height: 74px;
@@ -664,8 +665,8 @@ button {
   line-height: 1.2;
 }
 
-.overnight-summary-primary span,
-.overnight-summary-facts span {
+.overnight-summary-primary > span,
+.overnight-summary-facts > span {
   min-width: 0;
   color: #c5d5e4;
   font-weight: 750;
@@ -679,11 +680,17 @@ button {
   font-weight: 900;
 }
 
-.overnight-summary-facts span {
+/* 只套直接子元素：後代選擇器會把來源徽章包成 chip 套 chip、把位階行裡的漲跌數字與 ⚠ 包成小藥丸 */
+.overnight-summary-facts > span {
   padding: 2px 7px;
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 6px;
   background: #111315;
+}
+
+.overnight-summary .market-stance {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 .overnight-summary-warnings {
@@ -7330,10 +7337,10 @@ body.is-locked .app-shell {
 
 @media (max-width: 760px) {
   .topbar {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto 1fr auto auto;
     grid-template-areas:
-      "market title actions"
-      "source source source";
+      "market title help actions"
+      "source source source source";
     gap: 7px;
     padding-left: 10px;
     padding-right: 10px;
@@ -7341,6 +7348,10 @@ body.is-locked .app-shell {
 
   .market-pill {
     grid-area: market;
+  }
+
+  .screen-help {
+    grid-area: help;
   }
 
   .topbar h1 {
@@ -8776,11 +8787,11 @@ body.is-locked .app-shell {
 /* 極窄手機不縮小主字級，改收斂固定欄寬與邊距，守住卡片不橫溢。 */
 @media (max-width: 340px) {
   .topbar {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas:
-      "market title"
-      "source source"
-      "actions actions";
+      "market title help"
+      "source source source"
+      "actions actions actions";
   }
   .top-actions {
     display: grid;
