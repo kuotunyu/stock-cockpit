@@ -7454,12 +7454,15 @@ function renderTechnicalSurveillance() {
 
 // K 棒實體：漲＝空心（只描邊）、跌＝實心。台灣看盤軟體的常見約定，也是紅綠色弱下除顏色以外的
 // 第二編碼——--red 與 --green 在色弱視覺下明度相近，細細的 K 棒單靠色相分不出方向。
-// 呼叫前 strokeStyle／fillStyle 已設成該方向的顏色；空心用面板底色把實體填掉再描邊。
-const CANDLE_HOLLOW_FILL = "#17191b";
-function drawCandleBody(context, up, x, y, width, height) {
-  if (up) {
+// 呼叫前 strokeStyle／fillStyle 已設成該方向的顏色；空心用**該圖自己的底色**把實體填掉再描邊
+//（技術圖底是 #0d1218、明細圖是 #151617，寫死一個色會在另一張圖上留一塊比背景亮的灰塊）。
+// 實體 <4px 時空心根本看不出來（描邊就蓋滿了），改畫漲色實心。
+const DETAIL_CHART_BG = "#151617";
+const TECHNICAL_CHART_BG = "#0d1218";
+function drawCandleBody(context, up, x, y, width, height, background) {
+  if (up && height >= 4) {
     const prevFill = context.fillStyle;
-    context.fillStyle = CANDLE_HOLLOW_FILL;
+    context.fillStyle = background || DETAIL_CHART_BG;
     context.fillRect(x, y, width, height);
     context.fillStyle = prevFill;
     context.strokeRect(x + 0.5, y + 0.5, Math.max(1, width - 1), Math.max(1, height - 1));
@@ -7547,7 +7550,7 @@ function drawDetailHistoryChart(context, stock, candles, width, height) {
     context.stroke();
     const yOpen = priceToY(candle.open);
     const yClose = priceToY(candle.close);
-    drawCandleBody(context, up, x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)));
+    drawCandleBody(context, up, x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)), DETAIL_CHART_BG);
   });
 
   const closes = candles.map((row) => row.close);
@@ -7649,7 +7652,7 @@ function drawChart(stock) {
   const historyEntry = detailHistoryCache.get(stock.code);
   if (historyEntry?.candles?.length) {
     context.clearRect(0, 0, width, height);
-    context.fillStyle = "#151617";
+    context.fillStyle = DETAIL_CHART_BG;
     context.fillRect(0, 0, width, height);
     drawDetailHistoryChart(context, stock, historyEntry.candles, width, height);
     return;
@@ -7658,7 +7661,7 @@ function drawChart(stock) {
   // 不再用 sine 波偽造K棒影線與成交量柱——沒有的資料就不畫。
   const values = (stock.spark || []).map(Number).filter(Number.isFinite);
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#151617";
+  context.fillStyle = DETAIL_CHART_BG;
   context.fillRect(0, 0, width, height);
   if (!values.length) return;
 
@@ -8286,7 +8289,7 @@ function drawTechnicalChart(data, options = {}) {
   if (!metrics) return null;
   const { context, width, height } = metrics;
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#0d1218";
+  context.fillStyle = TECHNICAL_CHART_BG;
   context.fillRect(0, 0, width, height);
 
   if (!data?.candles?.length) {
@@ -8402,7 +8405,7 @@ function drawTechnicalChart(data, options = {}) {
     context.moveTo(x, yHigh);
     context.lineTo(x, yLow);
     context.stroke();
-    drawCandleBody(context, up, x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)));
+    drawCandleBody(context, up, x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)), TECHNICAL_CHART_BG);
   });
 
   if (clipPrice) context.restore();

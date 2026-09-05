@@ -429,3 +429,59 @@ test("TPEx 融資融券 balance：tables[0] 與逐檔欄位", async (t) => {
   assert.ok(rows.length > 100, `上櫃逐檔融資券應有數百檔，實際 ${rows.length}`);
   assert.match(String(rows[0][0]).trim(), /^[0-9A-Z]{4,6}$/, `第 0 欄應為代號，實際 ${rows[0][0]}`);
 });
+
+// ---- 第二輪第二批：兩條在主流程上的非 OpenAPI 端點（形狀是 data[][] 與 tables[].data[][]，不能套上面的檢查）----
+// rwd FMTQIK：getTaiexHistory（大盤位階 MA20／MA60）；TPEx tradingStock：逐檔月歷史（波段驗證、隔日驗證、
+// 上櫃除權息參考價補基準都在用）。上游改欄位順序時離線 fixture 永遠綠，只有這裡會喊。
+test("TWSE rwd FMTQIK（加權指數逐月）：stat OK、data 列 ≥5 欄、第 1 欄民國日期、第 5 欄收盤可解析", async (t) => {
+  const now = new Date();
+  const yyyymm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  let res;
+  try {
+    res = await fetch(`https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date=${yyyymm}01&response=json`, { headers: HEADERS, signal: AbortSignal.timeout(20000) });
+  } catch (error) {
+    t.skip(`網路失敗：${error.message}`);
+    return;
+  }
+  if (!res.ok) {
+    t.skip(`HTTP ${res.status}（可能被限流）`);
+    return;
+  }
+  const payload = await res.json();
+  if (payload?.stat !== "OK" || !Array.isArray(payload.data) || !payload.data.length) {
+    t.skip(`本月尚無資料或 stat=${payload?.stat}`);
+    return;
+  }
+  const row = payload.data[0];
+  assert.ok(Array.isArray(row) && row.length >= 5, `列長度 ${row?.length}；實際：${JSON.stringify(row)}`);
+  assert.match(String(row[0]), /^\d{2,3}\/\d{2}\/\d{2}$/, "第 1 欄是民國日期 yyy/mm/dd");
+  const close = Number(String(row[4]).replace(/,/g, ""));
+  assert.ok(Number.isFinite(close) && close > 1000, `第 5 欄應是加權收盤：${row[4]}`);
+});
+
+test("TPEx tradingStock（上櫃逐檔月歷史）：tables[0].data 列 ≥9 欄、第 1 欄民國日期、第 7 欄收盤可解析", async (t) => {
+  const now = new Date();
+  const slash = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}/01`;
+  let res;
+  try {
+    res = await fetch(`https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?code=5347&date=${slash}&id=&response=json`, { headers: HEADERS, signal: AbortSignal.timeout(20000) });
+  } catch (error) {
+    t.skip(`網路失敗：${error.message}`);
+    return;
+  }
+  if (!res.ok) {
+    t.skip(`HTTP ${res.status}（可能被限流）`);
+    return;
+  }
+  const payload = await res.json();
+  const table = Array.isArray(payload?.tables) ? payload.tables[0] : null;
+  if (!Array.isArray(table?.data) || !table.data.length) {
+    t.skip("本月尚無資料列");
+    return;
+  }
+  const row = table.data[0];
+  assert.ok(Array.isArray(row) && row.length >= 9, `列長度 ${row?.length}；實際：${JSON.stringify(row)}`);
+  assert.match(String(row[0]), /^\d{2,3}\/\d{2}\/\d{2}$/, "第 1 欄是民國日期");
+  const close = Number(String(row[6]).replace(/,/g, ""));
+  assert.ok(Number.isFinite(close) && close > 0, `第 7 欄應是收盤價：${row[6]}`);
+});

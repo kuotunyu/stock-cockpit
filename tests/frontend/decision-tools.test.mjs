@@ -99,6 +99,7 @@ test("市場位階一行：位階、漲跌家數、基差、事件；位階未�
 test("持股面板：前三大占比；≥60% 標警告色", () => {
   const html = String(app.evalIn(`(() => {
     const prevUser = authState.user;
+    const prev = { stocksLen: stocks.length, watchList: state.watchList, trades: { loaded: tradesState.loaded, records: tradesState.records, quarantined: tradesState.quarantinedRecords, portfolio: tradesState.portfolio } };
     authState.user = { id: "u1", username: "me", role: "user" };
     tradesState.loaded = true;
     tradesState.records = [];
@@ -118,6 +119,8 @@ test("持股面板：前三大占比；≥60% 標警告色", () => {
     renderHoldingsPanel();
     const out = el.holdingsPanel.innerHTML;
     authState.user = prevUser;
+    stocks.length = prev.stocksLen; state.watchList = prev.watchList;
+    tradesState.loaded = prev.trades.loaded; tradesState.records = prev.trades.records; tradesState.quarantinedRecords = prev.trades.quarantined; tradesState.portfolio = prev.trades.portfolio;
     return out;
   })()`));
   assert.match(html, /前三大占比/);
@@ -126,6 +129,7 @@ test("持股面板：前三大占比；≥60% 標警告色", () => {
 
 test("場景卡：次日開盤進場口徑與全版本合併一行", () => {
   const html = String(app.evalIn(`(() => {
+    const prevScreen = state.screen; const prevData = swingVerifyState.data;
     state.screen = "strategy";
     swingVerifyState.data = { ok: true, currentFormulaVersion: "v", formulaVersions: [{ formulaVersion: "v", samples: 5 }, { formulaVersion: "old", samples: 30 }], recent: [], pendingCount: 0,
       allVersions: { versions: 2, samples: 35, resolved: 25, wins: 12, winRate: 48 },

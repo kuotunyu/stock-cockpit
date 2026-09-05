@@ -79,8 +79,46 @@ test("紅綠色弱的第二編碼：K 棒 ▲／▼、蠟燭漲空心跌實心",
   assert.match(css, /\.kbar\.green \.kbar-dir::before \{ content: "▼"; \}/);
   const row = String(app.evalIn(`rowTemplate({ code: "2330", name: "台積電", price: 100, change: 1.5, high: 101, low: 99, groups: [], spark: [] }, "screener")`));
   assert.match(row, /class="kbar red"><i class="kbar-dir" aria-hidden="true"><\/i>/);
-  assert.match(appSource, /function drawCandleBody\(context, up, x, y, width, height\)/);
-  assert.match(appSource, /if \(up\) \{\s*const prevFill = context\.fillStyle;\s*context\.fillStyle = CANDLE_HOLLOW_FILL;/);
+  assert.match(appSource, /function drawCandleBody\(context, up, x, y, width, height, background\)/);
+  assert.match(appSource, /if \(up && height >= 4\) \{\s*const prevFill = context\.fillStyle;\s*context\.fillStyle = background \|\| DETAIL_CHART_BG;/, "空心用各圖自己的底色填（不再是寫死的 CANDLE_HOLLOW_FILL）");
   assert.equal((appSource.match(/drawCandleBody\(context, up, x - candleWidth/g) || []).length, 2, "明細圖與技術圖兩處都要走同一個實體繪製");
   assert.doesNotMatch(appSource.slice(appSource.indexOf("function drawTechnicalChart")), /drawTechnicalCanvasLegend\(context, \[\s*\{ label: "MA5"/, "技術頁圖內圖例已移除（chip 列已有數值）");
+});
+
+// ---- 第二輪第二批：舊 hex 收 token、K 棒箭頭位置與對比、空心蠟燭用各圖自己的底色 ----
+test("warn／error／ok 語意色不再手寫 hex：四個舊色相消失、official 徽章走 --ok-text", () => {
+  assert.match(css, /--ok-text:\s*#86ffad/);
+  for (const hex of ["#ffb5b5", "#ffcf7a", "#f5c45a", "#ff8d8d"]) {
+    assert.ok(!css.includes(hex), `${hex} 仍被手寫在 styles.css（要收成 --error-text／--warn-text／--orange-2）`);
+  }
+  assert.equal(css.split("#86ffad").length - 1, 1, "#86ffad 只能出現在 --ok-text 的定義那一行");
+  assert.match(rule('.provenance-badge[data-kind="official"]'), /var\(--ok-text\)/);
+  assert.match(rule(".surv-when.is-attn"), /var\(--warn-text\)/);
+});
+
+test("K 棒箭頭：▲ 在棒子上方、▼ 在下方，顏色用可讀的 --up-text／--down-text（--red 在偶數列只有 4.26:1）", () => {
+  assert.match(rule(".kbar.red .kbar-dir"), /top:\s*-14px/);
+  assert.match(rule(".kbar.red .kbar-dir"), /bottom:\s*auto/);
+  assert.match(rule(".kbar.red .kbar-dir"), /var\(--up-text\)/);
+  assert.match(rule(".kbar.green .kbar-dir"), /var\(--down-text\)/);
+});
+
+test("空心蠟燭：drawCandleBody 接各圖自己的底色（技術圖 #0d1218 與明細圖不同），實體 <4px 改畫實線不留灰塊", () => {
+  assert.match(appSource, /function drawCandleBody\(context, up, x, y, width, height, background\)/);
+  assert.match(appSource, /const TECHNICAL_CHART_BG = "#0d1218"/);
+  assert.match(appSource, /const DETAIL_CHART_BG = "#151617"/);
+  assert.match(appSource, /drawCandleBody\([^;]*TECHNICAL_CHART_BG\)/, "技術圖要傳自己的底色");
+  assert.match(appSource, /drawCandleBody\([^;]*DETAIL_CHART_BG\)/, "明細圖要傳自己的底色");
+  assert.doesNotMatch(appSource, /const CANDLE_HOLLOW_FILL/, "單一寫死的填色會在技術圖上留一塊比背景亮的灰塊");
+  const drawn = app.evalIn(`(() => {
+    const calls = [];
+    const ctx = { fillStyle: "#f00", strokeStyle: "#f00", fillRect: (...a) => calls.push(["fill", ctx.fillStyle, ...a]), strokeRect: (...a) => calls.push(["stroke", ...a]) };
+    drawCandleBody(ctx, true, 10, 20, 6, 3, "#0d1218");   // 太矮：空心看不出來 → 用漲色實心 2px
+    drawCandleBody(ctx, true, 10, 20, 6, 8, "#0d1218");   // 正常：先用底色填、再描邊
+    return JSON.stringify(calls);
+  })()`);
+  const calls = JSON.parse(drawn);
+  assert.deepEqual(calls[0], ["fill", "#f00", 10, 20, 6, 3], "矮實體用漲色實心，不描空心");
+  assert.deepEqual(calls[1], ["fill", "#0d1218", 10, 20, 6, 8], "空心用該圖的底色填");
+  assert.equal(calls[2][0], "stroke");
 });
