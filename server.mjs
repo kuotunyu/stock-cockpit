@@ -3373,6 +3373,54 @@ function applyCorporateActionQuoteBaseline(quote) {
   };
 }
 
+// 上櫃除權息日：整批收盤的 Change 是中文「除息」／「除權」→ parseNumber 回 null → previousClose null →
+// 兩個候選池的 Number.isFinite(previousClose) 把它濾掉（D-48 的新面向，2026-07-24 實測 6 檔上櫃事件那天
+// 整批缺席；除息日常有填息強勢行情）。applyCorporateActionQuoteBaseline 只救上市的 "0.0000" 哨兵，
+// 這裡用逐檔月歷史當日列的 exchangePreviousClose（上櫃逐檔的 close − change 就是官方參考價，實測 5/5）
+// 補基準。走 fetchStockHistoryMonth 而不是 getStockHistory：後者會回頭呼叫 getReferenceData，
+// 在 referenceInFlight 內會等到自己、死鎖。
+const TPEX_BASELINE_MAX_CODES = 40;
+async function restoreTpexCorporateActionBaselines(byCode, tpexDate, warnings) {
+  const date = toCompactDate(tpexDate);
+  if (!date) return { restored: 0, unresolved: [] };
+  const targets = [...byCode.values()].filter((quote) => (
+    quote.exchange === "TPEx"
+    && quote.change === null
+    && (quote.previousClose === null || quote.previousClose === undefined)
+    && Number.isFinite(quote.price) && quote.price > 0
+    && toCompactDate(quote.rawDate || quote.asOf) === date
+  ));
+  const unresolved = [];
+  let restored = 0;
+  await mapLimit(targets.slice(0, TPEX_BASELINE_MAX_CODES), 3, async (quote) => {
+    try {
+      const rows = await fetchStockHistoryMonth(quote.code, "TPEx", `${date.slice(0, 6)}01`, quote.name);
+      const exact = (rows || []).find((row) => toCompactDate(row.date) === date);
+      const reference = Number(exact?.exchangePreviousClose);
+      if (!Number.isFinite(reference) || reference <= 0) {
+        unresolved.push(quote.code);
+        return;
+      }
+      const change = quote.price - reference;
+      byCode.set(quote.code, {
+        ...quote,
+        previousClose: reference,
+        change,
+        changePct: (change / reference) * 100,
+        corporateActionBaseline: true,
+      });
+      restored += 1;
+    } catch {
+      unresolved.push(quote.code);
+    }
+  });
+  if (targets.length > TPEX_BASELINE_MAX_CODES) unresolved.push(...targets.slice(TPEX_BASELINE_MAX_CODES).map((quote) => quote.code));
+  if (unresolved.length) {
+    warnings.push(`上櫃除權息日有 ${unresolved.length} 檔查不到官方參考價，這輪不進候選池：${unresolved.slice(0, 5).join("、")}${unresolved.length > 5 ? "…" : ""}`);
+  }
+  return { restored, unresolved };
+}
+
 function normalizeDailyTwse(row) {
   const close = parsePositivePrice(row.ClosingPrice);
   const change = parseNumber(row.Change);
@@ -5752,6 +5800,9 @@ async function getReferenceData() {
 
     const twseDate = twse.value?.asOf || "";
     const tpexDate = tpex.value?.asOf || "";
+    // 上櫃除權息日的股票以前在這裡就結構性消失（見 restoreTpexCorporateActionBaselines）。
+    // 只改合併後的 byCode，不動各市場的 last-good 快照。
+    if (tpex.value) await restoreTpexCorporateActionBaselines(byCode, tpexDate, warnings);
     const datesKnown = Boolean(twseDate && tpexDate);
     const datesAligned = datesKnown && twseDate === tpexDate;
     if (twse.value && tpex.value && !datesKnown) {
@@ -8151,7 +8202,9 @@ function groupPicks(picks, maxPerGroup = 20) {
 // v2：訊號判定改吃還原權息後的序列（D-02）。門檻一個都沒動，但除權息當天的漲跌幅與
 // 均線基準變了，會改變哪些股票入選，所以舊快照不可與新快照混進同一個分母。
 // v3：候選池加上絕對成交量下限 OVERNIGHT_MIN_VOLUME_LOTS（D-33）。
-const OVERNIGHT_FORMULA_VERSION = "overnight-v3-liquidity-floor";
+// v4（2026-09-05）：上櫃除權息日的股票以前結構性進不了候選池（整批收盤的 Change 是中文「除息」→
+// previousClose null → 被 Number.isFinite 濾掉），現在由逐檔月歷史補官方參考價。候選池組成改變＝升版。
+const OVERNIGHT_FORMULA_VERSION = "overnight-v4-tpex-exright";
 // 2026-07-13 前的快照尚未存 formulaVersion；當時只有這一版公式。
 // 這個常數刻意與 current 分開，未來升版時不可把缺欄位舊資料誤認成新版。
 const LEGACY_OVERNIGHT_FORMULA_VERSION = "overnight-v1-aggressive-controlled";
@@ -10408,7 +10461,9 @@ const SWING_MIN_SCAN_COVERAGE = 0.7; // 至少 70% 候選有當日新鮮歷史�
 // v20：走 Yahoo 備援時最後一根 K 的成交金額改由整批收盤補回（原本恆為 null）。
 // scoreSwing 的流動性項最多 10 分，補回來之後排序會變 → 影響 recordSwingVerification
 // 每個場景取前 40 檔的挑選順序，所以要與舊樣本分開統計。
-const SWING_FORMULA_VERSION = "swing-v21-net-rr-gate";
+// v22（2026-09-05）：scoreSwing 的 RR 項改用淨 RR（與門檻同口徑，影響前 40 名取樣），
+// 且上櫃除權息日的股票不再結構性缺席候選池。舊快照失效重算；舊驗證單以版本分層保留。
+const SWING_FORMULA_VERSION = "swing-v22-net-rr-rank-tpex-exright";
 
 // 台股普通股升降單位：策略建議價必須是交易所可申報的價格，不能只四捨五入到小數二位。
 function stockTickSize(price) {
@@ -10643,7 +10698,9 @@ function scoreSwing(features, plan, scenarioKey = "midBandDefense") {
   }
   // 盈虧比（上限 ~16）：把風險報酬納入排名，RR 越高越前面（RR 1→0、2→8、3→16）。
   // 這樣評分＝「型態品質 × 划不划算」，排名才不會把 RR 爛的設定排到前面。
-  const rr = Number(plan?.rr);
+  // v22 起用**淨** RR（與 SWING_MIN_RR 的門檻同一口徑）：毛 RR 1.10 的設定淨值可能只剩 0.75，
+  // 排序若用毛值會把邊緣設定排到前面；沒有 rrNet 的舊計畫才退回毛 RR。
+  const rr = Number(Number.isFinite(Number(plan?.rrNet)) ? plan.rrNet : plan?.rr);
   if (Number.isFinite(rr)) score += Math.max(0, Math.min(16, (rr - 1) * 8));
   return Math.round(Math.max(0, Math.min(100, score)));
 }
@@ -10900,10 +10957,19 @@ function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
   entry.lastChecked = day;
   entry.daysHeld += 1;
   delete entry.dataGap;
+  // 「進場＝當日收盤」是刻意的型態邏輯，但訊號要等 13:30 後的整批收盤才算得出來，真實進場多半是
+  // 次日開盤。第一根推進時把開盤價記下來，結案時並陳「次日開盤進場」的結果（口徑並陳，不改判定）。
+  if (entry.daysHeld === 1 && Number.isFinite(open) && open > 0 && !Number.isFinite(Number(entry.nextOpen))) {
+    entry.nextOpen = open;
+  }
   const resolve = (status, exitPrice) => {
     entry.status = status;
     entry.resolvedAt = day;
     entry.resultPct = roundTo(((exitPrice - entry.entry) / entry.entry) * 100);
+    const nextOpen = Number(entry.nextOpen);
+    if (Number.isFinite(nextOpen) && nextOpen > 0) {
+      entry.resultPctNextOpen = roundTo(((exitPrice - nextOpen) / nextOpen) * 100);
+    }
     // 舊紀錄沒有這一欄一律當 same-day，不追溯改寫。
     entry.exitModel ||= "same-day";
   };
@@ -11355,13 +11421,15 @@ async function buildSwingVerificationSummary() {
   for (const [day, entries] of Object.entries(store)) {
     for (const entry of entries) {
       const formulaVersion = entry.formulaVersion || "legacy";
-      const version = versionCounts.get(formulaVersion) || { formulaVersion, samples: 0, resolved: 0, pending: 0, dataGaps: 0 };
+      const version = versionCounts.get(formulaVersion) || { formulaVersion, samples: 0, resolved: 0, pending: 0, dataGaps: 0, wins: 0 };
       version.samples += 1;
       if (entry.status === "pending") {
         version.pending += 1;
         if (entry.dataGap) version.dataGaps += 1;
+      } else {
+        version.resolved += 1;
+        if (entry.status === "win") version.wins += 1;
       }
-      else version.resolved += 1;
       versionCounts.set(formulaVersion, version);
       if (formulaVersion !== SWING_FORMULA_VERSION) continue;
       const s = byScenario.get(entry.scenario) || {
@@ -11402,6 +11470,7 @@ async function buildSwingVerificationSummary() {
           code: entry.code,
           status: entry.status,
           resultPct: Number.isFinite(entry.resultPct) ? entry.resultPct : 0,
+          resultPctNextOpen: Number.isFinite(entry.resultPctNextOpen) ? entry.resultPctNextOpen : null,
           daysHeld: Number(entry.daysHeld) || 0,
           resolvedAt: entry.resolvedAt || day,
           periodic: Boolean(entry.fillModel && entry.fillModel !== "continuous"),
@@ -11451,6 +11520,18 @@ async function buildSwingVerificationSummary() {
         wins: allWins,
         winRate: s.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((allWins / s.resolved) * 1000) / 10 : null,
       },
+      // 口徑並陳：「次日開盤進場」——訊號要等收盤後才算得出，真實進場多半是次日開盤。
+      // 只有 2026-09-05 之後推進過的單有 nextOpen；勝負以該口徑的淨報酬 > 0 判定，同樣套最小樣本。
+      nextOpenEntry: (() => {
+        const rows = continuous.filter((item) => Number.isFinite(item.resultPctNextOpen));
+        const wins = rows.filter((item) => netReturnPct(item.resultPctNextOpen) > 0).length;
+        return {
+          resolved: rows.length,
+          wins,
+          winRate: rows.length >= WIN_RATE_MIN_SAMPLES ? Math.round((wins / rows.length) * 1000) / 10 : null,
+          avgResultPct: rows.length ? roundTo(average(rows.map((item) => item.resultPctNextOpen))) : null,
+        };
+      })(),
       // 大盤季線上／下分層；各自也套最小樣本門檻，低於門檻只給筆數不給百分比。
       byRegime: Object.fromEntries(Object.entries(s.regimes).map(([bucket, value]) => [bucket, {
         resolved: value.resolved,
@@ -11465,6 +11546,19 @@ async function buildSwingVerificationSummary() {
     generatedAt: new Date().toISOString(),
     currentFormulaVersion: SWING_FORMULA_VERSION,
     formulaVersions: [...versionCounts.values()].sort((a, b) => b.formulaVersion.localeCompare(a.formulaVersion)),
+    // 版本作為分層而非排除：headline 只用現版，這裡另給「全版本合併」讓改版不會把累積歸零。
+    allVersions: (() => {
+      const versions = [...versionCounts.values()];
+      const resolved = versions.reduce((sum, item) => sum + item.resolved, 0);
+      const wins = versions.reduce((sum, item) => sum + (item.wins || 0), 0);
+      return {
+        versions: versions.length,
+        samples: versions.reduce((sum, item) => sum + item.samples, 0),
+        resolved,
+        wins,
+        winRate: resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((wins / resolved) * 1000) / 10 : null,
+      };
+    })(),
     scenarios,
     recent: all.filter((entry) => entry.status !== "pending").slice(0, 20),
     pendingCount: all.filter((entry) => entry.status === "pending").length,
@@ -11918,6 +12012,7 @@ const getOnlyApiPaths = new Set([
   "/api/symbols",
   "/api/sources",
   "/api/markets",
+  "/api/market/breadth",
   "/api/overnight/verify",
   "/api/overnight/verify/history",
   "/api/notes/recent",
@@ -12690,6 +12785,15 @@ async function handleApi(request, requestUrl, response) {
       const provider = getDataProvider(requestUrl.searchParams.get("source"));
       const body = await provider.getMarkets(auth);
       jsonResponse(response, body.ok ? 200 : 503, body);
+    } catch (error) {
+      apiFailure(response, 502, error);
+    }
+    return true;
+  }
+  if (requestUrl.pathname === "/api/market/breadth") {
+    // 唯讀、免登入（比照其他行情端點）：大盤位階、漲跌家數、期指基差、未來 7 天事件。
+    try {
+      jsonResponse(response, 200, await buildMarketBreadth());
     } catch (error) {
       apiFailure(response, 502, error);
     }
@@ -13697,6 +13801,104 @@ async function performShutdown() {
 }
 
 // 刻意不是 async：同一輪多次呼叫必須拿到完全相同的 Promise，讓 signal／測試安全共用。
+// ===== 事件日曆與市場位階（只用官方源；全部是既有資料的再組合）=====
+// 期指最後結算日＝當月第三個星期三，遇休市順延至次一營業日；月營收截止 10 日、季報截止 3/31、5/15、
+// 8/14、11/14（依法定期限，遇假日順延）。法說會需另接端點，這裡不做。
+function thirdWednesday(year, month) {
+  const first = new Date(Date.UTC(year, month - 1, 1)).getUTCDay(); // 0=日
+  const day = 1 + ((3 - first + 7) % 7) + 14;
+  return `${year}${String(month).padStart(2, "0")}${String(day).padStart(2, "0")}`;
+}
+function rollToTradingDate(day, holidayRows) {
+  return isScheduledTradingDate(day, holidayRows) ? day : nextScheduledTradingDate(day, holidayRows);
+}
+function upcomingMarketEvents(todayCompact, holidayRows = [], horizonDays = 7) {
+  const today = toCompactDate(todayCompact);
+  if (!today) return [];
+  const limit = addDaysCompact(today, horizonDays);
+  const year = Number(today.slice(0, 4));
+  const month = Number(today.slice(4, 6));
+  const candidates = [];
+  for (const offset of [0, 1]) {
+    const m = month + offset;
+    const y = m > 12 ? year + 1 : year;
+    const mm = m > 12 ? m - 12 : m;
+    candidates.push({ date: thirdWednesday(y, mm), label: "台指期最後結算日", kind: "settlement" });
+    candidates.push({ date: `${y}${String(mm).padStart(2, "0")}10`, label: "上月營收公告截止", kind: "revenue" });
+  }
+  for (const [mmdd, label] of [["0331", "年報／Q4 財報截止"], ["0515", "Q1 財報截止"], ["0814", "Q2 財報截止"], ["1114", "Q3 財報截止"]]) {
+    candidates.push({ date: `${year}${mmdd}`, label, kind: "report" });
+    candidates.push({ date: `${year + 1}${mmdd}`, label, kind: "report" });
+  }
+  const seen = new Set();
+  return candidates
+    .map((item) => ({ ...item, date: rollToTradingDate(item.date, holidayRows) }))
+    .filter((item) => item.date && item.date > today && item.date <= limit)
+    .filter((item) => {
+      const key = `${item.kind}:${item.date}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// 市場寬度：上漲／下跌／平盤家數（只算資料日等於基準日的列，避免落後市場的舊價混進來）。
+function summarizeMarketBreadth(quotes, asOfCompact) {
+  let up = 0;
+  let down = 0;
+  let flat = 0;
+  for (const quote of quotes || []) {
+    if (asOfCompact && toCompactDate(quote?.rawDate || quote?.asOf) !== asOfCompact) continue;
+    // Number(null)===0 的陷阱：除權息日還沒補參考價的列 change／previousClose 都是 null，不可算成平盤。
+    if (quote?.change === null || quote?.change === undefined || quote?.previousClose === null || quote?.previousClose === undefined) continue;
+    const change = Number(quote.change);
+    const previousClose = Number(quote.previousClose);
+    if (!Number.isFinite(change) || !Number.isFinite(previousClose) || previousClose <= 0) continue;
+    if (change > 0) up += 1;
+    else if (change < 0) down += 1;
+    else flat += 1;
+  }
+  const total = up + down + flat;
+  return { up, down, flat, total, upRatio: total ? roundTo(up / total, 4) : null };
+}
+
+let marketBreadthCache = { expiresAt: 0, value: null, inFlight: null };
+async function buildMarketBreadth() {
+  if (marketBreadthCache.value && marketBreadthCache.expiresAt > Date.now()) return marketBreadthCache.value;
+  if (marketBreadthCache.inFlight) return marketBreadthCache.inFlight;
+  marketBreadthCache.inFlight = (async () => {
+    const warnings = [];
+    const reference = await getReferenceData();
+    const asOf = resolveMarketCloseDate(reference);
+    warnings.push(...(reference.warnings || []));
+    const [regime, summary, calendar] = await Promise.all([
+      getCurrentRegime(asOf),
+      getMarketSummary().catch((error) => { warnings.push(`大盤／期指摘要抓取失敗：${error.message}`); return null; }),
+      getTradingCalendarEvidence().catch(() => ({ holidayRows: [] })),
+    ]);
+    if (!regime) warnings.push("加權指數歷史暫時抓不到，位階（季線上／下）本輪無法判定。");
+    const taiex = summary?.markets?.taiex;
+    const tx = summary?.markets?.tx;
+    const basis = Number.isFinite(Number(taiex?.price)) && Number.isFinite(Number(tx?.price)) && !tx?.stale
+      ? { points: roundTo(Number(tx.price) - Number(taiex.price)), pct: roundTo(((Number(tx.price) - Number(taiex.price)) / Number(taiex.price)) * 100, 3), txAsOf: tx.asOf || null, taiexAsOf: taiex.asOf || null }
+      : null;
+    const body = {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      asOf: compactToIsoDate(asOf),
+      taiex: regime,
+      breadth: summarizeMarketBreadth([...reference.byCode.values()], asOf),
+      basis,
+      events: upcomingMarketEvents(toTaipeiCompactDate(), calendar?.holidayRows || [], 7),
+      warnings: unique(warnings),
+    };
+    marketBreadthCache = { expiresAt: Date.now() + 5 * 60 * 1000, value: body, inFlight: null };
+    return body;
+  })().finally(() => { marketBreadthCache.inFlight = null; });
+  return marketBreadthCache.inFlight;
+}
+
 // ===== 收盤後排程 =====
 // 以前整支 server 沒有任何 setInterval：隔日沖快照、波段快照、驗證推進全靠有人開 App。
 // 後果有三：成績單的「有紀錄日」與使用者行為相關（大跌日沒人開就不進分母）；朋友第一次 clone
@@ -14014,6 +14216,10 @@ export {
   loadStaticAsset,
   // 收盤後排程（close-scheduler.test）
   closeTasksDue, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
+  // 事件日曆／市場位階（market-events.test）
+  thirdWednesday, upcomingMarketEvents, summarizeMarketBreadth, buildMarketBreadth,
+  // 上櫃除權息候選池（tpex-exright-candidate.test）
+  restoreTpexCorporateActionBaselines, TPEX_BASELINE_MAX_CODES,
   // 伺服器
   server, startServer, shutdownServer,
 };

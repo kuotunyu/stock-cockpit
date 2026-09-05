@@ -452,3 +452,38 @@ test("停牌：pending 單標 halted、單獨計數、不併進「卡住」，�
   // commit 是 copy-on-write：每次推進都換一份新的 store，要重新讀
   assert.equal(db.swingVerification[stale].find((e) => e.code === "5555").halted, undefined);
 });
+
+test("口徑並陳：第一根推進記 nextOpen，結案並陳 resultPctNextOpen；summary 有 nextOpenEntry 與 allVersions", async () => {
+  const entry = makeEntry({ lastChecked: compactTradingDay(-3) });
+  const d1 = compactTradingDay(-2);
+  const d2 = compactTradingDay(-1);
+  mod.advanceSwingVerificationEntry(entry, quoteAt(d1, { open: 102, high: 104, low: 101, price: 103 }), { price: 100 });
+  assert.equal(entry.nextOpen, 102, "第一根的開盤價＝次日開盤進場");
+  mod.advanceSwingVerificationEntry(entry, quoteAt(d2, { open: 108, high: 111, low: 107, price: 110 }), { price: 103 });
+  assert.equal(entry.status, "win");
+  assert.equal(entry.resultPct, 10, "收盤進場口徑：110/100");
+  assert.equal(entry.resultPctNextOpen, Math.round(((110 - 102) / 102) * 10000) / 100, "次日開盤進場口徑：110/102");
+
+  const db = await mod.loadDb();
+  const day = compactTradingDay(-10);
+  const resolved = (code, status, resultPct, resultPctNextOpen, extra = {}) => makeEntry({ code, status, resultPct, resultPctNextOpen, resolvedAt: day, daysHeld: 2, lastChecked: day, ...extra });
+  db.swingVerification = {
+    [day]: [
+      resolved("A1", "win", 5, 3.2),
+      resolved("A2", "loss", -3, -4.1),
+      resolved("A3", "win", 2, 0.1),  // 淨報酬 0.1 − 0.471 < 0 → 次日開盤口徑算輸
+      resolved("A4", "win", 4, null), // 舊單沒有 nextOpen → 不進 nextOpenEntry 分母
+      resolved("O1", "win", 9, 8, { formulaVersion: "swing-v12-bandnames" }),
+      resolved("O2", "loss", -6, -7, { formulaVersion: "swing-v12-bandnames" }),
+    ],
+  };
+  mod.invalidateSwingVerifySummaryCache();
+  const summary = await mod.buildSwingVerificationSummary();
+  const s = summary.scenarios.find((item) => item.scenario === "midBandDefense");
+  assert.deepEqual(s.nextOpenEntry, { resolved: 3, wins: 1, winRate: null, avgResultPct: Math.round(((3.2 - 4.1 + 0.1) / 3) * 100) / 100 });
+  assert.equal(summary.allVersions.versions, 2);
+  assert.equal(summary.allVersions.resolved, 6);
+  assert.equal(summary.allVersions.wins, 4);
+  assert.equal(summary.allVersions.winRate, null, "未達 20 筆不給百分比");
+  assert.ok(summary.formulaVersions.find((v) => v.formulaVersion === "swing-v12-bandnames").wins === 1);
+});

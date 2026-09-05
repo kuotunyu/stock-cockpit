@@ -324,10 +324,15 @@ test("scoreSwing：0–100 整數；RR 與量比單調不減", () => {
   const plan = buildSwingPlan(f);
   const s = scoreSwing(f, plan);
   assert.ok(Number.isInteger(s) && s >= 0 && s <= 100);
-  // RR 越高分數不減
-  const low = scoreSwing(f, { ...plan, rr: 1.2 });
-  const high = scoreSwing(f, { ...plan, rr: 3 });
+  // RR 越高分數不減（v22 起排序用淨 RR，與 SWING_MIN_RR 的門檻同口徑）
+  const low = scoreSwing(f, { ...plan, rr: 1.2, rrNet: 1.2 });
+  const high = scoreSwing(f, { ...plan, rr: 3, rrNet: 3 });
   assert.ok(high >= low, `rr 3 (${high}) 應 ≥ rr 1.2 (${low})`);
+  // 淨 RR 優先於毛 RR：毛 3／淨 1 的設定不得拿到毛 3 的分數
+  const grossOnly = scoreSwing(f, { ...plan, rr: 3, rrNet: 1 });
+  assert.ok(grossOnly <= low, `毛 3／淨 1 (${grossOnly}) 應 ≤ 淨 1.2 (${low})`);
+  // 舊計畫沒有 rrNet 時退回毛 RR
+  assert.equal(scoreSwing(f, { ...plan, rr: 3, rrNet: undefined }), high);
   // 量比越高（適度範圍內）分數不減
   const fLow = { ...f, volumeRatio5: 1.0 };
   const fHigh = { ...f, volumeRatio5: 1.8 };
