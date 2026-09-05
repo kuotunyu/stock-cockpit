@@ -81,7 +81,7 @@ test("只保存判定用得到的欄位，不整包塞進不可回溯的歷史�
   assert.deepEqual(Object.keys(entry.surveillance).sort(), ["interval", "kind", "label"]);
 });
 
-test("成績單要數得出分盤樣本，但勝率口徑不變", async () => {
+test("成績單要數得出分盤樣本；headline 勝率分母排除分盤（2026-09-05 拍板），含分盤的口徑另列", async () => {
   const db = await mod.loadDb();
   db.swingVerification = {
     20260701: [
@@ -105,11 +105,17 @@ test("成績單要數得出分盤樣本，但勝率口徑不變", async () => {
   assert.equal(s.periodicCallSamples, 2);
   assert.equal(s.periodicCallResolved, 1, "已結案的分盤樣本只有 1 筆");
 
-  // 勝率口徑不變：5 筆結案（3 勝 2 敗），分盤那筆照樣計入。
+  // 計數仍含全部：5 筆結案（3 勝 2 敗）；headline 分母只算連續競價那 4 筆（3 勝 1 敗），
+  // 含分盤的口徑另回 withPeriodicCall（D-30 在 2026-09-05 拍板：分盤集合競價下「觸價」前提不成立，
+  // 而且處置股要預收款券、觀察用的散戶多半不會做）。
   assert.equal(s.resolved, 5);
   assert.equal(s.wins, 3);
   assert.equal(s.losses, 2);
+  assert.equal(s.continuousResolved, 4);
+  assert.equal(s.withPeriodicCall.resolved, 5);
+  assert.equal(s.withPeriodicCall.wins, 3);
+  assert.equal(s.avgResultPct, Math.round(((5 + 4 - 5 + 3) / 4) * 100) / 100, "平均只算連續競價");
 
   assert.match(summary.notes.join(" "), /分盤集合競價/, "必須明講這些樣本的撮合前提不同");
-  assert.match(summary.notes.join(" "), /仍計入上面的勝率/, "也要說清楚目前沒有把它們排除");
+  assert.match(summary.notes.join(" "), /不進主要勝率的分母/, "要說清楚它們被移出 headline、另列");
 });
