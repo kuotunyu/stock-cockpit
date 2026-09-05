@@ -1845,7 +1845,9 @@ const LEGACY_CERT_PATH_HINT = "這筆設定用的是舊版的完整路徑；請�
 function brokerCertFilePath(credentials) {
   const name = String(credentials?.certPath || "");
   // 舊格式存的是絕對路徑：不再跟著去讀（那正是 oracle），要求使用者重存。
-  if (!name || name !== basename(name)) return null;
+  // 判斷要平台無關：Linux 的 path.basename 不把反斜線當分隔符，"C:\\fubon\\old.pfx" 會整串當檔名
+  //（CI 在 Linux 跑，本機是 Windows——2026-09-05 CI 實際紅過一次）。
+  if (!name || /[\\/]/.test(name) || /^[A-Za-z]:/.test(name) || name === "." || name === "..") return null;
   return join(brokerCertDir, name);
 }
 
