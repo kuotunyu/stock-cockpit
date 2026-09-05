@@ -73,7 +73,7 @@ test("近期 API 回 12 筆時只畫 10 列，標題明示『最近 10（共 12�
     renderSwingVerifyPanel();
   `);
   assert.equal(json(`el.swingVerify.querySelectorAll('.sv-row').length`), 10);
-  assert.ok(app.evalIn(`el.swingVerify.querySelector('summary').textContent`).includes("最近 10 筆結案（共 12 筆）"));
+  assert.ok(app.evalIn(`el.swingVerify.querySelector('.sv-details > summary').textContent`).includes("最近 10 筆結案（共 12 筆）"), "場景 chips 也包了一個 details，要指定近期結案那個");
 });
 
 test("沒資料 → 隱藏；非策略頁不重繪", () => {

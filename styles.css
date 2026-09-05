@@ -7407,19 +7407,29 @@ body.is-locked .app-shell {
     display: none;
   }
 
+  /* 單欄 5 張 × 112px 吃掉 688px、清單第一檔在 1.7 個螢幕外：改兩欄，資料可信度卡與自選卡整列 */
   .today-focus-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .today-focus-card,
   .data-trust-card {
-    min-height: 112px;
+    min-height: 96px;
   }
 
+  .today-focus-grid > .data-trust-card {
+    grid-column: 1 / -1;
+  }
+
+  .market-stance-events {
+    display: block;
+  }
+  .market-stance-events::before { content: none; }
+
   .today-focus-grid > .today-focus-card.is-watch {
-    grid-column: auto;
+    grid-column: 1 / -1;
     grid-template-columns: minmax(0, 1fr);
-    min-height: 112px;
+    min-height: 96px;
   }
 
   .today-focus-grid > .data-trust-card {
@@ -9124,6 +9134,32 @@ body.is-locked .app-shell {
 }
 .swing-risk-bar label:last-of-type input { width: 72px; }
 .swing-risk-bar small { flex: 1 1 100%; color: var(--muted); font-size: var(--fs-note); }
+/* 資金未填時整列收成一顆 chip；欄位群用 display: contents 讓 label／small 維持原本的 flex 流 */
+.swing-risk-fields { display: contents; }
+.swing-risk-bar.is-collapsed .swing-risk-fields { display: none; }
+.swing-risk-toggle {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #202326;
+  color: var(--muted-2);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.swing-risk-toggle[aria-expanded="true"] { color: var(--text); }
+/* 場景勝率面板：手機收成一行 summary（見 renderSwingVerifyPanel），桌機預設展開 */
+.sv-fold > summary {
+  cursor: pointer;
+  color: #d6dfe8;
+  font-size: 15px;
+  font-weight: 800;
+  padding: 6px 0 10px;
+}
+.sv-fold[open] > summary { padding-bottom: 6px; }
+/* 市場位階：事件另包一個 span，桌機用分隔線接在同一行 */
+.market-stance-events::before { content: "｜"; }
 .swing-stat-size strong { color: var(--info-text); }
 
 /* 波段卡片動作列 */

@@ -225,3 +225,35 @@ test("名詞表：新分類「成績單與決策」補齊 8 條（成績單與�
   }
   assert.ok(terms.length >= 8, terms.join(" | "));
 });
+
+// ---- 第二輪第二批：資訊層級收合與手機首屏 ----
+test("場景勝率面板：chips 包在可收合的 details（桌機預設展開），summary 講第一個場景的勝率", () => {
+  const result = json(`(() => {
+    const prevScreen = state.screen;
+    const prevData = swingVerifyState.data;
+    state.screen = "strategy";
+    swingVerifyState.data = { ok: true, currentFormulaVersion: "v", formulaVersions: [{ formulaVersion: "v", samples: 30 }], recent: [], pendingCount: 0,
+      scenarios: [{ scenario: "midBandDefense", samples: 30, wins: 11, losses: 12, expired: 0, pending: 7, resolved: 23, continuousResolved: 23, winRate: 47.8, winRateMinSamples: 20, avgResultPct: 0.83 }] };
+    renderSwingVerifyPanel();
+    const fold = document.querySelector("#swingVerify details.sv-fold");
+    const out = { exists: Boolean(fold), open: fold ? fold.open : null, summary: fold?.querySelector("summary")?.textContent.replace(/\s+/g, " ").trim() || "", chipsInside: Boolean(fold?.querySelector(".sv-chips")) };
+    state.screen = prevScreen;
+    swingVerifyState.data = prevData;
+    return out;
+  })()`);
+  assert.equal(result.exists, true, "手機上 675px 的統計面板要能收成一行");
+  assert.equal(result.open, true, "jsdom 沒有 matchMedia → 視為桌機，預設展開");
+  assert.match(result.summary, /中軌攻防 47\.8%（23 筆）/);
+  assert.equal(result.chipsInside, true);
+});
+
+test("風險列：資金未填時收成一顆（aria-expanded=false），填了自動展開，也能手動切換；手機 CSS：重點卡兩欄、位階事件行獨立換行", () => {
+  const collapsed = json(`(() => { savePositionSizing({ capital: 0, riskPct: 1 }); syncPositionSizingInputs(); const bar = document.querySelector(".swing-risk-bar"); return { collapsed: bar.classList.contains("is-collapsed"), expanded: bar.querySelector("[data-risk-toggle]")?.getAttribute("aria-expanded") ?? null }; })()`);
+  assert.deepEqual(collapsed, { collapsed: true, expanded: "false" });
+  const expanded = json(`(() => { savePositionSizing({ capital: 500000, riskPct: 1 }); syncPositionSizingInputs(); const bar = document.querySelector(".swing-risk-bar"); const out = { collapsed: bar.classList.contains("is-collapsed"), expanded: bar.querySelector("[data-risk-toggle]").getAttribute("aria-expanded") }; savePositionSizing({ capital: 0, riskPct: 1 }); syncPositionSizingInputs(); return out; })()`);
+  assert.deepEqual(expanded, { collapsed: false, expanded: "true" });
+  const toggled = json(`(() => { const bar = document.querySelector(".swing-risk-bar"); const toggle = bar.querySelector("[data-risk-toggle]"); toggle.click(); const opened = !bar.classList.contains("is-collapsed"); toggle.click(); const closed = bar.classList.contains("is-collapsed"); return { opened, closed }; })()`);
+  assert.deepEqual(toggled, { opened: true, closed: true });
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.today-focus-grid \{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/, "手機重點卡改兩欄（單欄 5 張 × 112px 吃掉 688px）");
+  assert.match(css, /\.market-stance-events \{[^}]*display: block/, "位階行的事件另起一行");
+});

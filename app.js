@@ -5856,7 +5856,8 @@ function renderMarketStanceLine() {
   const warn = (data.warnings || []).length
     ? `<button type="button" class="market-stance-warn" aria-label="資料警告" data-stance-warnings="${escapeHtml(data.warnings.join("\n"))}" title="${escapeHtml(data.warnings.join("\n"))}">⚠</button>`
     : "";
-  return `<p class="market-stance" title="${escapeHtml(title)}">${[stance, breadth, basis, events].filter(Boolean).join("｜")}${warn}</p>`;
+  // 事件另包一個 span：手機上整行要 3 行，事件獨立換行比較好讀（桌機用 ::before 補分隔線）。
+  return `<p class="market-stance" title="${escapeHtml(title)}">${[stance, breadth, basis].filter(Boolean).join("｜")}<span class="market-stance-events">${events}</span>${warn}</p>`;
 }
 
 // ===== 部位控管：單筆風險 % → 建議張數 =====
@@ -6375,12 +6376,26 @@ function renderSwingVerifyPanel() {
         </div>`;
     })
     .join("");
+  // 手機上這面板約 675px、排在第一張波段卡之前：收成一行 summary（第一個場景的勝率），桌機預設展開。
+  // jsdom 沒有 matchMedia → 視為桌機。
+  const foldOpen = !(typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches);
+  const foldSummary = (() => {
+    const first = scenarios.find((s) => s.samples > 0) || scenarios[0];
+    if (!first) return "場景勝率";
+    const resolved = Number(first.continuousResolved ?? (first.wins + first.losses + first.expired)) || 0;
+    const minSamples = Number(first.winRateMinSamples) || 20;
+    const rate = first.winRate != null ? `${first.winRate}%` : resolved ? `累積中 ${resolved}/${minSamples}` : "--";
+    return `場景勝率：${escapeHtml(swingScenarioName(first.scenario))} ${rate}（${resolved} 筆）${scenarios.length > 1 ? "・展開看全部場景" : ""}`;
+  })();
   panel.innerHTML = `
     <div class="sv-head">
       <strong>場景勝率（前向驗證）</strong>
       <small title="每天的選股依官方日 K 逐日對答案：先碰目標＝達標、先碰結構停損＝停損；同一天兩邊都碰到，保守記停損。漏開 App 會按日期補判，中間缺 K 則停住、不跳日。&#10;處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到；這些樣本仍計入勝率，但會單獨標出筆數。&#10;除權息當天若官方比率還沒發布（計算結果表約次一營業日才有），該單會暫停推進而不是拿事件前的停損價去比事件後的價格；等比率到齊會自動接著判，觀察天數不會被吃掉。">官方日 K 逐日補驗・雙觸保守記停損${data.dataGapCount ? `・${data.dataGapCount} 筆待補缺口` : ""}${data.corporateActionPendingCount ? `・${data.corporateActionPendingCount} 筆等官方除權息比率` : ""}${data.periodicCallCount ? `・${data.periodicCallCount} 筆分盤撮合` : ""}${data.haltedCount ? `・${data.haltedCount} 筆停牌中` : ""}${data.deferredExitCount ? `・${data.deferredExitCount} 筆跌停鎖死順延出場` : ""}${legacySamples ? `・舊版 ${legacySamples} 筆另存` : ""}${data.allVersions && data.allVersions.versions > 1 ? `・全版本合併 ${data.allVersions.winRate != null ? `${data.allVersions.winRate}%` : `${data.allVersions.wins}/${data.allVersions.resolved}`}（${data.allVersions.resolved} 筆結案）` : ""}</small>
     </div>
-    <div class="sv-chips">${chips}</div>
+    <details class="sv-fold"${foldOpen ? " open" : ""}>
+      <summary>${foldSummary}</summary>
+      <div class="sv-chips">${chips}</div>
+    </details>
     ${recentRows ? `
       <details class="sv-details">
         <summary>最近 ${Math.min(recentLimit, recentAll.length)} 筆結案${recentAll.length > recentLimit ? `（共 ${recentAll.length} 筆）` : ""}</summary>
@@ -12942,8 +12957,27 @@ function syncPositionSizingInputs() {
   const risk = document.getElementById("swingRiskPct");
   if (capital && document.activeElement !== capital) capital.value = positionSizingState.capital ? String(positionSizingState.capital) : "";
   if (risk && document.activeElement !== risk) risk.value = String(positionSizingState.riskPct);
+  // 資金沒填時整列只是一段說明文（手機上佔 177px、排在第一張卡之前）：收成一顆，填了資金或手動點開才展開。
+  const bar = document.querySelector(".swing-risk-bar");
+  if (bar) {
+    const collapsed = !positionSizingState.capital && !positionSizingState.manualOpen;
+    bar.classList.toggle("is-collapsed", collapsed);
+    const toggle = bar.querySelector("[data-risk-toggle]");
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.textContent = collapsed ? "設定資金 → 顯示建議張數" : "部位控管：資金與單筆風險";
+    }
+  }
 }
 syncPositionSizingInputs();
+document.addEventListener("click", (event) => {
+  const toggle = event.target instanceof Element ? event.target.closest("[data-risk-toggle]") : null;
+  if (!toggle) return;
+  const bar = toggle.closest(".swing-risk-bar");
+  positionSizingState.manualOpen = Boolean(bar?.classList.contains("is-collapsed"));
+  syncPositionSizingInputs();
+  if (positionSizingState.manualOpen) document.getElementById("swingCapital")?.focus();
+});
 document.addEventListener("input", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target || (target.id !== "swingCapital" && target.id !== "swingRiskPct")) return;
