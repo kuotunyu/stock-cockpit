@@ -344,7 +344,8 @@ test("regime 分層：建單時記錄大盤位階（精簡版），summary 依�
     picks: [pick("1101", "midBandDefense")],
   });
   const entry = db.swingVerification[day][0];
-  assert.deepEqual(entry.regime, { asOf: day, aboveMa20: true, aboveMa60: false }, "只留分層用得到的欄位，不塞整段均線");
+  // 兩個布林＋與均線的距離（close/ma − 1）；仍不塞整段均線。close 1／ma 1 → 距離 0。
+  assert.deepEqual(entry.regime, { asOf: day, aboveMa20: true, aboveMa60: false, distMa20Pct: 0, distMa60Pct: 0 }, "只留分層用得到的欄位，不塞整段均線");
   mod.recordSwingVerification(db, { asOf: day, formulaVersion: mod.SWING_FORMULA_VERSION, picks: [pick("1102", "midBandDefense")] });
   assert.equal(db.swingVerification[day][1].regime, null, "抓不到 regime 就 null，不猜");
   assert.equal(mod.regimeBucket(entry.regime), "belowMa60");
@@ -380,14 +381,25 @@ test("分佈指標：PF／中位數／最長連虧／最差單日；處置股（
   // PF ＝ 11×5 ÷ 12×3 ＝ 55/36
   assert.equal(s.profitFactor, Math.round((55 / 36) * 100) / 100);
   assert.equal(s.medianResultPct, -3, "23 筆裡 12 筆 −3、11 筆 +5 → 中位數落在 −3");
-  assert.equal(s.maxConsecutiveLosses, 3, "同一天的 3 筆停損連續（同日以 code 排序）");
+  // 淨口徑：勝率用 status、PF 卻用毛正負分——同一批樣本兩種定義。淨 PF ＝ 11×(5−0.471) ÷ 12×(3+0.471)
+  assert.equal(s.profitFactorNet, Math.round((11 * mod.netReturnPct(5)) / (12 * Math.abs(mod.netReturnPct(-3))) * 100) / 100);
+  assert.equal(s.medianResultPctNet, mod.netReturnPct(-3));
+  // 連虧以「結案日」為叢集：同一天 3 筆停損是一個叢集不是三個；之後每天勝負交錯（日平均 +1）→ 最長連虧 1 天
+  assert.equal(s.maxConsecutiveLossDays, 1, "同日停損算 1 天，不再依代號排序算出 3");
+  assert.equal(s.maxConsecutiveLosses, undefined, "舊的逐筆連虧（同日以 code 排序）已移除");
   assert.deepEqual(s.worstDay, { day: d(0), avgResultPct: -3, count: 3 });
   assert.equal(s.avgResultPct, Math.round(((55 - 36) / 23) * 100) / 100, "平均也只算連續競價");
   // 純函式
   assert.equal(mod.median([3, 1, 2]), 2);
   assert.equal(mod.median([4, 1, 2, 3]), 2.5);
   assert.equal(mod.median([]), null);
-  assert.equal(mod.maxConsecutiveLosses([{ status: "loss", resolvedAt: "20260101", code: "a" }, { status: "win", resolvedAt: "20260102", code: "a" }, { status: "loss", resolvedAt: "20260103", code: "a" }, { status: "loss", resolvedAt: "20260104", code: "a" }]), 2);
+  assert.equal(mod.maxConsecutiveLossDays([
+    { resultPct: -3, resolvedAt: "20260101" }, { resultPct: 5, resolvedAt: "20260102" },
+    { resultPct: -3, resolvedAt: "20260103" }, { resultPct: 0.2, resolvedAt: "20260104" }, { resultPct: -1, resolvedAt: "20260104" }, // 日平均 −0.4 → 虧損日
+    { resultPct: 0.3, resolvedAt: "20260105" }, // 毛 +0.3 淨 −0.171 → 仍是虧損日
+    { resultPct: 6, resolvedAt: "20260106" },
+  ]), 3, "0103、0104、0105 連續三個淨虧損日");
+  assert.equal(mod.maxConsecutiveLossDays([]), 0);
   assert.equal(mod.worstResolvedDay([]), null);
 });
 

@@ -8630,9 +8630,12 @@ function regimeBucket(regime) {
   return "unknown";
 }
 
-// 寫進快照／驗證單的精簡版：只留分層用得到的兩個布林，不把整段均線塞進不可回溯的歷史。
+// 寫進快照／驗證單的精簡版：兩個布林＋與均線的距離（close/ma − 1）。單日 close > MA60 的判定在均線附近會抖
+//（零漂移隨機漫步每年翻轉約 18 次），存了距離之後日後可以用 ±1% 遲滯或連續 N 日重切，不必重抓歷史。
 function regimeStamp(regime) {
-  return regime ? { asOf: regime.asOf, aboveMa20: regime.aboveMa20, aboveMa60: regime.aboveMa60 } : null;
+  if (!regime) return null;
+  const dist = (ma) => (Number.isFinite(regime.close) && Number.isFinite(ma) && ma > 0 ? roundTo(regime.close / ma - 1, 4) : null);
+  return { asOf: regime.asOf, aboveMa20: regime.aboveMa20, aboveMa60: regime.aboveMa60, distMa20Pct: dist(regime.ma20), distMa60Pct: dist(regime.ma60) };
 }
 
 async function getCurrentRegime(asOf) {
@@ -9269,6 +9272,9 @@ async function buildVerificationHistory() {
             avgCloseReturn: signals
               ? subset.reduce((sum, record) => sum + (record.avgCloseReturn || 0) * record.verified, 0) / signals
               : null,
+            // 分層也套同一個最小天數與區間——否則會出現「季線下 1 天：開盤賣 60%」，與同一面板的門檻矛盾。
+            minDays: OVERNIGHT_MIN_DAYS,
+            ci: { winAtOpen: dayClusterCi(subset, "winAtOpen"), winAtClose: dayClusterCi(subset, "winAtClose") },
           }];
         })),
       }
@@ -11572,13 +11578,24 @@ function median(values) {
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid] : roundTo((sorted[mid - 1] + sorted[mid]) / 2);
 }
-// 依結案日排序後最長的連續停損；同一天結案的以 code 排序固定順序。
-function maxConsecutiveLosses(results) {
-  const ordered = [...(results || [])].sort((a, b) => String(a.resolvedAt).localeCompare(String(b.resolvedAt)) || String(a.code).localeCompare(String(b.code)));
+// 以「結案日」為叢集的最長連續虧損日數。同一天結案的單共享同一段大盤走勢，逐筆算會把一天的 3 筆停損
+// 算成「3 連虧」、而且同日順序只是代號排序的巧合（換個代號就變 2 或 3）。當日平均**淨**結果 < 0 才算虧損日
+//（毛 +0.3% 扣費後仍是虧），expired 的小虧也照算——它是實際結果，不是狀態。
+function maxConsecutiveLossDays(results) {
+  const byDay = new Map();
+  for (const item of results || []) {
+    const day = String(item?.resolvedAt || "");
+    if (!day || !Number.isFinite(item.resultPct)) continue;
+    const bucket = byDay.get(day) || { sum: 0, count: 0 };
+    bucket.sum += item.resultPct;
+    bucket.count += 1;
+    byDay.set(day, bucket);
+  }
   let best = 0;
   let run = 0;
-  for (const item of ordered) {
-    run = item.status === "loss" ? run + 1 : 0;
+  for (const day of [...byDay.keys()].sort()) {
+    const { sum, count } = byDay.get(day);
+    run = netReturnPct(sum / count) < 0 ? run + 1 : 0;
     if (run > best) best = run;
   }
   return best;
@@ -11704,8 +11721,16 @@ async function buildSwingVerificationSummary() {
       avgDaysHeld: continuous.length ? Math.round((cDays / continuous.length) * 10) / 10 : null,
       // 分佈指標：等權平均會把「一週內 75/88 筆停損」和「平穩小虧」混成同一個數字。
       profitFactor: lossesAbs > 0 ? roundTo(gains / lossesAbs) : null,
+      // 淨口徑：勝率用 status（淨）、PF 卻用毛正負分是同一批樣本兩種定義。淨 PF 與淨中位數並列，毛值仍保留。
+      profitFactorNet: (() => {
+        const net = continuous.map((item) => netReturnPct(item.resultPct)).filter(Number.isFinite);
+        const up = net.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
+        const down = net.filter((value) => value < 0).reduce((sum, value) => sum + Math.abs(value), 0);
+        return down > 0 ? roundTo(up / down) : null;
+      })(),
       medianResultPct: median(continuous.map((item) => item.resultPct)),
-      maxConsecutiveLosses: maxConsecutiveLosses(continuous),
+      medianResultPctNet: median(continuous.map((item) => netReturnPct(item.resultPct))),
+      maxConsecutiveLossDays: maxConsecutiveLossDays(continuous),
       worstDay: worstResolvedDay(continuous),
       // 分盤撮合（處置期間）的樣本數：不進 headline 分母，但要能單獨看見（含處置股的口徑另列）。
       periodicCallSamples: s.periodicCallSamples,
@@ -14472,7 +14497,7 @@ export {
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification, applySwingCorporateAction, resetSwingAdvanceKeyForTest,
   swingAdvanceTargetDate,
   buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
-  median, maxConsecutiveLosses, worstResolvedDay,
+  median, maxConsecutiveLossDays, worstResolvedDay,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,
   normalizeDividendMarketRows, DIVIDEND_RATIO_MAX_PLAUSIBLE, appendDividendHistory,

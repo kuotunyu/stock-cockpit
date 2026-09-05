@@ -147,13 +147,13 @@ test("場景卡：分佈指標一行（PF／中位／最長連虧／最差單日
     state.screen = "strategy";
     swingVerifyState.data = { ok: true, currentFormulaVersion: "v", formulaVersions: [], recent: [], pendingCount: 0,
       scenarios: [{ scenario: "midBandDefense", samples: 30, wins: 15, losses: 12, expired: 0, pending: 3, resolved: 27, continuousResolved: 23,
-        winRate: 47.8, winRateMinSamples: 20, avgResultPct: 0.83, profitFactor: 1.53, medianResultPct: -3, maxConsecutiveLosses: 3,
+        winRate: 47.8, winRateMinSamples: 20, avgResultPct: 0.83, profitFactor: 1.53, profitFactorNet: 1.2, medianResultPct: -3, medianResultPctNet: -3.47, maxConsecutiveLossDays: 1,
         worstDay: { day: "20260825", avgResultPct: -3, count: 3 }, withPeriodicCall: { resolved: 27, wins: 15, winRate: 55.6 } }] };
     renderSwingVerifyPanel();
     return document.getElementById("swingVerify").innerHTML;
   })()`)).replace(/\s+/g, " ");
   const text = html.replace(/<[^>]+>/g, "");
-  assert.match(text, /獲利因子 1\.53・中位 -3%・最長連虧 3・最差單日 08\/25 -3%（3 筆）/, "「PF」對散戶是術語");
+  assert.match(text, /獲利因子 淨 1\.2（毛 1\.53）・中位 淨 -3\.47%・最長連虧 1 天・最差單日 08\/25 -3%（3 筆）/, "PF／中位改淨口徑、連虧以結案日為叢集");
   assert.doesNotMatch(text, /PF 1\.53/);
   assert.match(text, /含處置股 55\.6%（27 筆）・主要勝率只算 23 筆連續競價的單/);
 });

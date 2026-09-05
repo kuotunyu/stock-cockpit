@@ -172,14 +172,15 @@ test("長期成績單：依大盤季線上／下分層的一行", () => {
       { asOf: "2026-07-10", observationDate: "2026-07-13", status: "final", pending: false, complete: true, signals: 2, verified: 2, hitPlus2: 1, brokeMinus2: 0, winAtOpen: 2, winAtClose: 1, avgOpenReturn: 0.9, avgCloseReturn: 1.25 },
     ], totals: { days: 30, signals: 300, hitPlus2: 100, brokeMinus2: 50, winAtOpen: 150, winAtClose: 100,
       minDays: 20, ci: {}, byRegime: {
-        aboveMa60: { days: 20, signals: 200, hitPlus2: 80, winAtOpen: 120, winAtClose: 80, avgCloseReturn: 0.4 },
-        belowMa60: { days: 8, signals: 80, hitPlus2: 20, winAtOpen: 24, winAtClose: 16, avgCloseReturn: -0.6 },
-        unknown: { days: 2, signals: 20, hitPlus2: 0, winAtOpen: 6, winAtClose: 4, avgCloseReturn: 0 } } } };
+        aboveMa60: { days: 20, signals: 200, hitPlus2: 80, winAtOpen: 120, winAtClose: 80, avgCloseReturn: 0.4, minDays: 20, ci: { winAtOpen: { n: 20, mean: 0.6, low: 0.52, high: 0.68 }, winAtClose: null } },
+        belowMa60: { days: 8, signals: 80, hitPlus2: 20, winAtOpen: 24, winAtClose: 16, avgCloseReturn: -0.6, minDays: 20, ci: { winAtOpen: { n: 8, mean: 0.3, low: 0.1, high: 0.5 }, winAtClose: null } },
+        unknown: { days: 2, signals: 20, hitPlus2: 0, winAtOpen: 6, winAtClose: 4, avgCloseReturn: 0, minDays: 20, ci: { winAtOpen: null, winAtClose: null } } } } };
     verifyHistoryState.loading = false;
     verifyHistoryState.error = "";
     return renderVerifyHistory();
   })()`));
-  assert.match(html, /大盤季線上 20 天：開盤賣 60%・收盤賣 40%/);
-  assert.match(html, /季線下 8 天：開盤賣 30%・收盤賣 20%/);
+  assert.match(html, /大盤季線上 20 天：開盤賣 60%（區間 52～68%）・收盤賣 40%/);
+  assert.match(html, /季線下 8 天（累積中 8\/20）/, "未滿最小天數的分層不印百分比");
+  assert.doesNotMatch(html, /季線下 8 天：開盤賣/);
   assert.match(html, /位階未知 2 天/);
 });

@@ -224,4 +224,8 @@ test("buildVerificationHistory：已驗證日＋今日 pending、totals 用驗�
   assert.ok(body.records.some((record) => record.regime === "aboveMa60"), "季線上的快照要帶分層鍵");
   assert.ok(body.records.some((record) => record.regime === "belowMa60"));
   assert.equal(typeof by.aboveMa60.winAtOpen, "number");
+  // 分層也要套同一個最小天數與區間：否則會出現「季線下 1 天：開盤賣 60%」，與同一面板「未滿 20 天不當結論」矛盾
+  assert.equal(by.aboveMa60.minDays, mod.OVERNIGHT_MIN_DAYS);
+  assert.ok("winAtOpen" in by.unknown.ci && "winAtClose" in by.unknown.ci, JSON.stringify(by.unknown));
+  assert.equal(by.unknown.ci.winAtOpen, null, "只有 1 天算不出區間 → null，不是 0");
 });

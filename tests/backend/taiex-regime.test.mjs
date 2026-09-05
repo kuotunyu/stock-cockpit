@@ -45,6 +45,13 @@ test("taiexRegime：不足 60 根回 null；足夠時算 MA20／MA60 與位階�
   assert.equal(bear.aboveMa20, false);
 });
 
+test("regimeStamp：除了兩個布林，還存與均線的距離（日後可用 ±1% 遲滯或連續 N 日重切，不必重抓歷史）", () => {
+  const stamp = mod.regimeStamp({ asOf: "20260905", close: 20690, ma20: 20595, ma60: 20395, aboveMa20: true, aboveMa60: true });
+  assert.deepEqual(stamp, { asOf: "20260905", aboveMa20: true, aboveMa60: true, distMa20Pct: 0.0046, distMa60Pct: 0.0145 });
+  assert.equal(mod.regimeStamp(null), null);
+  assert.equal(mod.regimeStamp({ asOf: "x", aboveMa20: false, aboveMa60: false, close: 100, ma20: 0, ma60: null }).distMa60Pct, null, "均線缺值不猜");
+});
+
 test("regimeBucket：把 regime 對應到成績單分層鍵，缺值一律 unknown", () => {
   assert.equal(mod.regimeBucket({ aboveMa60: true }), "aboveMa60");
   assert.equal(mod.regimeBucket({ aboveMa60: false }), "belowMa60");

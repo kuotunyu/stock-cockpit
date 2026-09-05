@@ -5670,9 +5670,15 @@ function renderVerifyRegimeLine(totals) {
   const by = totals?.byRegime;
   if (!by) return "";
   const rate = (hit, total) => (total ? `${Math.round((hit / total) * 100)}%` : "--");
-  const part = (label, bucket) => (bucket?.days
-    ? `${label} ${bucket.days} 天：開盤賣 ${rate(bucket.winAtOpen, bucket.signals)}・收盤賣 ${rate(bucket.winAtClose, bucket.signals)}`
-    : `${label} 0 天`);
+  // 分層也套同一個最小天數：未滿只講累積進度，不印百分比（「季線下 1 天：60%」是誤導）；達到後附區間。
+  const part = (label, bucket) => {
+    if (!bucket?.days) return `${label} 0 天`;
+    const minDays = Number(bucket.minDays) || 20;
+    if (bucket.days < minDays) return `${label} ${bucket.days} 天（累積中 ${bucket.days}/${minDays}）`;
+    const ci = bucket.ci?.winAtOpen;
+    const ciText = ci && Number.isFinite(ci.low) && Number.isFinite(ci.high) ? `（區間 ${Math.round(ci.low * 100)}～${Math.round(ci.high * 100)}%）` : "";
+    return `${label} ${bucket.days} 天：開盤賣 ${rate(bucket.winAtOpen, bucket.signals)}${ciText}・收盤賣 ${rate(bucket.winAtClose, bucket.signals)}`;
+  };
   const unknown = by.unknown?.days ? `・位階未知 ${by.unknown.days} 天` : "";
   return `<p class="verify-regime" title="以快照建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改任何選股">大盤${part("季線上", by.aboveMa60)}｜${part("季線下", by.belowMa60)}${unknown}</p>`;
 }
@@ -6254,9 +6260,15 @@ function swingScenarioName(key) {
 function swingDistributionLine(s) {
   const parts = [];
   const signed = (value) => `${value >= 0 ? "+" : ""}${value}%`;
-  if (s.profitFactor != null) parts.push(`${glossLink("獲利因子")} ${s.profitFactor}`);
-  if (s.medianResultPct != null) parts.push(`中位 ${signed(s.medianResultPct)}`);
-  if (s.maxConsecutiveLosses) parts.push(`最長連虧 ${s.maxConsecutiveLosses}`);
+  // 淨口徑優先（與勝率同一個定義），毛值括號並列；連虧以「結案日」為叢集，單位是天。
+  if (s.profitFactorNet != null || s.profitFactor != null) {
+    const net = s.profitFactorNet != null ? `淨 ${s.profitFactorNet}` : "";
+    const gross = s.profitFactor != null ? `（毛 ${s.profitFactor}）` : "";
+    parts.push(`${glossLink("獲利因子")} ${net}${gross}`.replace(/\s+$/, ""));
+  }
+  if (s.medianResultPctNet != null) parts.push(`中位 淨 ${signed(s.medianResultPctNet)}`);
+  else if (s.medianResultPct != null) parts.push(`中位 ${signed(s.medianResultPct)}`);
+  if (s.maxConsecutiveLossDays) parts.push(`最長連虧 ${s.maxConsecutiveLossDays} 天`);
   if (s.worstDay?.day) parts.push(`最差單日 ${String(s.worstDay.day).slice(4, 6)}/${String(s.worstDay.day).slice(6, 8)} ${signed(s.worstDay.avgResultPct)}（${s.worstDay.count} 筆）`);
   const wp = s.withPeriodicCall;
   const periodic = wp && Number(wp.resolved) > Number(s.continuousResolved ?? wp.resolved)
