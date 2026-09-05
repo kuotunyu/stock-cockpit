@@ -22,6 +22,8 @@ function spawnStock1({ dataDir, ...envOverrides }) {
       PORT: "0",
       DATA_DIR: dataDir,
       STOCK1_SKIP_LISTEN: "",
+      // spawn 真入口的子行程沒有 fetch-mock：排程 5 秒後就會真的打官方 API，一律關掉（守衛之外再加一道）。
+      SCHEDULER: "off",
       ADMIN_PASSWORD: "",
       APP_SECRET: "",
       ENCRYPTION_KEY: "",

@@ -21,6 +21,7 @@ function spawnStock1(dataDir, envOverrides = {}) {
       DATA_DIR: dataDir,
       DB_PATH: "",
       STOCK1_SKIP_LISTEN: "",
+      SCHEDULER: "off", // 子行程沒有 fetch-mock，排程不可武裝
       ADMIN_PASSWORD: "test-admin-pw",
       APP_SECRET: "",
       ENCRYPTION_KEY: "",

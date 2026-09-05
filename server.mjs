@@ -14015,9 +14015,26 @@ async function buildMarketBreadth() {
 // 這裡每 10 分鐘看一次：交易日、兩市場整批收盤都是今天且對齊、今天還沒落盤 → 跑一次。
 // 全部走既有的 builder（快照落盤邏輯不變），失敗只 warn、下一輪重試；SCHEDULER=off 可關。
 const SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
+// 失敗退避：10 → 20 → 40 分鐘，一天最多 3 次。以前 throw 就每 10 分鐘無退避重跑整個掃描，
+// 上游正在限流你的時候這正是最不該做的事。
+const SCHEDULER_MAX_FAILURES_PER_DAY = 3;
 const schedulerDisabled = ["off", "0", "false", "no"].includes(String(process.env.SCHEDULER || "").trim().toLowerCase());
 let closeSchedulerTimer = null;
+let closeSchedulerBootstrapTimer = null;
 let lastScheduledRunDay = "";
+let schedulerFailures = 0;
+let schedulerRetryAt = 0;
+let schedulerFailureDay = "";
+
+function closeSchedulerStateForTest() {
+  return { lastRunDay: lastScheduledRunDay, failures: schedulerFailures, retryAt: schedulerRetryAt, failureDay: schedulerFailureDay };
+}
+function resetCloseSchedulerStateForTest() {
+  lastScheduledRunDay = "";
+  schedulerFailures = 0;
+  schedulerRetryAt = 0;
+  schedulerFailureDay = "";
+}
 
 // 純決策：這一輪該不該跑、缺什麼。reference 的 asOf 是 ISO 日期字串。
 function closeTasksDue({ today, reference, db, lastRunDay }) {
@@ -14034,48 +14051,91 @@ function closeTasksDue({ today, reference, db, lastRunDay }) {
 }
 
 // 編排：deps 可注入（測試用）；正式路徑用模組內的 builder。
+// deps.lastRunDay 沒給才使用／更新模組狀態（已跑日、失敗計數、退避）；給了就是純函式模式。
 async function runScheduledCloseTasks(deps = {}) {
   const now = deps.now || new Date();
   const today = toTaipeiCompactDate(now);
-  const reference = await (deps.getReferenceData || getReferenceData)();
-  const db = await (deps.loadDb || loadDb)();
-  const lastRunDay = deps.lastRunDay !== undefined ? deps.lastRunDay : lastScheduledRunDay;
-  const decision = closeTasksDue({ today, reference, db, lastRunDay });
-  const ran = [];
-  if (!decision.due) return { ran, skipped: decision.reason };
-  if (decision.needOvernight) {
-    await (deps.buildOvernightSignals || buildOvernightSignals)({ persistSnapshot: true });
-    ran.push("overnight");
+  const useModuleState = deps.lastRunDay === undefined;
+  if (useModuleState) {
+    if (schedulerFailureDay && schedulerFailureDay !== today) {
+      schedulerFailures = 0;
+      schedulerRetryAt = 0;
+      schedulerFailureDay = "";
+    }
+    if (schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY) return { ran: [], skipped: "daily-cap", persisted: false };
+    if (now.getTime() < schedulerRetryAt) return { ran: [], skipped: "backoff", persisted: false };
   }
-  if (decision.needSwing) {
-    // buildSwingBoard 內部會先 advanceSwingVerification 再掃描落快照。
-    await (deps.buildSwingBoard || buildSwingBoard)({});
-    ran.push("swing");
-  } else {
-    // closeTasksDue 已要求兩市場整批收盤都是今天，收盤日就是今天（不需要再算眾數）。
-    await (deps.advanceSwingVerification || advanceSwingVerification)(reference, today);
-    ran.push("advance");
+  const lastRunDay = useModuleState ? lastScheduledRunDay : deps.lastRunDay;
+  const loadDbFn = deps.loadDb || loadDb;
+  try {
+    const reference = await (deps.getReferenceData || getReferenceData)();
+    const db = await loadDbFn();
+    const decision = closeTasksDue({ today, reference, db, lastRunDay });
+    const ran = [];
+    if (!decision.due) {
+      if (useModuleState) {
+        schedulerFailures = 0;
+        schedulerRetryAt = 0;
+      }
+      return { ran, skipped: decision.reason, persisted: false };
+    }
+    if (decision.needOvernight) {
+      await (deps.buildOvernightSignals || buildOvernightSignals)({ persistSnapshot: true });
+      ran.push("overnight");
+    }
+    if (decision.needSwing) {
+      // buildSwingBoard 內部會先 advanceSwingVerification 再掃描落快照。
+      await (deps.buildSwingBoard || buildSwingBoard)({});
+      ran.push("swing");
+    } else {
+      // closeTasksDue 已要求兩市場整批收盤都是今天，收盤日就是今天（不需要再算眾數）。
+      await (deps.advanceSwingVerification || advanceSwingVerification)(reference, today);
+      ran.push("advance");
+    }
+    // 跑完再看一次 DB：builder 在歷史覆蓋不足時只回 provisional、絕不落盤，這種日子不可標記「今天已跑」，
+    // 否則 README 說的「每日收盤後自動凍結」會靜默失敗、當天不再重試。
+    const after = closeTasksDue({ today, reference, db: await loadDbFn(), lastRunDay: "" });
+    const persisted = after.due && !after.needOvernight && !after.needSwing;
+    if (useModuleState) {
+      if (persisted) lastScheduledRunDay = today;
+      schedulerFailures = 0;
+      schedulerRetryAt = 0;
+    }
+    return { ran, skipped: "", persisted };
+  } catch (error) {
+    if (useModuleState) {
+      schedulerFailures += 1;
+      schedulerFailureDay = today;
+      schedulerRetryAt = now.getTime() + SCHEDULER_INTERVAL_MS * 2 ** (schedulerFailures - 1);
+    }
+    throw error;
   }
-  if (deps.lastRunDay === undefined) lastScheduledRunDay = today;
-  return { ran, skipped: "" };
 }
 
 function startCloseScheduler() {
-  // 測試行程（import 模式或 spawn 真入口的整合測試）一律不啟動：排程會真的打官方 API，測試必須離線。
-  if (schedulerDisabled || process.env.STOCK1_SKIP_LISTEN || process.env.NODE_ENV === "test" || closeSchedulerTimer) return null;
-  const tick = () => runScheduledCloseTasks().catch((error) => {
-    console.warn("[Stock1] 收盤排程這一輪失敗（下一輪重試）：", error?.message || error);
-  });
+  // 測試行程（import 模式、node --test 的子行程、spawn 真入口的整合測試）一律不啟動：
+  // 排程會真的打官方 API，測試必須離線。NODE_TEST_CONTEXT 由 node --test 設定並被 spawn 繼承。
+  if (schedulerDisabled || process.env.STOCK1_SKIP_LISTEN || process.env.NODE_ENV === "test" || process.env.NODE_TEST_CONTEXT || closeSchedulerTimer) return null;
+  const tick = () => {
+    // 關機中或尚未 ready 不跑：lease 釋放後再寫 DB 正是 writer lease 要擋的雙 writer。
+    if (shutdownRequested || lifecycleStatus !== "ready") return;
+    runScheduledCloseTasks().catch((error) => {
+      console.warn(`[Stock1] 收盤排程這一輪失敗（第 ${schedulerFailures} 次，${schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY ? "今天不再重試" : `${Math.round((schedulerRetryAt - Date.now()) / 60000)} 分鐘後重試`}）：`, error?.message || error);
+    });
+  };
   closeSchedulerTimer = setInterval(tick, SCHEDULER_INTERVAL_MS);
   closeSchedulerTimer.unref();
-  // 啟動後 5 秒先跑一次：收盤後才開機的日子不用等 10 分鐘。
-  setTimeout(tick, 5000).unref();
+  // 啟動後 5 秒先跑一次：收盤後才開機的日子不用等 10 分鐘。handle 要留著，關機時一起清。
+  closeSchedulerBootstrapTimer = setTimeout(tick, 5000);
+  closeSchedulerBootstrapTimer.unref();
   return closeSchedulerTimer;
 }
 
 function stopCloseScheduler() {
   if (closeSchedulerTimer) clearInterval(closeSchedulerTimer);
+  if (closeSchedulerBootstrapTimer) clearTimeout(closeSchedulerBootstrapTimer);
   closeSchedulerTimer = null;
+  closeSchedulerBootstrapTimer = null;
 }
 
 function shutdownServer(_options = {}) {
@@ -14325,6 +14385,7 @@ export {
   loadStaticAsset,
   // 收盤後排程（close-scheduler.test）
   closeTasksDue, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
+  SCHEDULER_MAX_FAILURES_PER_DAY, closeSchedulerStateForTest, resetCloseSchedulerStateForTest,
   // 事件日曆／市場位階（market-events.test）
   thirdWednesday, upcomingMarketEvents, summarizeMarketBreadth, buildMarketBreadth,
   // 上櫃除權息候選池（tpex-exright-candidate.test）
