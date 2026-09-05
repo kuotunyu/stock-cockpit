@@ -7854,9 +7854,9 @@ body.is-locked .app-shell {
 
 .verify-history-row {
   display: grid;
-  grid-template-columns: 118px 90px repeat(4, minmax(82px, 1fr));
+  grid-template-columns: 118px 90px repeat(5, minmax(78px, 1fr));
   gap: 8px;
-  min-width: 680px;
+  min-width: 760px;
   align-items: center;
   padding: 8px 10px;
   border-radius: 8px;

@@ -5556,7 +5556,8 @@ function renderSignalVerification() {
     `;
   }
   const summary = data.summary || {};
-  const hitTone = summary.total && summary.hitPlus2 / summary.total >= 0.5 ? "positive" : "negative";
+  // 勝率 ≥50% 才染紅；不再用「綠」表示不到一半——綠在本站是跌，會被讀成方向。
+  const rateTone = (count, total) => (total && Number(count) / Number(total) >= 0.5 ? "positive" : "");
   const topRows = (data.rows || []).slice(0, 6);
   const isIntraday = data.observationPhase === "intraday";
   const phaseLabel = isIntraday ? "盤中暫定" : data.complete === false ? "正式收盤 · 部分待補" : "正式收盤";
@@ -5572,8 +5573,11 @@ function renderSignalVerification() {
         </div>
         <div class="verify-stats">
           ${coverageLabel ? `<span>${escapeHtml(coverageLabel)}</span>` : ""}
-          <span class="${hitTone}">達+2%：${summary.hitPlus2 ?? 0}/${summary.total ?? 0}</span>
-          <span class="negative">破-2%：${summary.brokeMinus2 ?? 0}/${summary.total ?? 0}</span>
+          <span class="${rateTone(summary.winAtOpen, summary.total)}" title="觀察日開盤價賣出、扣一買一賣費稅後淨報酬 > 0 的檔數（可執行的口徑）">開盤賣勝率 ${summary.winAtOpen ?? 0}/${summary.total ?? 0}</span>
+          <span class="${rateTone(summary.winAtClose, summary.total)}" title="${isIntraday ? "以現價賣出" : "觀察日收盤價賣出"}、扣費稅後淨報酬 > 0 的檔數">${isIntraday ? "現價賣勝率" : "收盤賣勝率"} ${summary.winAtClose ?? 0}/${summary.total ?? 0}</span>
+          <span title="觀察日最高價曾碰到 +2%——盤中曾觸及，不是可實現損益；要在最高價出場得預掛限價單，觸及也不保證成交">盤中曾達 +2%：${summary.hitPlus2 ?? 0}/${summary.total ?? 0}</span>
+          <span title="觀察日最低價曾碰到 −2%——與「曾達」可同時成立，高振幅的日子兩者常一起出現">盤中曾破 −2%：${summary.brokeMinus2 ?? 0}/${summary.total ?? 0}</span>
+          <span>平均開盤 ${formatGrossWithNet(summary.avgOpenReturn, summary.avgOpenReturnNet)}</span>
           <span>${isIntraday ? "平均現價" : "平均收盤"} ${formatGrossWithNet(summary.avgCurrentReturn, summary.avgCurrentReturnNet)}</span>
         </div>
       </header>
@@ -5588,7 +5592,7 @@ function renderSignalVerification() {
           `)
           .join("")}
       </div>
-      <small>觀察日依官方交易日序列判定；每檔日期必須完全相等。基準＝訊號日收盤價，達標看觀察日最高、破線看觀察日最低；盤中結果不會寫入正式長期統計。</small>
+      <small>觀察日依官方交易日序列判定；每檔日期必須完全相等。基準＝訊號日收盤價。「曾達／曾破」看觀察日最高／最低，是盤中曾觸及、不是可實現損益；勝率看開盤賣／收盤賣扣費稅後是否為正。盤中結果不會寫入正式長期統計。</small>
     </section>
   `;
 }
@@ -5635,26 +5639,38 @@ function renderVerifyHistory() {
         <div class="verify-history-row">
           <span>${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
           <span>${record.verified} 檔</span>
-          <span class="${record.verified && record.hitPlus2 / record.verified >= 0.5 ? "positive" : ""}">${rate(record.hitPlus2, record.verified)}</span>
-          <span class="${record.verified && record.brokeMinus2 / record.verified >= 0.4 ? "negative" : ""}">${rate(record.brokeMinus2, record.verified)}</span>
-          <span>${formatSignedPercent(record.avgHighReturn)}</span>
+          <span>${rate(record.winAtOpen, record.verified)}</span>
+          <span>${rate(record.hitPlus2, record.verified)}</span>
+          <span>${rate(record.brokeMinus2, record.verified)}</span>
+          <span>${formatSignedPercent(record.avgOpenReturn)}</span>
           <span>${formatSignedPercent(record.avgCloseReturn)}</span>
         </div>
       `)
     .join("");
   const totals = data.totals;
+  // 累計未滿 minDays 不染色、明講「累積中」；達到後附以「日」為叢集的 95% 信賴區間，染色看下界 ≥50%。
+  // 15 天的區間約 ±8 個百分點——50% 與 57% 分不開，卻一個染色一個不染，那正是舊畫面的問題。
+  const minDays = Number(totals?.minDays) || 20;
+  const enoughDays = Boolean(totals) && Number(totals.days) >= minDays;
+  const ciText = (ci) => (enoughDays && ci && Number.isFinite(ci.low) && Number.isFinite(ci.high)
+    ? `（${Math.round(ci.low * 100)}～${Math.round(ci.high * 100)}%）`
+    : "");
+  const ciTone = (ci) => (enoughDays && ci && Number.isFinite(ci.low) && ci.low >= 0.5 ? "positive" : "");
   return `
     <section class="verify-history" aria-label="實際驗證紀錄">
       <header>
         <div>
           <strong>實際驗證紀錄（前向，不是回測）</strong>
-          <span>每筆訊號只用官方認定的實際下一交易日對答案；部分資料不進累計。達成率是延續機率統計，不是預測保證。</span>
+          <span>每筆訊號只用官方認定的實際下一交易日對答案；部分資料不進累計。勝率是「開盤賣／收盤賣扣費稅後為正」的比例；「曾達／曾破」只是盤中曾觸及。累計未滿 ${minDays} 天不當結論。</span>
         </div>
         ${totals ? `
           <div class="verify-stats">
-            <span>累計 ${totals.days} 天 / ${totals.signals} 檔</span>
-            <span class="${totals.signals && totals.hitPlus2 / totals.signals >= 0.5 ? "positive" : ""}">達+2% ${rate(totals.hitPlus2, totals.signals)}</span>
-            <span class="negative">破-2% ${rate(totals.brokeMinus2, totals.signals)}</span>
+            <span>累計 ${totals.days} 天 / ${totals.signals} 檔${enoughDays ? "" : `・累積中 ${totals.days}/${minDays} 天`}</span>
+            <span class="${ciTone(totals.ci?.winAtOpen)}" title="開盤價賣出、扣費稅後淨報酬 > 0 的比例；括號是以日為叢集的 95% 信賴區間">開盤賣勝率 ${rate(totals.winAtOpen, totals.signals)}${ciText(totals.ci?.winAtOpen)}</span>
+            <span class="${ciTone(totals.ci?.winAtClose)}" title="收盤價賣出、扣費稅後淨報酬 > 0 的比例">收盤賣勝率 ${rate(totals.winAtClose, totals.signals)}${ciText(totals.ci?.winAtClose)}</span>
+            <span class="${ciTone(totals.ci?.hitPlus2)}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">曾達+2% ${rate(totals.hitPlus2, totals.signals)}${ciText(totals.ci?.hitPlus2)}</span>
+            <span title="觀察日最低價曾碰到 −2%">曾破−2% ${rate(totals.brokeMinus2, totals.signals)}</span>
+            <span>平均開盤 ${formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
             <span>平均隔日收 ${formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
           </div>
         ` : ""}
@@ -5662,9 +5678,10 @@ function renderVerifyHistory() {
       <div class="verify-history-row is-head">
         <span>訊號→觀察</span>
         <span>驗證檔數</span>
-        <span>達+2%</span>
-        <span>破-2%</span>
-        <span>平均最高</span>
+        <span>開盤賣勝率</span>
+        <span>曾達+2%</span>
+        <span>曾破−2%</span>
+        <span>平均開盤</span>
         <span>平均收盤</span>
       </div>
       ${rows}
@@ -5693,8 +5710,10 @@ function renderBacktestPerformance() {
           <span>樣本 ${item.sampleSize ?? 0} 次</span>
         </header>
         <dl>
-          <div><dt>隔日達 +2%</dt><dd>${rate(item.hitPlus2Rate)}</dd></div>
-          <div><dt>隔日破 -2%</dt><dd>${rate(item.brokeMinus2Rate)}</dd></div>
+          <div><dt>開盤賣勝率</dt><dd>${rate(item.winAtOpenRate)}</dd></div>
+          <div><dt>收盤賣勝率</dt><dd>${rate(item.winAtCloseRate)}</dd></div>
+          <div><dt>盤中曾達 +2%</dt><dd>${rate(item.hitPlus2Rate)}</dd></div>
+          <div><dt>盤中曾破 −2%</dt><dd>${rate(item.brokeMinus2Rate)}</dd></div>
           <div><dt>平均開盤</dt><dd>${ret(item.avgOpenReturn)}</dd></div>
           <div><dt>平均最高</dt><dd>${ret(item.avgHighReturn)}</dd></div>
           <div><dt>平均收盤</dt><dd>${formatGrossWithNet(item.avgCloseReturn, item.avgCloseReturnNet)}</dd></div>

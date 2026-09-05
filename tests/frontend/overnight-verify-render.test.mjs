@@ -86,3 +86,60 @@ test("歷史驗證以訊號→觀察呈現，partial 明示暫不納入累計", 
   assert.match(html, /累計 1 天 \/ 2 檔/);
   assert.match(html, /部分資料不進累計/);
 });
+
+test("單日驗證：勝率改成可執行口徑（開盤賣／收盤賣），觸及改名「曾達／曾破」，不到一半不染綠", () => {
+  const html = normalized(app.evalIn(`(() => {
+    verifyState.data = {
+      ok: true, available: true, signalDate: "2026-07-10", observationDate: "2026-07-13", observationPhase: "final",
+      expectedSignals: 4, verifiedSignals: 4,
+      summary: { total: 4, hitPlus2: 1, brokeMinus2: 2, winAtOpen: 3, winAtClose: 1, avgOpenReturn: 0.8, avgOpenReturnNet: 0.33, avgCurrentReturn: -0.2 },
+      rows: [],
+    };
+    verifyState.loading = false;
+    verifyState.error = "";
+    return renderSignalVerification();
+  })()`));
+  assert.match(html, /開盤賣勝率 3\/4/);
+  assert.match(html, /收盤賣勝率 1\/4/);
+  assert.match(html, /盤中曾達 \+2%：1\/4/);
+  assert.match(html, /盤中曾破 −2%：2\/4/);
+  assert.match(html, /平均開盤/);
+  assert.doesNotMatch(html, /達\+2%：/, "舊文案不可殘留");
+  const host = app.doc.createElement("div");
+  host.innerHTML = html;
+  const chips = [...host.querySelectorAll(".verify-stats span")];
+  assert.ok(chips.find((c) => c.textContent.includes("開盤賣勝率")).classList.contains("positive"), "3/4 ≥ 50% 染紅");
+  assert.equal(chips.find((c) => c.textContent.includes("收盤賣勝率")).classList.contains("positive"), false);
+  assert.ok(chips.every((c) => !c.classList.contains("negative")), "不到一半不可用綠色（綠＝跌）");
+});
+
+test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附信賴區間、染色看下界", () => {
+  const render = (totals) => normalized(app.evalIn(`(() => {
+    verifyHistoryState.data = { ok: true, totals: ${JSON.stringify(totals)}, records: [
+      { asOf: "2026-07-10", observationDate: "2026-07-13", status: "final", pending: false, complete: true,
+        signals: 2, verified: 2, hitPlus2: 1, brokeMinus2: 0, winAtOpen: 2, winAtClose: 1, avgOpenReturn: 0.9, avgHighReturn: 2.4, avgCloseReturn: 1.25 },
+    ] };
+    verifyHistoryState.loading = false;
+    verifyHistoryState.error = "";
+    return renderVerifyHistory();
+  })()`));
+  const few = render({ days: 5, signals: 60, hitPlus2: 40, brokeMinus2: 10, winAtOpen: 45, winAtClose: 33, avgOpenReturn: 0.5, avgCloseReturn: 0.3, minDays: 20,
+    ci: { hitPlus2: { n: 5, mean: 0.66, low: 0.55, high: 0.77 }, winAtOpen: { n: 5, mean: 0.75, low: 0.6, high: 0.9 }, winAtClose: null } });
+  assert.match(few, /累積中 5\/20 天/);
+  assert.doesNotMatch(few, /（\d+～\d+%）/, "未滿 20 天不顯示區間");
+  let host = app.doc.createElement("div");
+  host.innerHTML = few;
+  assert.ok([...host.querySelectorAll(".verify-stats span")].every((c) => !c.classList.contains("positive")), "未滿 20 天不染色");
+
+  const enough = render({ days: 25, signals: 300, hitPlus2: 200, brokeMinus2: 50, winAtOpen: 225, winAtClose: 120, avgOpenReturn: 0.5, avgCloseReturn: 0.3, minDays: 20,
+    ci: { hitPlus2: { n: 25, mean: 0.66, low: 0.45, high: 0.87 }, winAtOpen: { n: 25, mean: 0.75, low: 0.6, high: 0.9 }, winAtClose: null } });
+  assert.match(enough, /開盤賣勝率 75%（60～90%）/);
+  assert.match(enough, /曾達\+2% 67%（45～87%）/);
+  host = app.doc.createElement("div");
+  host.innerHTML = enough;
+  const chips = [...host.querySelectorAll(".verify-stats span")];
+  assert.ok(chips.find((c) => c.textContent.includes("開盤賣勝率")).classList.contains("positive"), "下界 60% ≥ 50% 染色");
+  assert.equal(chips.find((c) => c.textContent.includes("曾達+2%")).classList.contains("positive"), false, "點估計 67% 但下界 45% 不染");
+  assert.match(enough, /開盤賣勝率.*曾達\+2%.*曾破−2%.*平均開盤.*平均收盤/, "表頭七欄");
+  assert.match(enough, /100%/, "該日 winAtOpen 2/2");
+});

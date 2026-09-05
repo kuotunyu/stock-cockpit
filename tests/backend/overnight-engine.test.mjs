@@ -126,3 +126,18 @@ test("nextDayPerformance：最後一根沒有隔日、訊號日無收盤 → nul
   assert.equal(mod.nextDayPerformance([{ close: 100 }], 0), null);
   assert.equal(mod.nextDayPerformance([{ close: 0 }, { open: 1, high: 1, low: 1, close: 1 }], 0), null);
 });
+
+test("nextDayPerformance：可執行勝率（開盤賣／收盤賣）用淨報酬判定，與「盤中曾觸及」分開", () => {
+  const perf = mod.nextDayPerformance([{ close: 100 }, { open: 100.4, high: 102.5, low: 97.5, close: 99 }], 0);
+  assert.equal(perf.hitPlus2, true, "盤中曾達 +2%");
+  assert.equal(perf.brokeMinus2, true, "同一天也曾破 −2%——兩者不互斥");
+  assert.ok(Math.abs(perf.openReturn - 0.4) < 1e-9, String(perf.openReturn));
+  assert.equal(perf.openReturnNet, mod.netReturnPct(perf.openReturn));
+  assert.equal(perf.winAtOpen, false, "毛 +0.4% 扣 0.471% 成本後是輸的");
+  assert.equal(perf.closeReturnNet, mod.netReturnPct(-1));
+  assert.equal(perf.winAtClose, false);
+  const perf2 = mod.nextDayPerformance([{ close: 100 }, { open: 101, high: 101, low: 100, close: 100.6 }], 0);
+  assert.equal(perf2.winAtOpen, true, "毛 +1% 淨 +0.529%");
+  assert.equal(perf2.winAtClose, true, "毛 +0.6% 淨 +0.129%");
+  assert.equal(perf2.hitPlus2, false);
+});

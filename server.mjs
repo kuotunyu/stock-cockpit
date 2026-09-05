@@ -8121,7 +8121,34 @@ const OVERNIGHT_FORMULA_VERSION = "overnight-v3-liquidity-floor";
 // 2026-07-13 前的快照尚未存 formulaVersion；當時只有這一版公式。
 // 這個常數刻意與 current 分開，未來升版時不可把缺欄位舊資料誤認成新版。
 const LEGACY_OVERNIGHT_FORMULA_VERSION = "overnight-v1-aggressive-controlled";
-const OVERNIGHT_SNAPSHOT_LIMIT = 15;
+// 一年份交易日。以前是 15：成績單永遠「累計 ≤15 天」，同一天 40~60 檔共享大盤 beta，
+// 有效樣本 ≈ 天數，15 天的 95% 信賴區間約 ±8 個百分點——50% 與 57% 分不開，卻一個染色一個不染。
+// 每天約 60 筆 × 8 欄位，260 份體積可忽略。
+const OVERNIGHT_SNAPSHOT_LIMIT = 260;
+// 與波段的 WIN_RATE_MIN_SAMPLES 同精神：累計天數低於此，成績單的百分比不當結論呈現（不染色）。
+const OVERNIGHT_MIN_DAYS = 20;
+
+// 以「日」為叢集的 95% 信賴區間：用每日達成率的樣本標準差算標準誤，n＝有驗證數的天數。
+// 回 null 代表「算不出來」（不足 2 天），不是 0。
+function dayClusterCi(records, countField, denomField = "verified") {
+  const rates = (records || [])
+    .map((record) => {
+      const denom = Number(record?.[denomField]);
+      return denom > 0 ? Number(record?.[countField] || 0) / denom : null;
+    })
+    .filter((rate) => Number.isFinite(rate));
+  const n = rates.length;
+  if (n < 2) return null;
+  const mean = average(rates);
+  const variance = rates.reduce((sum, rate) => sum + (rate - mean) ** 2, 0) / (n - 1);
+  const se = Math.sqrt(variance) / Math.sqrt(n);
+  return {
+    n,
+    mean: roundTo(mean, 4),
+    low: roundTo(Math.max(0, mean - 1.96 * se), 4),
+    high: roundTo(Math.min(1, mean + 1.96 * se), 4),
+  };
+}
 
 function overnightSnapshotFormulaVersion(snapshot) {
   return String(snapshot?.formulaVersion || LEGACY_OVERNIGHT_FORMULA_VERSION);
@@ -8754,6 +8781,11 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
       currentReturn,
       hitPlus2: highReturn !== null && highReturn >= 2,
       brokeMinus2: lowReturn !== null && lowReturn <= -2,
+      // 可執行勝率（同 nextDayPerformance）：淨報酬 > 0 才算贏；盤中階段 currentReturn 是現價。
+      openReturnNet: netReturnPct(openReturn),
+      currentReturnNet: netReturnPct(currentReturn),
+      winAtOpen: openReturn !== null && netReturnPct(openReturn) > 0,
+      winAtClose: currentReturn !== null && netReturnPct(currentReturn) > 0,
       observationSource: evidence.source,
       observationPhase: evidence.phase || "final",
       ...(corporateActionAdjusted
@@ -8852,6 +8884,9 @@ async function buildVerificationHistory() {
       pending: observed.status !== "final",
       hitPlus2: perfs.filter((item) => item.hitPlus2).length,
       brokeMinus2: perfs.filter((item) => item.brokeMinus2).length,
+      winAtOpen: perfs.filter((item) => item.winAtOpen).length,
+      winAtClose: perfs.filter((item) => item.winAtClose).length,
+      avgOpenReturn: average(perfs.map((item) => item.openReturn)),
       avgHighReturn: average(perfs.map((item) => item.highReturn)),
       avgCloseReturn: average(perfs.map((item) => item.currentReturn)),
       warnings: observed.warnings,
@@ -8861,15 +8896,28 @@ async function buildVerificationHistory() {
   // 長期正式統計只納入「觀察日已收盤且全部訊號都完成」的日子；partial 先顯示、不污染分母。
   const done = records.filter((record) => record.complete);
   const verifiedTotal = done.reduce((sum, record) => sum + record.verified, 0);
+  const weightedAvg = (field) => (verifiedTotal
+    ? done.reduce((sum, record) => sum + (record[field] || 0) * record.verified, 0) / verifiedTotal
+    : null);
   const totals = done.length
     ? {
         days: done.length,
         signals: verifiedTotal,
         hitPlus2: done.reduce((sum, record) => sum + record.hitPlus2, 0),
         brokeMinus2: done.reduce((sum, record) => sum + record.brokeMinus2, 0),
-        avgCloseReturn: verifiedTotal
-          ? done.reduce((sum, record) => sum + (record.avgCloseReturn || 0) * record.verified, 0) / verifiedTotal
-          : null,
+        winAtOpen: done.reduce((sum, record) => sum + record.winAtOpen, 0),
+        winAtClose: done.reduce((sum, record) => sum + record.winAtClose, 0),
+        avgOpenReturn: weightedAvg("avgOpenReturn"),
+        avgOpenReturnNet: netReturnPct(weightedAvg("avgOpenReturn")),
+        avgCloseReturn: weightedAvg("avgCloseReturn"),
+        avgCloseReturnNet: netReturnPct(weightedAvg("avgCloseReturn")),
+        // 低於 minDays 前端不染色；達到後附以「日」為叢集的 95% 信賴區間，染色看下界。
+        minDays: OVERNIGHT_MIN_DAYS,
+        ci: {
+          hitPlus2: dayClusterCi(done, "hitPlus2"),
+          winAtOpen: dayClusterCi(done, "winAtOpen"),
+          winAtClose: dayClusterCi(done, "winAtClose"),
+        },
       }
     : null;
 
@@ -8888,7 +8936,8 @@ async function buildVerificationHistory() {
     },
     notes: [
       "觀察日依證交所實際交易日／開休市表判定，且只接受日期完全相等的官方 OHLC。",
-      "基準＝訊號日收盤；達 +2% 看觀察日最高，破 -2% 看觀察日最低。partial 不納入長期正式統計。",
+      "基準＝訊號日收盤。「曾達 +2%／曾破 −2%」看觀察日最高／最低，是盤中曾觸及、不是可實現損益，兩者可同時成立；可執行勝率看「開盤賣／收盤賣」的淨報酬是否 > 0。partial 不納入長期正式統計。",
+      `百分比附的 ± 是以「日」為叢集的 95% 信賴區間（同一天的訊號共享大盤走勢，有效樣本≈天數）；累計未滿 ${OVERNIGHT_MIN_DAYS} 天不當結論呈現。`,
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
@@ -8936,6 +8985,10 @@ async function buildSignalVerification() {
     total: items.length,
     hitPlus2: items.filter((row) => row.hitPlus2).length,
     brokeMinus2: items.filter((row) => row.brokeMinus2).length,
+    winAtOpen: items.filter((row) => row.winAtOpen).length,
+    winAtClose: items.filter((row) => row.winAtClose).length,
+    avgOpenReturn: average(items.map((row) => row.openReturn)),
+    avgOpenReturnNet: netReturnPct(average(items.map((row) => row.openReturn))),
     avgCurrentReturn: average(items.map((row) => row.currentReturn)),
     avgHighReturn: average(items.map((row) => row.highReturn)),
     // 毛報酬保留原值不動；並陳扣掉來回費稅的估算淨值（見 VERIFY_COST_NOTE）。
@@ -9005,8 +9058,15 @@ function nextDayPerformance(history, signalIndex) {
     highReturn,
     closeReturn,
     lowReturn,
+    // 「曾觸及」：盤中最高／最低碰到 ±2%。它是 MFE／MAE，不是可實現損益（要在最高價出場得預掛限價單，
+    // 觸及也不保證成交），而且兩者不互斥——高振幅的日子常常同時成立。
     hitPlus2: highReturn !== null && highReturn >= 2,
     brokeMinus2: lowReturn !== null && lowReturn <= -2,
+    // 「可執行」：開盤賣／收盤賣的淨報酬（扣 VERIFY_ROUND_TRIP_COST_PCT）> 0 才算贏。
+    openReturnNet: netReturnPct(openReturn),
+    closeReturnNet: netReturnPct(closeReturn),
+    winAtOpen: openReturn !== null && netReturnPct(openReturn) > 0,
+    winAtClose: closeReturn !== null && netReturnPct(closeReturn) > 0,
   };
 }
 
@@ -9061,6 +9121,8 @@ async function buildBacktestUncached({ days = 30 } = {}) {
       avgCloseReturnNet: netReturnPct(average(perf.map((item) => item.closeReturn))),
       hitPlus2Rate: perf.length ? perf.filter((item) => item.hitPlus2).length / perf.length : null,
       brokeMinus2Rate: perf.length ? perf.filter((item) => item.brokeMinus2).length / perf.length : null,
+      winAtOpenRate: perf.length ? perf.filter((item) => item.winAtOpen).length / perf.length : null,
+      winAtCloseRate: perf.length ? perf.filter((item) => item.winAtClose).length / perf.length : null,
     };
   }
 
@@ -13534,7 +13596,7 @@ export {
   computeMetrics, evaluateGroups, scoreStrong, scoreDanger, scoreReversal, nextDayPerformance,
   buildOvernightSignals, buildBacktest, OVERNIGHT_CACHE_MAX_ENTRIES, BACKTEST_CACHE_MAX_ENTRIES,
   // 前向驗證（signal-verify.test）
-  OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, overnightSnapshotFormulaVersion,
+  OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, OVERNIGHT_MIN_DAYS, dayClusterCi, overnightSnapshotFormulaVersion,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
   holidayCalendarCoversYear,
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,

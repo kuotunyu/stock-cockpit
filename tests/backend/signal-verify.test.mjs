@@ -107,15 +107,16 @@ test("saveSignalSnapshot：同日快照——較短不覆蓋（半個市場）�
   assert.equal(db.signalSnapshots[0].picks[0].price, 101);
 });
 
-test("saveSignalSnapshot：只保留最近 15 份（依訊號日排序砍最舊）", async () => {
-  const seed = Array.from({ length: 15 }, (_, i) => ({
-    asOf: iso(compactTradingDay(-(20 - i))), savedAt: "", picks: [pickOf()],
+test("saveSignalSnapshot：只保留最近 OVERNIGHT_SNAPSHOT_LIMIT 份（依訊號日排序砍最舊）", async () => {
+  const limit = mod.OVERNIGHT_SNAPSHOT_LIMIT;
+  const seed = Array.from({ length: limit }, (_, i) => ({
+    asOf: iso(compactTradingDay(-(limit + 5 - i))), savedAt: "", picks: [pickOf()],
   }));
   const db = await resetSnapshots(seed);
   await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { a: [pickOf()] } });
-  assert.equal(db.signalSnapshots.length, 15);
+  assert.equal(db.signalSnapshots.length, limit);
   assert.ok(db.signalSnapshots.some((s) => s.asOf === iso(YESTERDAY)), "新的一份要在");
-  assert.ok(!db.signalSnapshots.some((s) => s.asOf === iso(compactTradingDay(-20))), "最舊的要被砍");
+  assert.ok(!db.signalSnapshots.some((s) => s.asOf === iso(compactTradingDay(-(limit + 5)))), "最舊的要被砍");
 });
 
 test("saveSignalSnapshot：同日不同公式版本互不覆蓋，舊缺欄位明確視為 v1", async () => {
