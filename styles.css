@@ -7336,11 +7336,13 @@ body.is-locked .app-shell {
 }
 
 @media (max-width: 760px) {
+  /* 「?」放來源列右側：第一列塞進第四個元素會把市場 pill 擠成兩行（375px 實測），
+     第一列維持 market／title／actions，help 佔第二列的右欄。 */
   .topbar {
-    grid-template-columns: auto 1fr auto auto;
+    grid-template-columns: auto 1fr auto;
     grid-template-areas:
-      "market title help actions"
-      "source source source source";
+      "market title actions"
+      "source source help";
     gap: 7px;
     padding-left: 10px;
     padding-right: 10px;
@@ -7352,6 +7354,7 @@ body.is-locked .app-shell {
 
   .screen-help {
     grid-area: help;
+    align-self: start;
   }
 
   .topbar h1 {
@@ -8784,19 +8787,29 @@ body.is-locked .app-shell {
   }
 }
 
+/* 375px 手機：第一列 market＋title＋actions 剛好等於可用寬度，市場 pill 會被擠成兩行（「台／指 +473」）。
+   ⇄ 只是裝飾提示（aria-hidden），窄螢幕收掉、pill 不換行。 */
+@media (max-width: 400px) {
+  .market-pill { white-space: nowrap; }
+  .market-pill .pill-swap { display: none; }
+}
+
 /* 極窄手機不縮小主字級，改收斂固定欄寬與邊距，守住卡片不橫溢。 */
 @media (max-width: 340px) {
   .topbar {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr);
     grid-template-areas:
-      "market title help"
-      "source source source"
-      "actions actions actions";
+      "market title"
+      "source source"
+      "help actions";
   }
   .top-actions {
     display: grid;
     grid-template-columns: repeat(3, 44px);
-    justify-content: center;
+    justify-content: end;
+  }
+  .screen-help {
+    align-self: center;
   }
   .bottom-nav {
     display: flex;
