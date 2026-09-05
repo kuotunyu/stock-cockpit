@@ -388,3 +388,29 @@ test("取消一般交易修正只還原表單，不送 PUT", async () => {
   assert.equal(app.evalIn(`tradesEditingId`), "");
   assert.equal(app.evalIn(`!!el.holdingsPanel.querySelector('[data-trade-edit-cancel]')`), false);
 });
+
+test("驗證錯誤：表單內 role=alert 錯誤列可見、焦點移到出錯欄位並標 aria-invalid；重送時先清掉", () => {
+  const result = JSON.parse(app.evalIn(`JSON.stringify((() => {
+    const form = el.holdingsPanel.querySelector('[data-trade-form]');
+    form.elements.code.value = "AB";
+    form.elements.price.value = "100";
+    form.elements.shares.value = "1000";
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    const box = form.querySelector("[data-trade-form-error]");
+    const first = { hidden: box.hidden, text: box.textContent, role: box.getAttribute("role"), invalid: form.elements.code.getAttribute("aria-invalid"), focused: document.activeElement === form.elements.code };
+    form.elements.code.value = "2330";
+    form.elements.price.value = "0";
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    const second = { text: box.textContent, codeInvalid: form.elements.code.getAttribute("aria-invalid"), priceInvalid: form.elements.price.getAttribute("aria-invalid"), focused: document.activeElement === form.elements.price };
+    return { first, second };
+  })())`));
+  assert.equal(result.first.hidden, false);
+  assert.match(result.first.text, /4～6 碼/);
+  assert.equal(result.first.role, "alert");
+  assert.equal(result.first.invalid, "true");
+  assert.equal(result.first.focused, true, "焦點要移到出錯的欄位");
+  assert.match(result.second.text, /成交價要是正數/);
+  assert.equal(result.second.codeInvalid, null, "重送時先清掉上一次的標記");
+  assert.equal(result.second.priceInvalid, "true");
+  assert.equal(result.second.focused, true);
+});

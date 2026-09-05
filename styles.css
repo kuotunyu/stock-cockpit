@@ -4122,6 +4122,27 @@ button.today-focus-card:focus-visible {
   white-space: nowrap;
 }
 
+/* 交易帳本表單的 inline 錯誤列（role=alert）＋出錯欄位的標記 */
+.trade-form-error {
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--error-text);
+  border-radius: 8px;
+  color: var(--error-text);
+  font-size: var(--fs-body);
+  font-weight: 700;
+}
+.trade-form [aria-invalid="true"] {
+  border-color: var(--error-text) !important;
+}
+
+/* 資料出處徽章（全站同一套）：官方＝綠、估算＝琥珀、凍結＝青、沿用舊資料＝灰。
+   只定義顏色語意，尺寸交給所在脈絡（隔日沖 chip、雷達註記、明細 tab 徽章各自維持原版面）。 */
+.provenance-badge[data-kind="official"] { color: #86ffad; }
+.provenance-badge[data-kind="estimated"] { color: var(--warn-text); }
+.provenance-badge[data-kind="frozen"] { color: var(--info-text); }
+.provenance-badge[data-kind="stale"] { color: var(--muted-2); }
+
 /* 更多頁分兩組（看盤設定／帳號與維護）：標題吃滿整列 */
 .more-group {
   grid-column: 1 / -1;

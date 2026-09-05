@@ -103,10 +103,11 @@ test("隔日沖總覽：驗證成績單排在三組清單之後，標題說的�
     verifyState.data = { ok: true, available: true, signalDate: "2026-09-04", observationDate: "2026-09-05", observationPhase: "final", summary: { total: 1, hitPlus2: 1, brokeMinus2: 0 }, rows: [] };
     renderOvernightGroups();
     const html = el.overnightGroups.innerHTML;
-    return { focus: html.indexOf("today-focus-panel"), verify: html.indexOf("verify-panel") };
+    return { focus: html.indexOf("today-focus-panel"), verify: html.indexOf("verify-panel"), badge: html.includes('class="provenance-badge" data-kind="official"') };
   })()`);
   assert.ok(result.focus >= 0 && result.verify >= 0, JSON.stringify(result));
   assert.ok(result.verify > result.focus, "驗證卡必須在訊號重點與清單之後");
+  assert.equal(result.badge, true, "來源 chip 要套 provenance-badge token");
 });
 
 test("列表：第一次載入用三列 skeleton；篩選生效時的 0 筆要說「篩選後」", () => {

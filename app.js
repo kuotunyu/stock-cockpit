@@ -2783,6 +2783,32 @@ function selectedTradeOption(actual, expected) {
   return actual === expected ? " selected" : "";
 }
 
+// 表單驗證錯誤以前只走 toast：手機上 toast 在表單下方、幾秒就消失，使用者不知道哪一格錯；
+// 讀屏只聽到 polite 通知，焦點還停在送出鈕。改成表單內 role=alert 的錯誤列＋焦點移到出錯欄位
+//（aria-invalid），toast 保留當補充。
+function clearTradeFormError(form) {
+  const box = form?.querySelector("[data-trade-form-error]");
+  if (box) {
+    box.textContent = "";
+    box.hidden = true;
+  }
+  form?.querySelectorAll('[aria-invalid="true"]').forEach((field) => field.removeAttribute("aria-invalid"));
+}
+
+function showTradeFormError(form, fieldName, message) {
+  const box = form?.querySelector("[data-trade-form-error]");
+  if (box) {
+    box.textContent = message;
+    box.hidden = false;
+  }
+  const field = fieldName && form?.elements ? form.elements[fieldName] : null;
+  if (field && typeof field.focus === "function") {
+    field.setAttribute("aria-invalid", "true");
+    field.focus();
+  }
+  showToast(message);
+}
+
 function syncTradeFormControls(form, { focusDividend = false } = {}) {
   if (!form) return;
   const side = form.elements.side?.value || "buy";
@@ -3502,6 +3528,7 @@ function renderHoldingsPanel() {
     </div>
     <form class="trade-form${editingRecord ? " is-editing" : ""}" data-trade-form${editingRecord ? ` data-editing-id="${escapeHtml(editingRecord.id)}"` : ""}>
       ${editingRecord ? `<div class="trade-edit-banner" role="status"><strong>正在修正 ${escapeHtml(byCode.get(editingRecord.code)?.name || editingRecord.code)} ${escapeHtml(editingRecord.code)}</strong><span>儲存後保留原紀錄編號與建立時間；清空實際費稅會改回估算。</span></div>` : ""}
+      <p class="trade-form-error" data-trade-form-error role="alert" hidden></p>
       <div class="trade-form-main">
         <label><span>代號</span><input name="code" placeholder="2330／00725B" value="${escapeHtml(String(editingRecord?.code || state.selectedCode || ""))}" maxlength="6" autocapitalize="characters" aria-label="證券代號" required /></label>
         <label><span>類別</span><select name="side" aria-label="買賣別">
@@ -5504,7 +5531,7 @@ function renderOvernightGroups() {
         <span><b>觀察日</b>${dateLabels.observationLabel}</span>
       </div>
       <div class="overnight-summary-facts">
-        <span><b>來源</b>${overnightState.source}</span>
+        <span><b>來源</b><span class="provenance-badge" data-kind="official">${escapeHtml(overnightState.source)}</span></span>
         <span><b>注意／處置</b>${state.showSurveillance ? `標示中 ${overnightState.surveillanceCount} 檔` : "目前隱藏"}</span>
         <span><b>週轉率</b>依官方發行股數</span>
         ${state.overnightView !== "overview" ? `<span>${activeGroup?.[2] || ""}</span>` : ""}
@@ -6231,7 +6258,7 @@ function renderStrategyBoard() {
             <span class="m-sep" aria-hidden="true"></span>
             <span class="m" title="注意股／處置股改為標示、不再排除（可在『更多 → 風險規則』切換隱藏）；低流動性個股仍先濾掉">${state.showSurveillance ? `含 <span class="m-v2">注意／處置股</span>` : `已隱藏 <span class="m-v2">注意／處置股</span>`}</span>
             <span class="m-sep" aria-hidden="true"></span>
-            <span class="m m-note" title="波段型態當日收盤凍結（非即時）——這份榜單一天只算一次、盤中不會跳動；內容為技術統計，非買賣建議。"><span class="note-ic" aria-hidden="true">ⓘ</span>收盤凍結・非買賣建議</span>
+            <span class="m m-note provenance-badge" data-kind="frozen" title="波段型態當日收盤凍結（非即時）——這份榜單一天只算一次、盤中不會跳動；內容為技術統計，非買賣建議。"><span class="note-ic" aria-hidden="true">ⓘ</span>收盤凍結・非買賣建議</span>
           </div>
         </div>
       `
@@ -10056,7 +10083,7 @@ function renderDetail() {
       return `
         <button class="${label === state.indicator ? "is-active" : ""} is-${meta.tone}" data-indicator="${label}" type="button" aria-pressed="${label === state.indicator}">
           <span>${label}</span>
-          <small>${meta.badge}</small>
+          <small class="provenance-badge" data-kind="${meta.tone === "local" ? "official" : meta.tone === "estimate" ? "estimated" : "stale"}">${meta.badge}</small>
         </button>
       `;
     })
@@ -11130,46 +11157,47 @@ document.addEventListener("submit", (event) => {
         feeAmountTwd: null,
       } : {}),
     };
+    clearTradeFormError(tradeForm);
     if (!isValidSecurityCode(fields.code)) {
-      showToast("請輸入 4～6 碼的英數證券代號");
+      showTradeFormError(tradeForm, "code", "請輸入 4～6 碼的英數證券代號");
       return;
     }
     if (editingRecord && fields.side === "dividend") {
-      showToast("買賣紀錄不能改成股利；請另新增一筆股利紀錄");
+      showTradeFormError(tradeForm, "side", "買賣紀錄不能改成股利；請另新增一筆股利紀錄");
       return;
     }
     if (!isValidTradeDateInput(fields.date)) {
-      showToast("請選擇有效的成交日，且不可晚於台北今天");
+      showTradeFormError(tradeForm, "date", "請選擇有效的成交日，且不可晚於台北今天");
       return;
     }
     if (!Number.isFinite(fields.price) || fields.price <= 0 || !Number.isInteger(fields.shares) || fields.shares <= 0) {
-      showToast("成交價要是正數，股數要是正整數（1 張 = 1000 股）");
+      showTradeFormError(tradeForm, "price", "成交價要是正數，股數要是正整數（1 張 = 1000 股）");
       return;
     }
     if (feeText && (!Number.isFinite(fields.feeAmountTwd) || fields.feeAmountTwd < 0)) {
-      showToast("券商實際手續費必須是 0 或正數");
+      showTradeFormError(tradeForm, "feeAmountTwd", "券商實際手續費必須是 0 或正數");
       return;
     }
     if (taxText && (!Number.isFinite(fields.taxAmountTwd) || fields.taxAmountTwd < 0)) {
-      showToast("券商實際證交稅必須是 0 或正數");
+      showTradeFormError(tradeForm, "taxAmountTwd", "券商實際證交稅必須是 0 或正數");
       return;
     }
     if (isConfirmedDayTrade) {
       if (fields.side !== "sell" || instrumentType !== "stock") {
-        showToast("股票當沖減半稅率只適用已確認的股票賣出");
+        showTradeFormError(tradeForm, "dayTradeStatus", "股票當沖減半稅率只適用已確認的股票賣出");
         return;
       }
       if (!Number.isInteger(matchedShares) || matchedShares <= 0 || matchedShares > fields.shares) {
-        showToast("請填券商確認的當沖配對股數，且不可超過本筆成交股數");
+        showTradeFormError(tradeForm, "matchedShares", "請填券商確認的當沖配對股數，且不可超過本筆成交股數");
         return;
       }
       if (["oddLot", "block"].includes(session)) {
-        showToast("零股與鉅額交易不適用現股當沖");
+        showTradeFormError(tradeForm, "session", "零股與鉅額交易不適用現股當沖");
         return;
       }
     }
     if (fields.side === "dividend" && (!String(tradeForm.elements.receivedAmount?.value || "").trim() || !Number.isFinite(fields.receivedAmount) || fields.receivedAmount < 0)) {
-      showToast("手動記錄已入帳股利時，請填實際收到的總金額");
+      showTradeFormError(tradeForm, "receivedAmount", "手動記錄已入帳股利時，請填實際收到的總金額");
       return;
     }
     document.activeElement?.blur?.(); // 讓面板可重繪

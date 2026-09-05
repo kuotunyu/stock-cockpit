@@ -198,7 +198,8 @@ test("交易日期以台北今天為上限，且提交時會攔截無效或未�
 
 test("空庫存與未登入的空狀態", () => {
   seed({ portfolio: { ok: true, holdings: [], realized: [], totals: { cost: 0, realizedPnl: 0 } } });
-  app.evalIn(`state.watchList = "hold"; renderHoldingsPanel();`);
+  // 前面的測試可能把焦點留在表單欄位（驗證失敗會移焦），renderHoldingsPanel 會為了保護輸入而跳過重繪。
+  app.evalIn(`document.activeElement?.blur?.(); state.watchList = "hold"; renderHoldingsPanel();`);
   assert.ok(app.evalIn(`el.holdingsPanel.textContent`).includes("目前沒有庫存"));
   app.evalIn(`const u = authState.user; authState.user = null; renderHoldingsPanel(); authState.user = u;`);
   assert.ok(app.evalIn(`el.holdingsPanel.textContent`).includes("需要登入"));
