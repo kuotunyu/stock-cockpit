@@ -6661,7 +6661,7 @@ function rowTemplate(stock, screen = state.screen) {
   const dayLow = Number.isFinite(Number(stock.low)) ? Number(stock.low) : (sparkValues.length ? Math.min(...sparkValues) : null);
   const cells = `
     <span class="stock-cell stock-main">
-      <span class="kbar ${kbarSignal}"></span>
+      <span class="kbar ${kbarSignal}"><i class="kbar-dir" aria-hidden="true"></i></span>
       <span class="stock-name">
         <strong>${escapeHtml(stock.name)}</strong>
         <span>${stock.code}${alertsForCode(stock.code).some((alert) => alert.active) ? `<span class="alert-bell" title="已設到價提醒">🔔</span>` : ""}</span>
@@ -7192,6 +7192,22 @@ function renderTechnicalSurveillance() {
   `;
 }
 
+// K 棒實體：漲＝空心（只描邊）、跌＝實心。台灣看盤軟體的常見約定，也是紅綠色弱下除顏色以外的
+// 第二編碼——--red 與 --green 在色弱視覺下明度相近，細細的 K 棒單靠色相分不出方向。
+// 呼叫前 strokeStyle／fillStyle 已設成該方向的顏色；空心用面板底色把實體填掉再描邊。
+const CANDLE_HOLLOW_FILL = "#17191b";
+function drawCandleBody(context, up, x, y, width, height) {
+  if (up) {
+    const prevFill = context.fillStyle;
+    context.fillStyle = CANDLE_HOLLOW_FILL;
+    context.fillRect(x, y, width, height);
+    context.fillStyle = prevFill;
+    context.strokeRect(x + 0.5, y + 0.5, Math.max(1, width - 1), Math.max(1, height - 1));
+    return;
+  }
+  context.fillRect(x, y, width, height);
+}
+
 function movingAverage(values, windowSize) {
   return values.map((_, index) => {
     const start = Math.max(0, index - windowSize + 1);
@@ -7271,7 +7287,7 @@ function drawDetailHistoryChart(context, stock, candles, width, height) {
     context.stroke();
     const yOpen = priceToY(candle.open);
     const yClose = priceToY(candle.close);
-    context.fillRect(x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)));
+    drawCandleBody(context, up, x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)));
   });
 
   const closes = candles.map((row) => row.close);
@@ -8092,12 +8108,8 @@ function drawTechnicalChart(data, options = {}) {
     context.font = "700 13px 'Stock1 Plex Mono', IBM Plex Mono, Microsoft JhengHei, sans-serif";
     context.textAlign = "left";
     context.fillText(`${data.code} ${data.name} ${formatTechnicalPeriod(data.period)}`, left, 18);
-    drawTechnicalCanvasLegend(context, [
-      { label: "MA5", color: "#2db7ff", width: 3 },
-      { label: "MA20", color: "#ffd94d", width: 3 },
-      { label: "壓力線", color: "#ff8093", width: 3, dash: [9, 6] },
-      { label: "支撐線", color: "#4ce6d4", width: 3, dash: [9, 6] },
-    ], left, 36, plotRight - 8);
+    // 圖內不再畫第二套圖例：圖上方的 chip 列（帶數值）與右側 lane 標記已經是兩套，三套是雜訊。
+    // 放大圖沒有 chip 列，仍保留它自己的圖例（drawZoomChart）。
   }
 
   // 放大且縮放某一段時，把價格面板的趨勢線／均線／K 棒裁切在面板內，避免延伸到座標軌。
@@ -8130,7 +8142,7 @@ function drawTechnicalChart(data, options = {}) {
     context.moveTo(x, yHigh);
     context.lineTo(x, yLow);
     context.stroke();
-    context.fillRect(x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)));
+    drawCandleBody(context, up, x - candleWidth / 2, Math.min(yOpen, yClose), candleWidth, Math.max(2, Math.abs(yClose - yOpen)));
   });
 
   if (clipPrice) context.restore();

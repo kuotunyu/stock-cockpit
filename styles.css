@@ -59,6 +59,12 @@
   --on-down: #fff;
   --cyan: #2db7ff;
   --yellow: #ffd94d;
+  /* 語意色三件組（2026-09-05）：警告＝琥珀、錯誤＝非漲紅的粉紅、資訊＝青。
+     以前 warn/error 各自手寫了六種色相，紅字同時是「漲」「錯誤」「資料可信度警告」；
+     --yellow 只留給「分母損耗／盈虧比偏低」這類資訊。 */
+  --warn-text: var(--orange-2);
+  --error-text: #ff9d94;
+  --info-text: var(--cyan);
   --violet: #c44dff;
   --shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
   /* 圓角尺度（2026-07-16 定，勿再混用中間值）：2-4px 微件（kbd/色塊）｜6px 小控件/小chip｜
@@ -200,7 +206,7 @@ button {
 }
 
 .source-switch.is-error small {
-  color: #ff8d8d;
+  color: var(--error-text);
 }
 
 .market-pill {
@@ -687,7 +693,7 @@ button {
 }
 
 .overnight-summary .overnight-warning {
-  color: #ffd08a;
+  color: var(--warn-text);
   font-size: 16px;
   font-weight: 850;
 }
@@ -881,8 +887,9 @@ button.today-focus-card:focus-visible {
 }
 
 .data-trust-card.is-warn {
-  border-color: rgba(255, 77, 61, 0.38);
-  background: rgba(255, 77, 61, 0.065);
+  /* 警告用琥珀，不用紅：紅在本站是「漲」 */
+  border-color: rgba(255, 177, 44, 0.42);
+  background: rgba(255, 177, 44, 0.07);
 }
 
 .data-trust-card.is-good strong {
@@ -894,7 +901,7 @@ button.today-focus-card:focus-visible {
 }
 
 .data-trust-card.is-warn strong {
-  color: #ff9d94;
+  color: var(--warn-text);
 }
 
 /* 四張行動重點完整佔首列；資料可信度改為橫向狀態列，不再留下第五格造成的空白。 */
@@ -2022,6 +2029,20 @@ button.today-focus-card:focus-visible {
   color: var(--green);
 }
 
+/* 紅綠色弱：K 棒除顏色外加 ▲／▼ 第二編碼（形狀不靠色相） */
+.kbar.red .kbar-dir::before { content: "▲"; }
+.kbar.green .kbar-dir::before { content: "▼"; }
+.kbar-dir {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -14px;
+  text-align: center;
+  font-size: var(--fs-badge);
+  line-height: 1;
+  color: currentColor;
+}
+
 .kbar.white {
   color: white;
 }
@@ -2104,22 +2125,24 @@ button.today-focus-card:focus-visible {
   line-height: 1.2;
 }
 
+/* 漲跌停 chip：白字要壓在 surface 色上才有 4.5:1（--red 上只有 3.8、#13a837 上只有 3.1） */
 .price-chip.hot-red {
-  background: var(--red);
+  background: var(--up-surface);
   color: white;
 }
 
 .price-chip.hot-green {
-  background: #13a837;
+  background: var(--down-surface);
   color: white;
 }
 
+/* 文字用可讀的 --up-text/--down-text；--red/--green 只給 K 棒與 bar（資料圖形） */
 .positive {
-  color: var(--red);
+  color: var(--up-text);
 }
 
 .negative {
-  color: var(--green);
+  color: var(--down-text);
 }
 
 .muted {
@@ -2564,7 +2587,8 @@ button.today-focus-card:focus-visible {
   cursor: not-allowed;
   border-color: rgba(255, 255, 255, 0.08);
   background: #202326;
-  color: var(--dim);
+  color: var(--muted);
+  opacity: 0.6;
 }
 
 .watch-remove-selected svg {
@@ -2691,9 +2715,9 @@ button.today-focus-card:focus-visible {
 }
 
 .technical-status.is-error {
-  border-color: rgba(255, 38, 33, 0.6);
-  background: rgba(255, 38, 33, 0.1);
-  color: #ffb5b5;
+  border-color: rgba(255, 157, 148, 0.6);
+  background: rgba(255, 157, 148, 0.1);
+  color: var(--error-text);
 }
 
 /* ===== 公司概況（技術分析頁：產業別 + 手動編輯簡介） ===== */
@@ -2779,7 +2803,7 @@ button.today-focus-card:focus-visible {
 }
 
 .company-summary-text.is-error {
-  color: #ff9d9d;
+  color: var(--error-text);
   font-weight: 700;
 }
 
@@ -4087,7 +4111,7 @@ button.today-focus-card:focus-visible {
 }
 
 .more-status strong.is-warn {
-  color: var(--orange);
+  color: var(--warn-text);
 }
 
 .more-status small {
@@ -4261,7 +4285,7 @@ button.today-focus-card:focus-visible {
 }
 
 .more-detail dd.is-warn {
-  color: var(--orange);
+  color: var(--warn-text);
 }
 
 /* 次要說明（隱私揭露、操作提示）：備註級字級，仍在 --fs-note 下限之上。 */
@@ -4553,11 +4577,6 @@ button.today-focus-card:focus-visible {
   border-radius: 12px;
   background: #17191b;
   outline: none;
-}
-
-.personal-backup-modal:focus-visible {
-  outline: 2px solid var(--orange);
-  outline-offset: -2px;
 }
 
 .personal-backup-head {
@@ -5356,7 +5375,7 @@ body.is-locked .app-shell {
 }
 
 .chart-metrics-note.is-warn {
-  color: var(--orange-2);
+  color: var(--warn-text);
 }
 
 .chart-metric strong {
@@ -5397,7 +5416,7 @@ body.is-locked .app-shell {
 }
 
 .chart-metric.is-warn strong {
-  color: var(--orange-2);
+  color: var(--warn-text);
 }
 
 .detail-chart-wrap {
@@ -5700,7 +5719,7 @@ body.is-locked .app-shell {
 }
 
 .search-status.is-error {
-  color: var(--orange-2);
+  color: var(--error-text);
 }
 
 /* 名詞 / 觀念解釋 modal：沿用 .modal-backdrop，內容較高、可滾動、分類 chips + 搜尋 */
@@ -6124,11 +6143,6 @@ body.is-locked .app-shell {
   transform: translateY(1px);
 }
 
-.strategy-legend-toggle:focus-visible {
-  outline: 2px solid var(--orange);
-  outline-offset: 2px;
-}
-
 .strategy-legend-toggle .legend-toggle-ic {
   font-size: 15px;
   color: var(--orange-2);
@@ -6287,7 +6301,7 @@ body.is-locked .app-shell {
 }
 
 .strategy-empty.is-error {
-  color: #ff8a86;
+  color: var(--error-text);
 }
 
 .strategy-empty.is-loading {
@@ -6324,11 +6338,6 @@ body.is-locked .app-shell {
   border-color: rgba(245, 154, 8, 0.6);
   background-color: #1c1f22;
   box-shadow: inset 3px 0 0 var(--orange);
-}
-
-.swing-card:focus-visible {
-  outline: 2px solid var(--orange);
-  outline-offset: 2px;
 }
 
 /* 排名＋評分徽章：沿用隔日沖 pick-rank 的橘框語言 */
@@ -7885,7 +7894,7 @@ body.is-locked .app-shell {
 }
 
 .notes-hint.is-error {
-  color: #ff9d9d;
+  color: var(--error-text);
 }
 
 .note-form {
@@ -8026,7 +8035,7 @@ body.is-locked .app-shell {
 }
 
 .overnight-summary .overnight-warning {
-  color: #ffcf7a;
+  color: var(--warn-text);
   font-weight: 800;
 }
 
@@ -8461,7 +8470,7 @@ body.is-locked .app-shell {
 .surv-help-body dl { margin: 0; display: grid; gap: 11px; }
 .surv-help-body dt { font-size: var(--fs-body); font-weight: 900; padding-left: 9px; border-left: 3px solid var(--line); }
 .surv-help-body dt.is-soon { border-left-color: var(--red); color: var(--up-text); }
-.surv-help-body dt.is-attn { border-left-color: var(--yellow); color: #f5c45a; }
+.surv-help-body dt.is-attn { border-left-color: var(--yellow); color: var(--warn-text); }
 .surv-help-body dt.is-changed { border-left-color: #8aa0b8; color: #b7c6d8; }
 .surv-help-body dt.is-block { border-left-color: var(--violet); color: #c4b5fd; }
 .surv-help-body dd { margin: 3px 0 0 12px; font-size: 15px; color: var(--muted-2); }
@@ -8569,7 +8578,7 @@ body.is-locked .app-shell {
   font-size: var(--surv-fs-secondary);
   font-weight: 900;
   line-height: 1.25;
-  color: #ffce82;
+  color: var(--muted-2); /* 分盤是交易限制資訊，不是「選中」——橘色是全站的選中／品牌色 */
   white-space: nowrap;
 }
 .surv-card-quote {
@@ -8870,7 +8879,7 @@ body.is-locked .app-shell {
 .fund-head strong { color: #dce5ee; font-size: 16px; font-weight: 900; }
 .fund-asof { color: var(--muted); font-size: var(--fs-note); font-weight: 700; }
 .fund-hint { margin: 0; color: var(--muted-2); font-size: var(--fs-note); }
-.fund-hint.is-warn { color: var(--orange-2, #f5c45a); }
+.fund-hint.is-warn { color: var(--warn-text); }
 .fund-grid {
   display: grid;
   grid-template-columns: minmax(220px, 1.6fr) repeat(3, minmax(150px, 1fr));
