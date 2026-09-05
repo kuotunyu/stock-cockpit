@@ -3380,9 +3380,34 @@ function applyCorporateActionQuoteBaseline(quote) {
 // 補基準。走 fetchStockHistoryMonth 而不是 getStockHistory：後者會回頭呼叫 getReferenceData，
 // 在 referenceInFlight 內會等到自己、死鎖。
 const TPEX_BASELINE_MAX_CODES = 40;
-async function restoreTpexCorporateActionBaselines(byCode, tpexDate, warnings) {
+// 某一天的官方參考價不會變，所以以 code:date 為鍵記一整天。以前只靠 historyCache（當月 5 分鐘），
+// 與 REFERENCE_TTL_MS 同時到期，等於每 5 分鐘對同一批除權息股重抓一次逐檔月歷史。
+const TPEX_BASELINE_BUDGET_MS = 8000;
+const TPEX_BASELINE_CACHE_LIMIT = 512;
+const tpexBaselineCache = new Map(); // "code:date" → { previousClose, expiresAt }
+function rememberTpexBaseline(code, date, previousClose) {
+  const key = `${code}:${date}`;
+  tpexBaselineCache.delete(key);
+  tpexBaselineCache.set(key, { previousClose, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+  while (tpexBaselineCache.size > TPEX_BASELINE_CACHE_LIMIT) tpexBaselineCache.delete(tpexBaselineCache.keys().next().value);
+}
+function cachedTpexBaseline(code, date) {
+  const key = `${code}:${date}`;
+  const hit = tpexBaselineCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) {
+    tpexBaselineCache.delete(key);
+    return null;
+  }
+  return hit.previousClose;
+}
+
+// 這段跑在 getReferenceData 的 single-flight 內：所有依賴參考資料的端點都在後面排隊，所以
+// 整批要有預算（fetchJson 單檔最壞 20 秒 ×2，40 檔併發 3 可以卡 9 分鐘）。逾時後晚到的結果只寫快取、
+// 不再動 byCode——下一輪刷新就是零成本命中。
+async function restoreTpexCorporateActionBaselines(byCode, tpexDate, warnings, { budgetMs = TPEX_BASELINE_BUDGET_MS } = {}) {
   const date = toCompactDate(tpexDate);
-  if (!date) return { restored: 0, unresolved: [] };
+  if (!date) return { restored: 0, unresolved: [], cached: 0, timedOut: false };
   const targets = [...byCode.values()].filter((quote) => (
     quote.exchange === "TPEx"
     && quote.change === null
@@ -3392,33 +3417,66 @@ async function restoreTpexCorporateActionBaselines(byCode, tpexDate, warnings) {
   ));
   const unresolved = [];
   let restored = 0;
-  await mapLimit(targets.slice(0, TPEX_BASELINE_MAX_CODES), 3, async (quote) => {
-    try {
-      const rows = await fetchStockHistoryMonth(quote.code, "TPEx", `${date.slice(0, 6)}01`, quote.name);
-      const exact = (rows || []).find((row) => toCompactDate(row.date) === date);
-      const reference = Number(exact?.exchangePreviousClose);
-      if (!Number.isFinite(reference) || reference <= 0) {
-        unresolved.push(quote.code);
-        return;
-      }
-      const change = quote.price - reference;
-      byCode.set(quote.code, {
-        ...quote,
-        previousClose: reference,
-        change,
-        changePct: (change / reference) * 100,
-        corporateActionBaseline: true,
-      });
-      restored += 1;
-    } catch {
-      unresolved.push(quote.code);
+  let cached = 0;
+  let timedOut = false;
+  let expired = false;
+  const apply = (quote, reference) => {
+    const change = quote.price - reference;
+    byCode.set(quote.code, {
+      ...quote,
+      previousClose: reference,
+      change,
+      changePct: (change / reference) * 100,
+      corporateActionBaseline: true,
+    });
+    restored += 1;
+  };
+  const pending = [];
+  for (const quote of targets.slice(0, TPEX_BASELINE_MAX_CODES)) {
+    const hit = cachedTpexBaseline(quote.code, date);
+    if (hit) {
+      apply(quote, hit);
+      cached += 1;
+    } else {
+      pending.push(quote);
     }
-  });
-  if (targets.length > TPEX_BASELINE_MAX_CODES) unresolved.push(...targets.slice(TPEX_BASELINE_MAX_CODES).map((quote) => quote.code));
-  if (unresolved.length) {
-    warnings.push(`上櫃除權息日有 ${unresolved.length} 檔查不到官方參考價，這輪不進候選池：${unresolved.slice(0, 5).join("、")}${unresolved.length > 5 ? "…" : ""}`);
   }
-  return { restored, unresolved };
+  const settled = new Set();
+  if (pending.length) {
+    const batch = mapLimit(pending, 3, async (quote) => {
+      try {
+        const rows = await fetchStockHistoryMonth(quote.code, "TPEx", `${date.slice(0, 6)}01`, quote.name);
+        const exact = (rows || []).find((row) => toCompactDate(row.date) === date);
+        const reference = Number(exact?.exchangePreviousClose);
+        if (!Number.isFinite(reference) || reference <= 0) {
+          if (!expired) unresolved.push(quote.code);
+          return;
+        }
+        rememberTpexBaseline(quote.code, date, reference);
+        if (expired) return;
+        apply(quote, reference);
+      } catch {
+        if (!expired) unresolved.push(quote.code);
+      } finally {
+        if (!expired) settled.add(quote.code);
+      }
+    });
+    try {
+      await withPromiseTimeout(batch, budgetMs, "上櫃參考價補抓");
+    } catch {
+      expired = true;
+      timedOut = true;
+      const late = pending.filter((quote) => !settled.has(quote.code)).map((quote) => quote.code);
+      unresolved.push(...late);
+      warnings.push(`上櫃除權息日補參考價逾時（超過 ${Math.round(budgetMs / 1000)} 秒），${late.length} 檔這輪不進候選池：${late.slice(0, 5).join("、")}${late.length > 5 ? "…" : ""}`);
+    }
+  }
+  if (targets.length > TPEX_BASELINE_MAX_CODES) unresolved.push(...targets.slice(TPEX_BASELINE_MAX_CODES).map((quote) => quote.code));
+  const missing = unresolved.filter((code) => !warnings.some((text) => text.includes("逾時") && text.includes(code)));
+  if (missing.length) {
+    warnings.push(`上櫃除權息日有 ${missing.length} 檔查不到官方參考價，這輪不進候選池：${missing.slice(0, 5).join("、")}${missing.length > 5 ? "…" : ""}`);
+  }
+  return { restored, unresolved, cached, timedOut };
 }
 
 function normalizeDailyTwse(row) {
@@ -14243,7 +14301,7 @@ export {
   // 事件日曆／市場位階（market-events.test）
   thirdWednesday, upcomingMarketEvents, summarizeMarketBreadth, buildMarketBreadth,
   // 上櫃除權息候選池（tpex-exright-candidate.test）
-  restoreTpexCorporateActionBaselines, TPEX_BASELINE_MAX_CODES,
+  restoreTpexCorporateActionBaselines, TPEX_BASELINE_MAX_CODES, TPEX_BASELINE_BUDGET_MS,
   // 伺服器
   server, startServer, shutdownServer,
 };

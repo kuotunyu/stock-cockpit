@@ -26,7 +26,7 @@ const routes = [
   },
 ];
 
-const { mod } = await importServer({ routes });
+const { mod, mock } = await importServer({ routes });
 
 test("整批 Change 是中文時，用逐檔月歷史的官方參考價補基準；候選池不再缺席、不發 warning", async () => {
   const reference = await mod.getReferenceData();
@@ -52,10 +52,36 @@ test("查不到參考價：保留 null（候選池仍濾掉）並發 warning；�
   ]);
   const warnings = [];
   const result = await mod.restoreTpexCorporateActionBaselines(byCode, today, warnings);
-  assert.deepEqual(result, { restored: 0, unresolved: ["8888"] });
+  assert.deepEqual(result, { restored: 0, unresolved: ["8888"], cached: 0, timedOut: false });
   assert.equal(byCode.get("8888").previousClose, null, "查不到就不猜");
   assert.ok(warnings.some((w) => w.includes("8888") && w.includes("查不到官方參考價")), warnings.join(" | "));
   assert.equal(mod.TPEX_BASELINE_MAX_CODES, 40);
   const picks = mod.preselectQuotes({ byCode, warnings: [] }, { halted: new Map(), delisted: new Set() }, today, 260);
   assert.ok(!picks.some((item) => (item?.quote?.code ?? item?.code) === "8888"), "沒補到基準的仍不進候選池");
+});
+
+// ---- 第二輪第一批：參考價當天不會變，不可每 5 分鐘重抓；上游卡住時整批要有預算 ----
+test("同一個 code:date 第二次不再打上游（日快取），byCode 照樣補到", async () => {
+  const before = mock.callsFor(/tradingStock\?code=6435/).length;
+  assert.ok(before >= 1, "第一個測試已經抓過一次");
+  const byCode = new Map([["6435", { code: "6435", name: "大中", exchange: "TPEx", price: 265, change: null, previousClose: null, rawDate: today }]]);
+  const warnings = [];
+  const result = await mod.restoreTpexCorporateActionBaselines(byCode, today, warnings);
+  assert.deepEqual(result, { restored: 1, unresolved: [], cached: 1, timedOut: false });
+  assert.equal(byCode.get("6435").previousClose, 262.5);
+  assert.equal(byCode.get("6435").corporateActionBaseline, true);
+  assert.equal(mock.callsFor(/tradingStock\?code=6435/).length, before, "快取命中不得再打上游");
+  assert.equal(warnings.length, 0);
+});
+
+test("上游永不回應：整批在預算內 resolve，該碼進 unresolved 並警告「逾時」，不卡住 getReferenceData", async () => {
+  const byCode = new Map([["7777", { code: "7777", name: "卡住", exchange: "TPEx", price: 30, change: null, previousClose: null, rawDate: today }]]);
+  const warnings = [];
+  const started = Date.now();
+  const result = await mod.restoreTpexCorporateActionBaselines(byCode, today, warnings, { budgetMs: 200 });
+  assert.ok(Date.now() - started < 1500, "必須在預算附近就回來");
+  assert.deepEqual(result, { restored: 0, unresolved: ["7777"], cached: 0, timedOut: true });
+  assert.equal(byCode.get("7777").previousClose, null);
+  assert.ok(warnings.some((w) => w.includes("逾時") && w.includes("7777")), warnings.join(" | "));
+  assert.equal(mod.TPEX_BASELINE_BUDGET_MS, 8000);
 });
