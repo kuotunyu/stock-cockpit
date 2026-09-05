@@ -13663,8 +13663,79 @@ async function performShutdown() {
 }
 
 // 刻意不是 async：同一輪多次呼叫必須拿到完全相同的 Promise，讓 signal／測試安全共用。
+// ===== 收盤後排程 =====
+// 以前整支 server 沒有任何 setInterval：隔日沖快照、波段快照、驗證推進全靠有人開 App。
+// 後果有三：成績單的「有紀錄日」與使用者行為相關（大跌日沒人開就不進分母）；朋友第一次 clone
+// 每個畫面都要等 10~60 秒冷計算；README 說的「每日收盤後自動凍結」其實是「有人開頁時」。
+// 這裡每 10 分鐘看一次：交易日、兩市場整批收盤都是今天且對齊、今天還沒落盤 → 跑一次。
+// 全部走既有的 builder（快照落盤邏輯不變），失敗只 warn、下一輪重試；SCHEDULER=off 可關。
+const SCHEDULER_INTERVAL_MS = 10 * 60 * 1000;
+const schedulerDisabled = ["off", "0", "false", "no"].includes(String(process.env.SCHEDULER || "").trim().toLowerCase());
+let closeSchedulerTimer = null;
+let lastScheduledRunDay = "";
+
+// 純決策：這一輪該不該跑、缺什麼。reference 的 asOf 是 ISO 日期字串。
+function closeTasksDue({ today, reference, db, lastRunDay }) {
+  if (!today) return { due: false, reason: "no-date" };
+  if (lastRunDay === today) return { due: false, reason: "already-ran" };
+  const twse = toCompactDate(reference?.markets?.twse?.asOf || "") || "";
+  const tpex = toCompactDate(reference?.markets?.tpex?.asOf || "") || "";
+  if (!reference?.coverageComplete || twse !== today || tpex !== today) return { due: false, reason: "reference-not-today" };
+  const hasOvernight = (Array.isArray(db?.signalSnapshots) ? db.signalSnapshots : [])
+    .some((snapshot) => toCompactDate(snapshot?.asOf) === today && overnightSnapshotFormulaVersion(snapshot) === OVERNIGHT_FORMULA_VERSION);
+  const swingStored = db?.swingSnapshots?.[`${today}:all`];
+  const hasSwing = Boolean(swingStored?.body && swingStored.body.formulaVersion === SWING_FORMULA_VERSION && !swingStored.body.provisional);
+  return { due: true, reason: "ok", needOvernight: !hasOvernight, needSwing: !hasSwing };
+}
+
+// 編排：deps 可注入（測試用）；正式路徑用模組內的 builder。
+async function runScheduledCloseTasks(deps = {}) {
+  const now = deps.now || new Date();
+  const today = toTaipeiCompactDate(now);
+  const reference = await (deps.getReferenceData || getReferenceData)();
+  const db = await (deps.loadDb || loadDb)();
+  const lastRunDay = deps.lastRunDay !== undefined ? deps.lastRunDay : lastScheduledRunDay;
+  const decision = closeTasksDue({ today, reference, db, lastRunDay });
+  const ran = [];
+  if (!decision.due) return { ran, skipped: decision.reason };
+  if (decision.needOvernight) {
+    await (deps.buildOvernightSignals || buildOvernightSignals)({ persistSnapshot: true });
+    ran.push("overnight");
+  }
+  if (decision.needSwing) {
+    // buildSwingBoard 內部會先 advanceSwingVerification 再掃描落快照。
+    await (deps.buildSwingBoard || buildSwingBoard)({});
+    ran.push("swing");
+  } else {
+    // closeTasksDue 已要求兩市場整批收盤都是今天，收盤日就是今天（不需要再算眾數）。
+    await (deps.advanceSwingVerification || advanceSwingVerification)(reference, today);
+    ran.push("advance");
+  }
+  if (deps.lastRunDay === undefined) lastScheduledRunDay = today;
+  return { ran, skipped: "" };
+}
+
+function startCloseScheduler() {
+  // 測試行程（import 模式或 spawn 真入口的整合測試）一律不啟動：排程會真的打官方 API，測試必須離線。
+  if (schedulerDisabled || process.env.STOCK1_SKIP_LISTEN || process.env.NODE_ENV === "test" || closeSchedulerTimer) return null;
+  const tick = () => runScheduledCloseTasks().catch((error) => {
+    console.warn("[Stock1] 收盤排程這一輪失敗（下一輪重試）：", error?.message || error);
+  });
+  closeSchedulerTimer = setInterval(tick, SCHEDULER_INTERVAL_MS);
+  closeSchedulerTimer.unref();
+  // 啟動後 5 秒先跑一次：收盤後才開機的日子不用等 10 分鐘。
+  setTimeout(tick, 5000).unref();
+  return closeSchedulerTimer;
+}
+
+function stopCloseScheduler() {
+  if (closeSchedulerTimer) clearInterval(closeSchedulerTimer);
+  closeSchedulerTimer = null;
+}
+
 function shutdownServer(_options = {}) {
   shutdownRequested = true;
+  stopCloseScheduler();
   if (!shutdownPromise) shutdownPromise = performShutdown();
   return shutdownPromise;
 }
@@ -13728,6 +13799,8 @@ async function performStart(listenPort, listenHost) {
     const address = server.address();
     const actualPort = typeof address === "object" && address ? address.port : listenPort;
     console.log(`Stock1 server: http://${listenHost}:${actualPort}/`);
+    // ready 之後才開排程：它會呼叫既有的 builder，必須等 DB 與 lease 都就緒。
+    if (startCloseScheduler()) console.log("[Stock1] 收盤排程已啟動：每 10 分鐘檢查一次，兩市場整批收盤對齊後自動掃描並推進驗證（SCHEDULER=off 可關）。");
     // 原本只看環境變數：使用者在 UI 改完密碼之後，每次啟動還是照噴這一行；
     // 反過來在既有 DB 上設了 ADMIN_PASSWORD 就不噴了，但 hash 根本沒換。改看 DB 的實際狀態。
     // 全新安裝時這行必定出現，那正是它該做的事——把「密碼是公開的預設值」講出來，
@@ -13904,6 +13977,8 @@ export {
   readAppBuildInfo, readGitHubRepo, readPackedRef, normalizeUpdateComparison,
   // 靜態資產快取（api-data.test 的 ETag／gzip 契約）
   loadStaticAsset,
+  // 收盤後排程（close-scheduler.test）
+  closeTasksDue, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
   // 伺服器
   server, startServer, shutdownServer,
 };
