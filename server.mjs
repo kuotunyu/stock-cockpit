@@ -9092,6 +9092,68 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
 }
 
 // 把每天存下來的訊號快照，逐日對照真實的隔日 OHLC，累積成長期成績單。
+// 快照裡落盤的 final 觀察結果（只有 complete 且同一公式版本的才用；版本一換就整份重觀察）。
+function storedObservationFor(snapshot) {
+  const stored = snapshot?.observed;
+  if (!stored || stored.complete !== true || stored.status !== "final") return null;
+  if (stored.formulaVersion !== overnightSnapshotFormulaVersion(snapshot)) return null;
+  if (!Array.isArray(stored.rows)) return null;
+  return {
+    ...stored,
+    observationPhase: "final",
+    warnings: Array.isArray(stored.warnings) ? stored.warnings : [],
+  };
+}
+
+// 寫回快照的精簡版：只留成績單用得到的欄位（不把整個 pick 與證據再存一份）。一次 mutation 寫全部。
+async function persistFinalObservations(entries) {
+  const compactRows = (rows) => rows.map((row) => ({
+    code: row.code,
+    verified: Boolean(row.verified),
+    ...(row.pendingReason ? { pendingReason: row.pendingReason } : {}),
+    hitPlus2: Boolean(row.hitPlus2),
+    brokeMinus2: Boolean(row.brokeMinus2),
+    winAtOpen: Boolean(row.winAtOpen),
+    winAtClose: Boolean(row.winAtClose),
+    openReturn: Number.isFinite(row.openReturn) ? row.openReturn : null,
+    highReturn: Number.isFinite(row.highReturn) ? row.highReturn : null,
+    currentReturn: Number.isFinite(row.currentReturn) ? row.currentReturn : null,
+    observationSource: row.observationSource || "",
+    ...(row.corporateActionAdjusted ? { corporateActionAdjusted: true } : {}),
+  }));
+  await commitDbMutation((db) => {
+    let changed = false;
+    for (const { snapshot, observed } of entries) {
+      const version = overnightSnapshotFormulaVersion(snapshot);
+      const item = (Array.isArray(db.signalSnapshots) ? db.signalSnapshots : [])
+        .find((candidate) => candidate.asOf === snapshot.asOf && overnightSnapshotFormulaVersion(candidate) === version);
+      if (!item || item.observed?.complete === true) continue;
+      item.observed = {
+        formulaVersion: version,
+        observationDate: observed.observationDate,
+        observationCompact: observed.observationCompact,
+        observationPhase: "final",
+        status: "final",
+        complete: true,
+        recordedAt: new Date().toISOString(),
+        rows: compactRows(observed.rows || []),
+        warnings: observed.warnings || [],
+        evidence: observed.evidence || null,
+      };
+      changed = true;
+    }
+    return changed ? true : skipDbMutation(false);
+  });
+}
+
+function invalidateVerifyHistoryCacheForTest() {
+  verifyHistoryCache = { expiresAt: 0, value: null };
+}
+function resetHistoryCacheForTest() {
+  historyCache.clear();
+  historyInFlight.clear();
+}
+
 async function buildVerificationHistory() {
   const now = Date.now();
   if (verifyHistoryCache.value && verifyHistoryCache.expiresAt > now) {
@@ -9123,9 +9185,25 @@ async function buildVerificationHistory() {
     };
   }
   const [reference, calendar] = await Promise.all([getReferenceData(), getTradingCalendarEvidence()]);
+  // final 且 complete 的觀察結果不會再變：用快照裡落盤的那份，只重觀察 pending／partial 的日子。
+  // 以前每次重建都重觀察全部（260 份 ≈ 5,000 個 code:month 鍵 > historyCache 4,096），冷重建
+  // 要抓十幾分鐘，而且哪一天上游抓失敗、那一天就從分母消失——分母損耗跟市場無關、跟伺服器狀態有關。
   const observations = [];
+  const finalized = [];
   for (const snapshot of snapshots) {
-    observations.push(await observeSignalSnapshot(snapshot, { allowIntraday: false, reference, calendar }));
+    const stored = storedObservationFor(snapshot);
+    if (stored) {
+      observations.push(stored);
+      continue;
+    }
+    const observed = await observeSignalSnapshot(snapshot, { allowIntraday: false, reference, calendar });
+    observations.push(observed);
+    if (observed.status === "final" && observed.complete) finalized.push({ snapshot, observed });
+  }
+  if (finalized.length) {
+    await persistFinalObservations(finalized).catch((error) => {
+      console.warn("[Stock1] 成績單觀察結果落盤失敗（下次重建再試）：", error?.message || error);
+    });
   }
   const records = observations.map((observed, index) => {
     const snapshot = snapshots[index];
@@ -14334,6 +14412,7 @@ export {
   buildOvernightSignals, buildBacktest, OVERNIGHT_CACHE_MAX_ENTRIES, BACKTEST_CACHE_MAX_ENTRIES,
   // 前向驗證（signal-verify.test）
   OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, OVERNIGHT_MIN_DAYS, dayClusterCi, tQuantile975, overnightSnapshotFormulaVersion,
+  storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
