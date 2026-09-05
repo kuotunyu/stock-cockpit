@@ -447,7 +447,12 @@ test("停牌：pending 單標 halted、單獨計數、不併進「卡住」，�
   const summary = await mod.buildSwingVerificationSummary();
   assert.equal(summary.haltedCount, 1);
   assert.equal(summary.stalledCount, 1, "6666 缺口超過 30 天算卡住；5555 是停牌不算");
-  // 停牌解除：下一輪名單裡沒有它 → 撕掉 halted
+  // 名單抓不到（riskSets 為 null）：不猜也不撕。一次抓取失敗若讓 haltedCount 歸零、下一輪再標回來，
+  // 就是來回抖動＋一次多餘的 DB 寫入，而且與「名單抓不到就不標」的設計相反。
+  await mod.advanceSwingVerification(reference, compactTradingDay(0), { riskSets: null });
+  assert.deepEqual(db.swingVerification[stale].find((e) => e.code === "5555").halted, { since: "20260801" }, "名單抓不到時保留既有標記");
+  // 停牌解除：下一輪名單裡沒有它 → 撕掉 halted（同一天再推進一次要先清掉 de-dup 鍵）
+  mod.resetSwingAdvanceKeyForTest();
   await mod.advanceSwingVerification(reference, compactTradingDay(0), { riskSets: { halted: new Map(), delisted: new Set() } });
   // commit 是 copy-on-write：每次推進都換一份新的 store，要重新讀
   assert.equal(db.swingVerification[stale].find((e) => e.code === "5555").halted, undefined);

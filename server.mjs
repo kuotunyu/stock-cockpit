@@ -11289,6 +11289,10 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
 // 批次推進：相鄰交易日直接用整批收盤；若漏開 App，則讀官方月 K 快取逐日補判。
 // 每個完整收盤日只跑一次；缺中間日 K 會留 dataGap，下一次重試而不是跳日。
 let lastSwingAdvanceKey = "";
+// 測試掛鉤：同一個 (twse|tpex) 日期組合只推進一次，測試要連續推進同一天時先清掉。
+function resetSwingAdvanceKeyForTest() {
+  lastSwingAdvanceKey = "";
+}
 let swingVerifySummaryCache = { expiresAt: 0, value: null };
 // 摘要有 10 分鐘快取，任何改動驗證單的路徑都必須讓它失效。抽成具名函式的理由：
 // 原本兩處各自寫字面值，測試又沒有正當的把手，於是「只有第一個呼叫者拿到新鮮結果」
@@ -11346,7 +11350,8 @@ async function advanceSwingVerification(reference, latestDate, options = {}) {
     ]);
     // 停牌中的標的沒有日 K、也賣不掉：標成 halted 單獨計數，不併進「卡住」（那是資料缺口），
     // 也不進分母；停牌解除後照常推進。名單抓不到就不標（不猜）。
-    const riskSets = options.riskSets || await getRiskSets(targetDate).catch(() => null);
+    // 測試可注入 null 代表「名單抓不到」；正式路徑抓失敗也回 null，兩者走同一條「不碰 halted」的路。
+    const riskSets = "riskSets" in options ? options.riskSets : await getRiskSets(targetDate).catch(() => null);
     const pendingByCode = new Map();
     for (const entries of Object.values(store)) {
       for (const entry of entries) {
@@ -11389,13 +11394,17 @@ async function advanceSwingVerification(reference, latestDate, options = {}) {
         rows = [...history, ...directRows];
       }
       for (const entry of entries) {
-        const haltedSince = riskSets?.halted?.has(code) ? (riskSets.halted.get(code) || targetDate) : "";
-        if (haltedSince && !entry.halted) {
-          entry.halted = { since: haltedSince };
-          changed = true;
-        } else if (!haltedSince && entry.halted) {
-          delete entry.halted;
-          changed = true;
+        // 名單抓不到（riskSets 為 null）就整段不碰：不猜、也不撕既有標記。以前 null 會讓 haltedSince
+        // 恆為空字串、走進「不再停牌」分支，一次抓取失敗就把 haltedCount 歸零、下一輪再標回來。
+        if (riskSets) {
+          const haltedSince = riskSets.halted?.has(code) ? (riskSets.halted.get(code) || targetDate) : "";
+          if (haltedSince && !entry.halted) {
+            entry.halted = { since: haltedSince };
+            changed = true;
+          } else if (!haltedSince && entry.halted) {
+            delete entry.halted;
+            changed = true;
+          }
         }
         const result = replaySwingVerificationHistory(entry, rows, targetDate, calendar);
         if (result.changed) changed = true;
@@ -14275,7 +14284,7 @@ export {
   stockLimitUpPrice, isLimitUpLockedBar, stockLimitDownPrice, isLimitDownLockedBar,
   scanSwingBoard, inspectSwingStock,
   // 波段前向驗證
-  recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification, applySwingCorporateAction,
+  recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification, applySwingCorporateAction, resetSwingAdvanceKeyForTest,
   swingAdvanceTargetDate,
   buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
   median, maxConsecutiveLosses, worstResolvedDay,
