@@ -70,7 +70,7 @@
   /* 圓角尺度（2026-07-16 定，勿再混用中間值）：2-4px 微件（kbd/色塊）｜6px 小控件/小chip｜
      8px 卡片、按鈕、輸入框｜12px modal｜16px 大型 modal（zoom）｜999px/50% 藥丸與圓點。
      zoom 讀值浮層是貼邊功能性例外（容器 14px＋側 tab 14px 0 0 14px 必須成對）。
-     focus 樣式：實色邊＋實線 outline（如 outline: 1-2px solid var(--orange)），禁止半透明光暈 box-shadow。 */
+     focus 樣式：實色邊＋實線 outline（全站青色環 outline: 2px solid var(--cyan)，見檔尾 :focus-visible），禁止半透明光暈 box-shadow。 */
   /* 中文維持原生繁中字型；代號、價格、漲跌與量價統一走自架 Plex，不依賴外部 CDN。 */
   --mono: "Stock1 Plex Mono", "IBM Plex Mono", Consolas, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", monospace;
   --screener-mono: var(--mono);
