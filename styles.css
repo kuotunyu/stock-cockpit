@@ -320,11 +320,65 @@ button {
   color: #bdc4cb;
   background: rgba(255, 255, 255, 0.03);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .screen-scope-note strong {
   color: var(--orange-2);
   font-weight: 700;
+}
+
+.screen-scope-note .scope-note-text { flex: 1 1 auto; min-width: 0; }
+/* 看過一次可收成一行（stock1.scopeNoteCollapsed.v1）：手機上這段常駐說明佔了 4~5 行 */
+.screen-scope-note.is-collapsed .scope-note-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.scope-note-toggle {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: var(--fs-note);
+  font-weight: 700;
+}
+
+/* 「這一頁是什麼」：分頁定義以前只在 title 提示裡，觸控裝置沒有 hover */
+.screen-help {
+  border: 1px solid var(--line);
+  color: var(--orange-2);
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 20px;
+  line-height: 1;
+}
+
+/* 手機版資料來源 pill：桌機維持兩顆按鈕，手機收成一顆、點開才展開 */
+.source-pill { display: none; }
+@media (max-width: 1039px) {
+  .source-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 700;
+  }
+  .source-switch:not(.is-expanded) .source-switch-buttons { display: none; }
+  #screenTitle { white-space: nowrap; }
+}
+@media (max-width: 420px) {
+  #screenTitle { font-size: 20px; }
 }
 
 /* 全域頂端載入進度條：慢速載入(>400ms)時出現的滑動橘條，讓使用者一眼知道正在更新 */
@@ -4044,6 +4098,31 @@ button.today-focus-card:focus-visible {
   white-space: nowrap;
 }
 
+/* 更多頁分兩組（看盤設定／帳號與維護）：標題吃滿整列 */
+.more-group {
+  grid-column: 1 / -1;
+  margin: 6px 0 0;
+  font-size: var(--fs-note);
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  color: var(--muted-2);
+}
+
+/* 列表載入態：三列與真實 .stock-row 等高的 skeleton，減少「先空白、後跳出」的感受 */
+.list-skeleton { display: grid; gap: 6px; padding: 6px 0; }
+.list-skeleton-text { padding: 4px 12px; font-size: var(--fs-note); color: var(--muted-2); }
+.stock-row.is-skeleton {
+  min-height: 94px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--panel-2, #1e2124) 0%, #2a2e33 50%, var(--panel-2, #1e2124) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.2s linear infinite;
+}
+@keyframes skeleton-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
 .settings-panel {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5052,6 +5131,22 @@ body.is-locked .app-shell {
 
 .detail-panel.is-open {
   transform: translateY(0);
+}
+
+/* 手機明細是由下往上滑進來的 sheet：關閉鈕用「往下」的箭頭＋頂部把手，心智模型才一致；桌機 aside 維持「‹」 */
+.detail-close-mobile { display: none; }
+@media (max-width: 1039px) {
+  .detail-close-desktop { display: none; }
+  .detail-close-mobile { display: inline-block; }
+  .detail-panel::before {
+    content: "";
+    display: block;
+    width: 36px;
+    height: 4px;
+    margin: 8px auto 0;
+    border-radius: 999px;
+    background: var(--line);
+  }
 }
 
 .detail-top {

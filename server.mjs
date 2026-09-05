@@ -6260,7 +6260,7 @@ async function loadRiskSets(riskDate) {
         const rows = await fetchJsonWithRetry("https://openapi.twse.com.tw/v1/announcement/notice");
         const usable = twseNoticeRowsOrNull(rows);
         // 拿不到就要拋，讓 resolveRiskSource 走 last-good ＋ 警告；靜默回 [] 等於宣稱「沒有注意股」。
-        if (usable === null) throw new Error("官方只回了空白哨兵列，當日名單尚未公布或已清空");
+        if (usable === null) throw new Error("官方今天還沒公布名單（或已清空），這一類先留空、稍後自動重試");
         return usable.map((r) => cleanCode(r.Code)).filter((code) => /^\d{4}$/.test(code));
       },
     },
@@ -6670,7 +6670,7 @@ async function getSurveillanceBoard(dateCompact) {
   const twseNotice = await survFetchRecords("twseNotice", today, "TWSE 注意", warnings, async () => {
     const rows = await fetchJsonWithRetry("https://openapi.twse.com.tw/v1/announcement/notice", { headers: openapiHeaders });
     const usable = twseNoticeRowsOrNull(rows);
-    if (usable === null) throw new Error("官方只回了空白哨兵列，當日名單尚未公布或已清空");
+    if (usable === null) throw new Error("官方今天還沒公布名單（或已清空），這一類先留空、稍後自動重試");
     return usable.map((r) => {
       const code = cleanCode(r.Code);
       if (!/^\d{4}$/.test(code)) return null;
@@ -8273,7 +8273,7 @@ async function buildOvernightSignalsUncached({
     ok: true,
     generatedAt: new Date().toISOString(),
     asOf: compactToIsoDate(latestDate),
-    source: "TWSE/TPEx official close + official history",
+    source: "證交所／櫃買中心官方收盤＋官方歷史",
     universe: "上市櫃普通股",
     riskPolicy: "注意股、處置股、變更交易改為標示、不再排除（前端可切換隱藏）；低流動性只標示",
     formulaVersion: OVERNIGHT_FORMULA_VERSION,
@@ -11641,7 +11641,7 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     ok: true,
     generatedAt: new Date().toISOString(),
     asOf: compactToIsoDate(latestDate),
-    source: "TWSE/TPEx official close + official history",
+    source: "證交所／櫃買中心官方收盤＋官方歷史",
     universe: "上市櫃普通股",
     riskPolicy: "注意股、處置股、變更交易改為標示、不再排除（前端可切換隱藏）；低流動性已先濾掉",
     surveillanceCount: picks.filter((p) => p.surveillance).length,

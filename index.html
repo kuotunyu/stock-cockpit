@@ -57,8 +57,10 @@
             <em class="pill-swap" aria-hidden="true">⇄</em>
           </button>
           <h1 id="screenTitle">隔日沖</h1>
+          <button class="icon-button screen-help" id="screenHelp" type="button" aria-label="這一頁是什麼" aria-haspopup="dialog" aria-controls="glossaryModal" title="這一頁是什麼：打開畫面說明（手機沒有滑鼠提示，說明都在這裡）">?</button>
           <div class="source-switch" aria-label="資料來源切換">
-            <div class="source-switch-buttons" role="group" aria-label="資料來源">
+            <button class="source-pill" id="sourcePill" type="button" aria-expanded="false" aria-controls="sourceSwitchButtons" title="資料來源：點一下展開切換">官方 ▾</button>
+            <div class="source-switch-buttons" id="sourceSwitchButtons" role="group" aria-label="資料來源">
               <button class="is-active" data-source-option="official" type="button">官方資料</button>
               <button data-source-option="broker" type="button">券商資料</button>
             </div>
@@ -105,7 +107,7 @@
 
         <section class="screen screener-screen" data-screen-panel="screener">
           <div class="screen-head compact">
-            <p class="screen-scope-note"><strong>即時</strong>動能・觀察用：秒級更新、本機粗估，只看「已載入的股票」(自選＋隔日沖＋你查過的)。想找<strong>波段</strong>型態＋完整進出場計畫 → 看「策略雷達」。</p>
+            <p class="screen-scope-note"><span class="scope-note-text"><strong>即時</strong>動能・觀察用：秒級更新、本機粗估，只看「已載入的股票」(自選＋隔日沖＋你查過的)。想找<strong>波段</strong>型態＋完整進出場計畫 → 看「策略雷達」。</span><button type="button" class="scope-note-toggle" data-scope-note-toggle aria-expanded="true">收合</button></p>
             <div class="segment-tabs" role="tablist" aria-label="選股模式">
               <button class="segment is-active" data-universe="strong" type="button">強勢股</button>
               <button class="segment" data-universe="weak" type="button">弱勢股</button>
@@ -328,6 +330,11 @@
 
         <section class="screen more-screen" data-screen-panel="more">
           <div class="settings-panel">
+            <button data-setting="glossary" type="button">
+              <i data-lucide="book-open"></i>
+              <span>名詞 / 觀念解釋</span>
+              <strong></strong>
+            </button>
             <button data-setting="source" type="button">
               <i data-lucide="database"></i>
               <span>資料源狀態</span>
@@ -341,6 +348,11 @@
             <button data-setting="notesFeed" type="button">
               <i data-lucide="message-square"></i>
               <span>共享備註動態</span>
+              <strong></strong>
+            </button>
+            <button data-setting="backup" type="button">
+              <i data-lucide="archive-restore"></i>
+              <span>個人資料備份</span>
               <strong></strong>
             </button>
             <button data-setting="system" type="button">
@@ -358,6 +370,11 @@
               <span>訊號提醒</span>
               <strong></strong>
             </button>
+            <button data-setting="version" type="button">
+              <i data-lucide="git-branch"></i>
+              <span>版本與更新</span>
+              <strong></strong>
+            </button>
           </div>
         </section>
 
@@ -369,8 +386,9 @@
 
       <aside class="detail-panel" id="detailPanel" aria-label="個股明細">
         <header class="detail-top">
-          <button class="icon-button detail-close" id="detailClose" type="button" aria-label="返回">
-            <i data-lucide="chevron-left"></i>
+          <button class="icon-button detail-close" id="detailClose" type="button" aria-label="收合明細">
+            <i data-lucide="chevron-left" class="detail-close-desktop"></i>
+            <i data-lucide="chevron-down" class="detail-close-mobile"></i>
           </button>
           <div>
             <h2 id="detailName">資料載入中</h2>
@@ -412,7 +430,8 @@
           </div>
         </section>
         <section class="indicator-blocks" id="indicatorBlocks" aria-label="輔助指標"></section>
-        <section class="indicator-detail" id="indicatorDetail" aria-live="polite"></section>
+        <!-- 不掛 aria-live：這一區每 10 秒隨行情重繪，掛了讀屏每 10 秒被唸一遍；它是使用者主動點 tab 才換的內容。 -->
+        <section class="indicator-detail" id="indicatorDetail"></section>
         <section class="stock-notes" id="stockNotes" aria-label="共享備註"></section>
       </aside>
 
@@ -666,7 +685,7 @@
           <button class="primary-button" id="loginSubmit" type="submit">登入</button>
           <p id="loginMessage" class="login-message" role="status"></p>
         </form>
-        <p class="login-note">第一次本機測試預設帳號是 admin。部署到雲端前請務必用環境變數設定新密碼。</p>
+        <p class="login-note">帳號由這台伺服器的管理者建立；忘記密碼請找管理者到「帳號管理」重設。不登入也能看行情，登入後才有自選股、到價提醒與交易帳本。</p>
       </section>
     </div>
     <div class="modal-backdrop personal-backup-backdrop" id="personalBackupModal" hidden>
@@ -706,6 +725,6 @@
         </footer>
       </section>
     </div>
-    <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
+    <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
   </body>
 </html>

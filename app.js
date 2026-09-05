@@ -229,9 +229,19 @@ if (storedSelectedCode) {
 }
 
 const initialParams = new URLSearchParams(window.location.search);
+const SCREEN_KEYS = ["overnight", "screener", "strategy", "watchlist", "technical", "surveillance", "more"];
+const LAST_SCREEN_KEY = "stock1.lastScreen.v1";
 const initialScreen = initialParams.get("screen");
-if (["overnight", "screener", "strategy", "watchlist", "technical", "surveillance", "more"].includes(initialScreen)) {
+if (SCREEN_KEYS.includes(initialScreen)) {
   state.screen = initialScreen;
+} else if (!initialScreen) {
+  // 沒指定 ?screen= 才套上次看的畫面（分享連結或書籤帶了畫面就照它）。
+  try {
+    const remembered = localStorage.getItem(LAST_SCREEN_KEY);
+    if (SCREEN_KEYS.includes(remembered)) state.screen = remembered;
+  } catch {
+    // localStorage 不可用時照預設。
+  }
 }
 const initialTechnicalCode = String(initialParams.get("code") || "").trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
 if (initialTechnicalCode) state.technicalCode = initialTechnicalCode;
@@ -4071,6 +4081,9 @@ function renderSourceSwitch() {
   });
   if (!meta || !wrapper) return;
   wrapper.classList.toggle("is-error", Boolean(dataState.error || sourceState.error) && selected === "broker");
+  // 手機上兩顆大鈕收成一顆 pill（桌機 CSS 不顯示 pill）；標籤跟著目前來源。
+  const pill = document.getElementById("sourcePill");
+  if (pill) pill.textContent = selected === "broker" ? "券商 ▾" : "官方 ▾";
   if (selected === "broker") {
     const broker = sourceState.sources?.broker;
     meta.textContent = broker?.configured ? `券商 / 更新 ${dataState.lastUpdated || "尚未更新"}` : "券商 API 未設定";
@@ -4856,7 +4869,7 @@ function renderMorePanel() {
     detail = document.createElement("section");
     detail.id = "moreDetail";
     detail.className = "more-detail";
-    detail.setAttribute("aria-live", "polite");
+    // 不掛 aria-live：這區每 10 秒隨行情重繪，讀屏會每 10 秒重播整篇說明；內容是使用者點 tile 才換的。
     screen.appendChild(detail);
   }
 
@@ -4967,9 +4980,12 @@ function renderMorePanel() {
     </div>
   `;
 
-  panel.innerHTML = items
-    .map(
-      (item) => `
+  // 九顆 tile 分兩組：觀察者天天會碰的「看盤設定」在前，維護者才需要的「帳號與維護」在後。
+  const MORE_GROUPS = [
+    { title: "看盤設定", keys: ["glossary", "source", "risk", "alerts"] },
+    { title: "帳號與維護", keys: ["system", "backup", "brokerGuide", "notesFeed", "version"] },
+  ];
+  const renderTile = (item) => `
         <button class="${activePanel === item.key ? "is-active" : ""}" data-setting="${item.key}" type="button">
           <i data-lucide="${item.icon}"></i>
           <span>
@@ -4978,8 +4994,9 @@ function renderMorePanel() {
           </span>
           <em>${item.status}</em>
         </button>
-      `
-    )
+      `;
+  panel.innerHTML = MORE_GROUPS
+    .map((group) => `<h3 class="more-group">${group.title}</h3>${group.keys.map((key) => items.find((item) => item.key === key)).filter(Boolean).map(renderTile).join("")}`)
     .join("");
 
   const details = {
@@ -5494,7 +5511,6 @@ function renderOvernightGroups() {
       </div>
       ${warnings ? `<div class="overnight-summary-warnings">${warnings}</div>` : ""}
     </div>
-    ${state.overnightView === "overview" ? renderSignalVerification() : ""}
     ${state.overnightView === "overview" ? renderTodayFocusPanel() : ""}
     ${state.overnightView !== "overview" ? renderReadableScoreExplainer(state.overnightView) : ""}
     <div class="overnight-field-guide" aria-label="欄位說明">
@@ -5504,6 +5520,7 @@ function renderOvernightGroups() {
       <span><strong>30日回測</strong>有樣本才統計</span>
     </div>
     ${cards}
+    ${state.overnightView === "overview" ? renderSignalVerification() : ""}
   `;
 }
 
@@ -6714,19 +6731,35 @@ function renderWatchEmptyState() {
   `;
 }
 
+// 篩選抽屜的三個條件（方向／週轉率／只看自選）與風險開關任一生效時，「0 筆」是篩出來的，不是今天沒有。
+function hasActiveListFilters() {
+  return state.direction !== "all" || Number(state.minTurnover) > 0 || Boolean(state.watchOnly) || !state.showSurveillance;
+}
+
 function renderRows(container, list, screen = state.screen) {
   if (!list.length) {
     // 還在第一次載入時顯示載入中，避免被誤會成「真的沒有符合的股票」。
+    // 用三列固定高度的 skeleton 撐住版面（列高與真實 .stock-row 相同），文字給讀屏。
     if (!dataState.loadedOnce && !stocks.length && !dataState.error) {
-      container.innerHTML = `<div class="empty-state">行情載入中，正在抓官方報價…</div>`;
+      container.innerHTML = `
+        <div class="list-skeleton" role="status" aria-label="行情載入中，正在抓官方報價">
+          <div class="stock-row is-skeleton" aria-hidden="true"></div>
+          <div class="stock-row is-skeleton" aria-hidden="true"></div>
+          <div class="stock-row is-skeleton" aria-hidden="true"></div>
+          <span class="list-skeleton-text">行情載入中，正在抓官方報價…</span>
+        </div>`;
       return;
     }
     if (dataState.error && !stocks.length) {
       container.innerHTML = `<div class="empty-state">行情載入失敗：${escapeHtml(dataState.error)}<br />請按右下角「重新整理」再試一次。</div>`;
       return;
     }
-    container.innerHTML = screen === "watchlist"
-      ? renderWatchEmptyState()
+    if (screen === "watchlist") {
+      container.innerHTML = renderWatchEmptyState();
+      return;
+    }
+    container.innerHTML = hasActiveListFilters()
+      ? `<div class="empty-state">篩選後沒有符合的標的（不是今天沒有）。<br />到右上角「篩選」放寬方向、週轉率或「只看自選」，或到「更多 → 風險規則」重新顯示注意／處置股。</div>`
       : `<div class="empty-state">沒有符合條件的標的</div>`;
     return;
   }
@@ -10571,6 +10604,8 @@ function showToast(message, duration) {
   if (!stack) return;
   const toast = document.createElement("div");
   toast.className = "toast";
+  // 每則各自是一個 status：容器 aria-atomic=false，新增一則時讀屏只唸新的，不重唸整個堆疊。
+  toast.setAttribute("role", "status");
   toast.textContent = message;
   stack.appendChild(toast);
   // 顯示時間跟著訊息長度走（長訊息如同步失敗說明要留得住）；
@@ -10604,6 +10639,12 @@ function updateActiveNav() {
     more: "更多",
   };
   el.title.textContent = titleMap[state.screen];
+  // 記住最後看的畫面：盤中打開多半想看自選股，不必每次都從隔日沖開始。
+  try {
+    localStorage.setItem(LAST_SCREEN_KEY, state.screen);
+  } catch {
+    // 私密視窗或配額滿了都不影響看盤。
+  }
 }
 
 function renderWatchTabs() {
@@ -12148,8 +12189,17 @@ window.addEventListener("popstate", (event) => {
 // === 名詞 / 觀念解釋（全站可開的詞彙表）===
 // 目的：朋友看不懂某些功能/名詞時，從 header「📖」或「更多」點開即可查；可搜尋、可依分類篩。
 // def 內含刻意排版的 HTML（<strong> 等）→ 輸出時不 escape；term/aliases/分類值才 escape。
-const GLOSSARY_CATS = ["看盤基礎", "隔日沖（短線）", "策略雷達（波段）", "技術指標", "風險與制度"];
+const GLOSSARY_CATS = ["畫面說明", "看盤基礎", "隔日沖（短線）", "策略雷達（波段）", "技術指標", "風險與制度"];
 const GLOSSARY = [
+  // —— 畫面說明（原本只在分頁的 title 提示裡，手機沒有 hover 看不到）——
+  { term: "隔日沖（畫面）", aliases: ["隔日沖頁", "隔日沖"], cat: "畫面說明", def: "看<strong>訊號日收盤後</strong>的短線型態，觀察<strong>實際下一交易日</strong>的慣性（通常抱約 1 個交易日）。「總覽」把三種型態合在一起看；「策略表現」是候選股自身的歷史統計，不是前向驗證。和「策略雷達」的波段（抱數天～數週、附完整進出場計畫）是不同維度的工具。" },
+  { term: "強勢續攻／爆量高危／回檔轉強（分頁）", aliases: ["分頁"], cat: "畫面說明", def: "<strong>強勢續攻</strong>：訊號日收盤強勢（收在高檔、量能放大、站上均線）。<strong>爆量高危</strong>：今天爆量、振幅大或收盤轉弱的高風險股，用來提醒控管追高（看當天，不是買進建議）。<strong>回檔轉強</strong>：小漲收紅、守住短均、回檔後重新轉強。三群平行判定，同一檔可能同時進兩群。" },
+  { term: "盤中選股（畫面）", aliases: ["盤中選股"], cat: "畫面說明", def: "<strong>即時</strong>動能、觀察用：秒級更新、本機粗估，只看「已載入的股票」（自選＋隔日沖＋你查過的），<strong>不是全市場掃描</strong>。想找波段型態＋完整進出場計畫 → 看「策略雷達」。兩頁刻意並存，不會合併。" },
+  { term: "策略雷達（畫面）", aliases: ["策略雷達"], cat: "畫面說明", def: "<strong>波段</strong>選股：每個交易日從上市櫃普通股取成交量前 240 檔掃兩種型態（中軌攻防、上軌續攻），當日<strong>凍結</strong>、附進場／停損／目標與盈虧比。「場景勝率」是前向驗證（依官方日 K 逐日對答案），累積 20 筆結案才給百分比。" },
+  { term: "自選股（畫面）", aliases: ["自選股"], cat: "畫面說明", def: "三組自選清單＋摘要卡，登入後同步到伺服器（多裝置共用）。「庫存損益」是交易帳本：費稅為估算，券商對帳單為準。" },
+  { term: "技術分析（畫面）", aliases: ["技術分析"], cat: "畫面說明", def: "日／週／月 K、均線、布林、MACD、壓力支撐與基本面。K 線已做<strong>還原權息</strong>（除息缺口不算漲跌）；「放大」可縮放、逐根讀值、畫趨勢線。" },
+  { term: "處置看板（畫面）", aliases: ["處置看板"], cat: "畫面說明", def: "官方公告的<strong>即將處置／處置中／即將出關／鉅額／注意／全額交割</strong>六類。處置期間是分盤集合競價（每 5 或 20 分鐘撮合一次），要預收款券。「新進／連 N 天」靠本機每日快照比對，比不了時會明講「判定中」而不是印 0。" },
+  { term: "更多（畫面）", aliases: ["更多"], cat: "畫面說明", def: "分兩組：<strong>看盤設定</strong>（名詞解釋、資料源狀態、風險規則、訊號提醒）與<strong>帳號與維護</strong>（帳號管理、個人資料備份、富邦 API、共享備註動態、版本與更新）。" },
   // —— 看盤基礎 ——
   { term: "漲跌幅", cat: "看盤基礎", def: "今天的收盤（或現價）相對<strong>昨天收盤</strong>漲跌的百分比。台股慣例<strong>紅漲綠跌</strong>（和歐美相反），本 App 全站都照這個顏色。" },
   { term: "振幅", cat: "看盤基礎", def: "當天<strong>最高價到最低價</strong>的範圍占昨收的百分比，衡量盤中波動大小。振幅大代表上下劇烈、風險較高。" },
@@ -12243,11 +12293,11 @@ function renderGlossary() {
     .join("");
 }
 
-function openGlossary(presetQuery = "", focusInput = true, trigger = document.activeElement) {
+function openGlossary(presetQuery = "", focusInput = true, trigger = document.activeElement, presetCat = "") {
   const modal = document.getElementById("glossaryModal");
   const input = document.getElementById("glossarySearch");
   if (!modal) return;
-  glossaryState.cat = "";
+  glossaryState.cat = GLOSSARY_CATS.includes(presetCat) ? presetCat : "";
   glossaryState.q = presetQuery || "";
   if (input) input.value = glossaryState.q;
   renderGlossary();
@@ -12616,6 +12666,68 @@ document.addEventListener("keydown", (event) => {
 document.getElementById("glossarySearch")?.addEventListener("input", (event) => {
   glossaryState.q = event.target.value || "";
   renderGlossary();
+});
+// 「這一頁是什麼」：分頁的定義以前只藏在 title 提示裡，手機沒有 hover 永遠看不到。
+// 打開名詞解釋的「畫面說明」分類，並以目前畫面名稱當關鍵字，第一眼就是這一頁的條目。
+const SCREEN_HELP_TERMS = {
+  overnight: "隔日沖",
+  screener: "盤中選股",
+  strategy: "策略雷達",
+  watchlist: "自選股",
+  technical: "技術分析",
+  surveillance: "處置看板",
+  more: "更多",
+};
+function openScreenHelp(trigger = document.activeElement) {
+  openGlossary(SCREEN_HELP_TERMS[state.screen] || "", false, trigger, "畫面說明");
+}
+document.getElementById("screenHelp")?.addEventListener("click", (event) => openScreenHelp(event.currentTarget));
+
+// 常駐說明條的收合（看過一次就不用每次佔四行）與手機版資料來源 pill 的展開。
+const SCOPE_NOTE_COLLAPSED_KEY = "stock1.scopeNoteCollapsed.v1";
+function applyScopeNoteCollapsed(collapsed) {
+  document.querySelectorAll(".screen-scope-note").forEach((note) => {
+    note.classList.toggle("is-collapsed", collapsed);
+    const toggle = note.querySelector("[data-scope-note-toggle]");
+    if (toggle) {
+      toggle.textContent = collapsed ? "展開" : "收合";
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+    }
+  });
+}
+try {
+  applyScopeNoteCollapsed(localStorage.getItem(SCOPE_NOTE_COLLAPSED_KEY) === "1");
+} catch {
+  // localStorage 不可用時維持展開。
+}
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  const scopeToggle = target.closest("[data-scope-note-toggle]");
+  if (scopeToggle) {
+    const collapsed = scopeToggle.getAttribute("aria-expanded") !== "false";
+    applyScopeNoteCollapsed(collapsed);
+    try {
+      localStorage.setItem(SCOPE_NOTE_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      // 不影響顯示。
+    }
+    return;
+  }
+  const pill = target.closest("#sourcePill");
+  if (pill) {
+    const wrapper = pill.closest(".source-switch");
+    const expanded = !wrapper.classList.contains("is-expanded");
+    wrapper.classList.toggle("is-expanded", expanded);
+    pill.setAttribute("aria-expanded", String(expanded));
+    return;
+  }
+  // 選完來源就把 pill 收回去（桌機不受影響：pill 與展開狀態都只在手機 CSS 生效）。
+  if (target.closest("[data-source-option]")) {
+    const wrapper = target.closest(".source-switch");
+    wrapper?.classList.remove("is-expanded");
+    document.getElementById("sourcePill")?.setAttribute("aria-expanded", "false");
+  }
 });
 const glossaryModalEl = document.getElementById("glossaryModal");
 glossaryModalEl?.addEventListener("click", (event) => {
