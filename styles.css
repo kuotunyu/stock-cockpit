@@ -6361,7 +6361,8 @@ body.is-locked .app-shell {
     "facts facts"
     "entry entry"
     "plan plan"
-    "rrbar rrbar";
+    "rrbar rrbar"
+    "actions actions";
   gap: 8px 14px;
   padding: 13px 15px;
   background: #17191b;
@@ -9173,7 +9174,8 @@ body.is-locked .app-shell {
 .swing-stat-size strong { color: var(--info-text); }
 
 /* 波段卡片動作列：原生「查看明細」鈕給鍵盤與讀屏（卡片本身不再是 role=button），提醒鈕在右 */
-.swing-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 14px 12px; }
+/* 卡片是命名區域的 grid：沒有自己的 area 就會掉進 62px 的 rank 欄，按鈕被擠成直排字（第三欄時就是這樣） */
+.swing-actions { grid-area: actions; display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
 .swing-open {
   min-height: 40px;
   padding: 0 14px;
