@@ -5718,7 +5718,7 @@ function renderVerifyHistory() {
   const minDays = Number(totals?.minDays) || 20;
   const enoughDays = Boolean(totals) && Number(totals.days) >= minDays;
   const ciText = (ci) => (enoughDays && ci && Number.isFinite(ci.low) && Number.isFinite(ci.high)
-    ? `（${Math.round(ci.low * 100)}～${Math.round(ci.high * 100)}%）`
+    ? `（區間 ${Math.round(ci.low * 100)}～${Math.round(ci.high * 100)}%）`
     : "");
   const ciTone = (ci) => (enoughDays && ci && Number.isFinite(ci.low) && ci.low >= 0.5 ? "positive" : "");
   return `

@@ -8215,25 +8215,40 @@ const OVERNIGHT_SNAPSHOT_LIMIT = 260;
 // 與波段的 WIN_RATE_MIN_SAMPLES 同精神：累計天數低於此，成績單的百分比不當結論呈現（不染色）。
 const OVERNIGHT_MIN_DAYS = 20;
 
-// 以「日」為叢集的 95% 信賴區間：用每日達成率的樣本標準差算標準誤，n＝有驗證數的天數。
-// 回 null 代表「算不出來」（不足 2 天），不是 0。
+// Student t 的 97.5% 分位數（雙尾 95%）。成績單的有效樣本是「天數」，20 天用 1.96 會讓區間窄約 7%。
+const T_QUANTILE_975 = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.16, 2.145, 2.131, 2.12, 2.11, 2.101, 2.093, 2.086, 2.08, 2.074, 2.069, 2.064, 2.06, 2.056, 2.052, 2.048, 2.045, 2.042];
+function tQuantile975(df) {
+  if (!Number.isFinite(df) || df <= 0) return NaN;
+  if (df <= 30) return T_QUANTILE_975[Math.floor(df) - 1];
+  if (df <= 40) return 2.021;
+  if (df <= 60) return 2.0;
+  if (df <= 120) return 1.98;
+  return 1.96;
+}
+
+// 以「日」為叢集的 95% 信賴區間。中心是 Σ達成 ÷ Σ驗證——**與畫面上的勝率是同一個數**；
+// 標準誤用叢集穩健公式：Var = G/(G−1) · Σ(x_g − p·n_g)² / (Σn)²，G＝有驗證數的天數，臨界值 t(G−1)。
+// 舊寫法拿「每日達成率的等權平均」當中心：實機每日 12～60 檔、差五倍，小樣本日的極端值被放大，
+// 曾算出下界 41.5% 高於畫面顯示的 38.7%、還把它染成綠色。回 null 代表「算不出來」（不足 2 天），不是 0。
 function dayClusterCi(records, countField, denomField = "verified") {
-  const rates = (records || [])
-    .map((record) => {
-      const denom = Number(record?.[denomField]);
-      return denom > 0 ? Number(record?.[countField] || 0) / denom : null;
-    })
-    .filter((rate) => Number.isFinite(rate));
-  const n = rates.length;
-  if (n < 2) return null;
-  const mean = average(rates);
-  const variance = rates.reduce((sum, rate) => sum + (rate - mean) ** 2, 0) / (n - 1);
-  const se = Math.sqrt(variance) / Math.sqrt(n);
+  const clusters = (records || [])
+    .map((record) => ({ n: Number(record?.[denomField]), x: Number(record?.[countField] || 0) }))
+    .filter((item) => Number.isFinite(item.n) && item.n > 0 && Number.isFinite(item.x));
+  const groups = clusters.length;
+  if (groups < 2) return null;
+  const totalN = clusters.reduce((sum, item) => sum + item.n, 0);
+  const p = clusters.reduce((sum, item) => sum + item.x, 0) / totalN;
+  const residualSq = clusters.reduce((sum, item) => sum + (item.x - p * item.n) ** 2, 0);
+  const variance = (groups / (groups - 1)) * residualSq / (totalN * totalN);
+  const se = Math.sqrt(variance);
+  const t = tQuantile975(groups - 1);
   return {
-    n,
-    mean: roundTo(mean, 4),
-    low: roundTo(Math.max(0, mean - 1.96 * se), 4),
-    high: roundTo(Math.min(1, mean + 1.96 * se), 4),
+    n: groups,
+    mean: roundTo(p, 4),
+    se: roundTo(se, 4),
+    t,
+    low: roundTo(Math.max(0, p - t * se), 4),
+    high: roundTo(Math.min(1, p + t * se), 4),
   };
 }
 
@@ -14145,7 +14160,7 @@ export {
   computeMetrics, evaluateGroups, scoreStrong, scoreDanger, scoreReversal, nextDayPerformance,
   buildOvernightSignals, buildBacktest, OVERNIGHT_CACHE_MAX_ENTRIES, BACKTEST_CACHE_MAX_ENTRIES,
   // 前向驗證（signal-verify.test）
-  OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, OVERNIGHT_MIN_DAYS, dayClusterCi, overnightSnapshotFormulaVersion,
+  OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, OVERNIGHT_MIN_DAYS, dayClusterCi, tQuantile975, overnightSnapshotFormulaVersion,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,

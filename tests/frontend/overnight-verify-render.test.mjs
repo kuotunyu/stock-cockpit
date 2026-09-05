@@ -126,15 +126,16 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   const few = render({ days: 5, signals: 60, hitPlus2: 40, brokeMinus2: 10, winAtOpen: 45, winAtClose: 33, avgOpenReturn: 0.5, avgCloseReturn: 0.3, minDays: 20,
     ci: { hitPlus2: { n: 5, mean: 0.66, low: 0.55, high: 0.77 }, winAtOpen: { n: 5, mean: 0.75, low: 0.6, high: 0.9 }, winAtClose: null } });
   assert.match(few, /累積中 5\/20 天/);
-  assert.doesNotMatch(few, /（\d+～\d+%）/, "未滿 20 天不顯示區間");
+  assert.doesNotMatch(few, /（區間 \d+～\d+%）/, "未滿 20 天不顯示區間");
   let host = app.doc.createElement("div");
   host.innerHTML = few;
   assert.ok([...host.querySelectorAll(".verify-stats span")].every((c) => !c.classList.contains("positive")), "未滿 20 天不染色");
 
   const enough = render({ days: 25, signals: 300, hitPlus2: 200, brokeMinus2: 50, winAtOpen: 225, winAtClose: 120, avgOpenReturn: 0.5, avgCloseReturn: 0.3, minDays: 20,
     ci: { hitPlus2: { n: 25, mean: 0.66, low: 0.45, high: 0.87 }, winAtOpen: { n: 25, mean: 0.75, low: 0.6, high: 0.9 }, winAtClose: null } });
-  assert.match(enough, /開盤賣勝率 75%（60～90%）/);
-  assert.match(enough, /曾達\+2% 67%（45～87%）/);
+  // 括號要有「區間」標籤：散戶第一眼會把「75%（60～90%）」讀成範圍勝率或某種區間報酬。
+  assert.match(enough, /開盤賣勝率 75%（區間 60～90%）/);
+  assert.match(enough, /曾達\+2% 67%（區間 45～87%）/);
   host = app.doc.createElement("div");
   host.innerHTML = enough;
   const chips = [...host.querySelectorAll(".verify-stats span")];
