@@ -64,11 +64,18 @@ test('非預期API錯誤不洩漏路徑或秘密，內部保留安全診斷碼',
   const db=await srv.mod.loadDb(),notes=db.stockNotes;
   const logs=[],original=console.error;
   console.error=(...args)=>logs.push(args);
-  db.stockNotes=new Proxy({}, {get(){throw Object.assign(new Error('C:/private/account/cert.pfx password=synthetic-secret'),{code:'EACCES'});}});
+  const fail=()=>{throw Object.assign(new Error('C:/private/account/cert.pfx password=synthetic-secret'),{code:'EACCES'});};
+  db.stockNotes=new Proxy({}, {get:fail,ownKeys:fail});
   try {
-    const response=await srv.api('/api/notes?code=2330');const body=await response.json();
+    const response=await srv.api('/api/notes?code=2330&secret=synthetic-query-secret');const body=await response.json();
     assert.equal(response.status,500);assert.equal(body.code,'INTERNAL_ERROR');
     assert.match(body.error,/重試|稍後/);assert.doesNotMatch(JSON.stringify(body),/private|synthetic-secret|EACCES/);
     assert.equal(logs.length,1);assert.match(JSON.stringify(logs),/EACCES/);assert.doesNotMatch(JSON.stringify(logs),/private|synthetic-secret/);
+    assert.equal(logs[0][1].operation,'GET /api/notes');
+    assert.doesNotMatch(JSON.stringify(logs),/2330|synthetic-query-secret|\?/);
+    const recent=await srv.api('/api/notes/recent?secret=synthetic-query-secret');await recent.json();
+    assert.equal(recent.status,500);assert.equal(logs.length,2);
+    assert.equal(logs[1][1].operation,'GET /api/notes/recent','不同失敗操作仍可區分');
+    assert.doesNotMatch(JSON.stringify(logs),/2330|private|synthetic-secret|synthetic-query-secret|\?/);
   }finally{db.stockNotes=notes;console.error=original;}
 });

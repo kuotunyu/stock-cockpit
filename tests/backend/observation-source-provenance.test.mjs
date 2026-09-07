@@ -5,6 +5,30 @@ import {importServer} from '../helpers/test-server.mjs';
 import {stockDayAllRow} from '../helpers/fixtures.mjs';
 const {mod,mock,dataDir}=await importServer();
 after(async()=>{await mod.shutdownServer();mock.restore();await rm(dataDir,{recursive:true,force:true});});
+test('缺日期的官方描述不得由 adapter 補成今日',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-10-07T08:00:00Z')});
+ const base={code:'9992',source:'TWSE OpenAPI',price:100,open:100,high:101,low:99};
+ for(const rawDate of [undefined,null,'','invalid','20260230']) {
+  const result=await mod.getOfficialObservationEvidence({...base,rawDate},'20261006','20261007');
+  assert.notEqual(result.status,'ok',String(rawDate));
+ }
+ t.mock.timers.reset();
+});
+test('真月K normalizer 的缺日期不得變成今日 candidate，有效月K仍可補 daily 缺值',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-10-07T08:00:00Z')});
+ const remove=mock.override({match:/STOCK_DAY\?/,reply:{stat:'OK',data:[
+  ['', '1','100','100','101','99','100','0','1'],
+  ['115/10/07','1','100','100','101','99','100','0','1'],
+ ]}});
+ try {
+  const daily=mod.normalizeDailyTwse({...stockDayAllRow({code:'9992',close:100}),Date:undefined});
+  const normalized=await mod.fetchStockHistoryMonth('9992','TWSE','20261001','測試');
+  assert.equal(normalized[0].date,'','真 normalizer 保留缺日期');
+  const evidence=await mod.getOfficialObservationEvidence(daily,'20261006','20261007');
+  assert.equal(evidence.status,'ok','有效月K仍可使用');
+  assert.deepEqual(evidence.officialDays,[{date:'20261007',source:'TWSE STOCK_DAY',status:'ok'}]);
+ }finally{remove();t.mock.timers.reset();}
+});
 test('I1：較早日只存在官方月K，adapter保留精確bar與正證據，真observation補章後恢復',async t=>{
  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-09-08T08:00:00Z')});
  let recovered=false,calendarCalls=0;

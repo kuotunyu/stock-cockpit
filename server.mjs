@@ -3356,10 +3356,11 @@ function rejectStaleRev(db, userId, key, inputRev, response) {
   return true;
 }
 
+const apiFailureOperations = new WeakMap();
 // 路由用：統一的失敗回應（502=上游抓不到、4xx=客戶端問題）。
 function apiFailure(response, status, error) {
   if (status === 500) {
-    console.error('[Stock1] API 非預期錯誤', { code: coarsePersistenceErrorCode(error),
+    console.error('[Stock1] API 非預期錯誤', { operation: apiFailureOperations.get(response) || 'unclassified', code: coarsePersistenceErrorCode(error),
       type: ['Error','TypeError','RangeError','SyntaxError'].includes(error?.name) ? error.name : 'Error' });
     jsonResponse(response, 500, { ok: false, code: 'INTERNAL_ERROR', error: '服務暫時無法完成請求，請稍後重試；若持續發生，請查看伺服器診斷記錄。' });
     return;
@@ -10238,10 +10239,17 @@ function officialCalendarCoversInterval(calendar, from, through) {
   }
   return true;
 }
+// 僅 adapter 拒絕空／非法來源日期；通用 toCompactDate 的省略值語意仍保留。
+function officialSourceDate(value) {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  const date = toCompactDate(value);
+  return isValidCompactCalendarDate(date) ? date : '';
+}
 function officialSessionCandidates(rows) {
   return rows.filter(row=>['TWSE STOCK_DAY','TPEx tradingStock','TWSE OpenAPI','TPEx OpenAPI'].includes(row?.source)
     && [row.open,row.high,row.low,row.price??row.close].every(value=>Number.isFinite(value)&&value>0))
-    .map(row=>({date:toCompactDate(row.rawDate||row.date||row.asOf),source:row.source,status:'ok'}));
+    .map(row=>({date:officialSourceDate(row.rawDate||row.date||row.asOf),source:row.source,status:'ok'}))
+    .filter(row=>row.date);
 }
 // 預定日顯示可用schedule；歷史結算不得把min/max、任意candidateDays或共識當缺日證據。
 function resolveNextTradingDate(signalDate, calendar = {}) {
@@ -10268,7 +10276,7 @@ async function getOfficialObservationEvidence(quote, signalDate, observationDate
   const signal = toCompactDate(signalDate);
   const observation = toCompactDate(observationDate);
   if (!quote || !signal || !observation) return { status: "missing", bar: null, nextDate: "", source: "" };
-  const quoteDate = toCompactDate(quote.rawDate || quote.asOf);
+  const quoteDate = officialSourceDate(quote.rawDate || quote.asOf);
   if (quoteDate === observation && Number.isFinite(quote.price) && quote.price > 0 && officialSessionCandidates([quote]).length) {
     return {
       status: "ok",
@@ -14074,6 +14082,14 @@ const getOnlyApiPaths = new Set([
   "/api/technical-analysis",
 ]);
 
+// 固定 allowlist，只記已知路由與方法；任意 URL／query／body 不進診斷。
+const diagnosticApiPaths = new Set([...getOnlyApiPaths,
+  '/api/auth/login','/api/auth/logout','/api/auth/password','/api/personal-data/restore/preview','/api/personal-data/restore',
+  '/api/admin/users','/api/watchlists','/api/alerts','/api/instrument-profile','/api/trade-plans','/api/trades',
+  '/api/broker/settings','/api/broker/test','/api/market-session','/api/quotes','/api/institutional','/api/margin',
+  '/api/notes','/api/company','/api/swing','/api/surveillance-board',
+]);
+
 async function handleApi(request, requestUrl, response) {
   if (getOnlyApiPaths.has(requestUrl.pathname) && request.method !== "GET") {
     jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
@@ -15798,6 +15814,10 @@ const server = createServer(async (request, response) => {
       return;
     }
     const requestUrl = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
+    if (diagnosticApiPaths.has(requestUrl.pathname)) {
+      const method = ['GET','POST','PUT','DELETE','PATCH','HEAD','OPTIONS'].includes(request.method) ? request.method : 'OTHER';
+      apiFailureOperations.set(response, `${method} ${requestUrl.pathname}`);
+    }
     if (requestUrl.pathname.startsWith("/api/")) {
       if (rejectUnsafeMutation(request, response)) return;
       const handled = await handleApi(request, requestUrl, response);
