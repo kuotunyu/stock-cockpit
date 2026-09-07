@@ -82,7 +82,8 @@ test("runScheduledCloseTasks：缺什麼跑什麼，都有則只推進驗證；�
 
   calls.length = 0;
   result = await mod.runScheduledCloseTasks({ ...deps({}), getReferenceData: async () => referenceFor(today, compactTradingDay(-1)) });
-  assert.deepEqual(result, { ran: [], skipped: "reference-not-today", persisted: false, captureStatus:{overnight:"incomplete",swing:"incomplete"} });
+  assert.deepEqual(result, { ran: [], skipped: "reference-not-today", persisted: false, captureStatus:{overnight:"not-captured",swing:"not-captured"},
+    inputStatus:{stage:'reference',status:'incomplete',reason:'reference-not-today'} });
   assert.deepEqual(calls, []);
 });
 
@@ -100,12 +101,75 @@ test('排程回傳採集狀態，來源未齊與上游失敗記實際嘗試；�
   const result=await mod.runScheduledCloseTasks(deps);
   assert.equal(result.captureStatus?.overnight,'complete-zero');assert.equal(result.captureStatus?.swing,'complete-zero');
   const incomplete=await mod.runScheduledCloseTasks({...deps,getReferenceData:async()=>referenceFor(today,compactTradingDay(-1))});
-  assert.equal(incomplete.captureStatus?.overnight,'incomplete');assert.equal(events.length,2);
+  assert.equal(incomplete.captureStatus?.overnight,'complete-zero','共用來源未齊不降級已完成formal');assert.equal(events.length,1);
+  assert.deepEqual(incomplete.inputStatus,{stage:'reference',status:'incomplete',reason:'reference-not-today'});
+  assert.equal(events[0][0],null);assert.equal(events[0][2].stage,'reference');
   await assert.rejects(mod.runScheduledCloseTasks({...deps,getReferenceData:async()=>{throw new Error('source down');}}),/source down/);
   assert.equal(events.at(-1)[2].status,'failed');
   delete db.verificationCaptures;
   assert.equal(mod.closeTasksDue({today,reference:referenceFor(today,today),db,lastRunDay:''}).needOvernight,false,'舊first formal保持權威，不用今天重跑補manifest');
   assert.equal((await mod.runScheduledCloseTasks({...deps})).captureStatus.overnight,'legacy-unknown');
+});
+
+test('I1：無formal時讀最新同日canonical manifest/attempt，formal與legacy仍優先',async()=>{
+  const db={verificationCaptures:{
+    prior:{strategy:'overnight',tradeDate:iso(today),canonical:true,status:'incomplete',capturedAt:'2026-01-01T01:00:00Z'},
+    failed:{strategy:'overnight',tradeDate:iso(today),canonical:true,status:'failed',kind:'provisional',capturedAt:'2026-01-01T02:00:00Z'},
+    research:{strategy:'overnight',tradeDate:iso(today),canonical:false,status:'complete',capturedAt:'2026-01-01T03:00:00Z'},
+    otherDay:{strategy:'swing',tradeDate:'1999-01-01',canonical:true,status:'failed',capturedAt:'2026-01-01T04:00:00Z'},
+    swing:{strategy:'swing',tradeDate:iso(today),canonical:true,status:'failed',capturedAt:'2026-01-01T02:00:00Z'},
+  }};
+  const deps={lastRunDay:'',getReferenceData:async()=>referenceFor(today,today),loadDb:async()=>db,
+    buildOvernightSignals:async()=>{},buildSwingBoard:async()=>{},advanceSwingVerification:async()=>{}};
+  const result=await mod.runScheduledCloseTasks(deps);
+  assert.deepEqual(result.captureStatus,{overnight:'failed',swing:'failed'});assert.equal(result.persisted,false);
+  db.verificationCaptures.swing.capturedAt='2026-01-01T05:00:00Z';db.verificationCaptures.swing.status='incomplete';
+  assert.equal((await mod.runScheduledCloseTasks(deps)).captureStatus.swing,'incomplete','最新實際attempt優先');
+  withFormal(db);assert.deepEqual((await mod.runScheduledCloseTasks(deps)).captureStatus,{overnight:'complete-zero',swing:'complete-zero'});
+  for(const id of Object.values(db.verificationPublications.current))delete db.verificationCaptures[id];
+  assert.deepEqual((await mod.runScheduledCloseTasks(deps)).captureStatus,{overnight:'legacy-unknown',swing:'legacy-unknown'});
+});
+
+test('I1：failed→incomplete→重用舊failed時，本輪真實builder的capture優先於原建立時間',async()=>{
+  const db={};
+  const failure={asOf:iso(today),formulaVersion:mod.OVERNIGHT_FORMULA_VERSION,requestScope:{maxCandidates:260,maxPerGroup:20},
+    generatedAt:'2026-01-01T01:00:00Z',provisional:true,coverage:{complete:true,markets:referenceFor(today,today).markets},
+    candidatePool:[{code:'2330',exchange:'TWSE',candidateRank:1,price:100,source:'TWSE OpenAPI',sourceAsOf:iso(today)}],
+    inputEvidence:[{code:'2330',exchange:'TWSE',outcome:'source-error'}],scanQuality:{candidateCount:1,completedCount:1,reliable:false},groups:{}};
+  let body=failure;
+  const deps={lastRunDay:'',getReferenceData:async()=>referenceFor(today,today),loadDb:async()=>db,
+    buildOvernightSignals:async()=>({publication:mod.publishVerification(db,'overnight',body)}),buildSwingBoard:async()=>{}};
+  assert.equal((await mod.runScheduledCloseTasks(deps)).captureStatus.overnight,'failed');
+  const first=Object.values(db.verificationPublications.captures)[0];
+  body={...failure,generatedAt:'2026-01-01T02:00:00Z',inputEvidence:[{code:'2330',exchange:'TWSE',outcome:'scan-incomplete'}]};
+  assert.equal((await mod.runScheduledCloseTasks(deps)).captureStatus.overnight,'incomplete');
+  body=failure;
+  assert.equal((await mod.runScheduledCloseTasks(deps)).captureStatus.overnight,'failed');
+  assert.equal(Object.keys(db.verificationPublications.captures).length,2,'同內容沿用原capture、不虛增revision');
+  assert.equal(db.verificationCaptures[first.captureId].capturedAt,'2026-01-01T01:00:00Z','不改首次採集時間');
+  assert.ok(db.verificationCaptures[first.captureId].lastAttemptSequence>1,'同毫秒重試也保存實際順序');
+  // 補一個早一天的格式起點，讓coverage可以核對這天而不另建本日formal。
+  const start={...db.verificationCaptures[first.captureId],tradeDate:iso(compactTradingDay(-1)),kind:'formal',fullRecord:true,status:'complete-zero'};
+  const coverage=mod.summarizeCaptureCoverage([...Object.values(db.verificationCaptures),start],[today]);
+  assert.equal(coverage.days.find(day=>day.tradeDate===iso(today)).status,'failed','coverage與排程使用同一份最新嘗試證據');
+});
+
+test('I2：只記真正失敗的採集策略，尚未開始、已完成與僅advance均不偽造attempt',async t=>{
+  for(const mode of ['overnight','swing','advance','reference','load'])await t.test(mode,async()=>{
+    const calls=[];const attempts=[];const db=mode==='advance'?withFormal({}):{};
+    const deps={lastRunDay:'',getReferenceData:async()=>{calls.push('reference');if(mode==='reference')throw new Error(mode);return referenceFor(today,today);},
+      loadDb:async()=>{if(mode==='load')throw new Error(mode);return db;},
+      buildOvernightSignals:async()=>{calls.push('overnight');if(mode==='overnight')throw new Error(mode);},
+      buildSwingBoard:async()=>{calls.push('swing');if(mode==='swing')throw new Error(mode);},
+      advanceSwingVerification:async()=>{calls.push('advance');throw new Error(mode);},
+      recordCaptureAttempt:async(strategy,day,evidence)=>attempts.push({strategy,day,...evidence})};
+    await assert.rejects(mod.runScheduledCloseTasks(deps),new RegExp(mode));
+    assert.deepEqual(attempts.map(a=>a.strategy),mode==='reference'?[null]:['overnight','swing'].includes(mode)?[mode]:[]);
+    if(mode==='overnight')assert.deepEqual(calls,['reference','overnight']);
+    if(mode==='swing')assert.deepEqual(calls,['reference','overnight','swing']);
+    if(mode==='advance')assert.deepEqual(calls,['reference','advance']);
+    for(const attempt of attempts){assert.equal(attempt.day,today);assert.equal(attempt.status,'failed');assert.equal(attempt.stage,mode==='reference'?'reference':'capture');}
+  });
 });
 
 // ---- 第二輪第一批：排程的保護缺口 ----

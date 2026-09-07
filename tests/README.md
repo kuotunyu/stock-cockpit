@@ -161,6 +161,8 @@ node scripts/date-sweep.mjs 2027-01-01   # 只掃指定日期，用來重現回�
 
 `verification-capture.test.mjs` 及 `verification-population.test.mjs` 另驗 T04 manifest／issued 契約：候選在 preselection 凍結原始排序、價格與來源、真 builder 全失敗與顯示切片、manifest／正式清單同次落盤和回滾、冷啟動、官方交易日缺口的實際發現時間、週末嘗試不擴大交易日分母。issued 先保存再按各模型投影 noEntry／pending／resolved／unresolved，測跨場景身份、鎖死、跳空、晚發布上下界、缺開盤、行政未解結束及並發補證不覆蓋推進。新 next-open 模型只是沿原退出窗口的獨立價格觀察，測試不宣稱已建立完整交易模擬。
 
+T04 排程修正另鎖真 builder 的 failed provisional 狀態、failed→incomplete→同內容 failed 的同毫秒重試順序及冷啟動、首次 formal／legacy 優先；逐階段注入 overnight／swing／reference／load／advance 失敗，確認每筆 attempt 只代表實際執行的工作。共享 reference 證據不會阻止尚未開始策略記錄 not-captured。
+
 ```powershell
 node --test tests/backend/verification-capture.test.mjs tests/backend/verification-population.test.mjs tests/backend/close-scheduler.test.mjs
 ```

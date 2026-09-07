@@ -8664,7 +8664,7 @@ function summarizeCaptureCoverage(manifests, expectedDates = [], { fromDate = ''
   const days = dates.map(tradeDate => {
     const matches = canonical.filter(item => item.tradeDate === tradeDate);
     const item = matches.find(m => m.kind === 'formal') || matches.filter(m => m.status !== 'not-captured')
-      .sort((a,b) => String(b.capturedAt || '').localeCompare(String(a.capturedAt || '')) || (b.revision || 0) - (a.revision || 0))[0] || matches[0];
+      .sort(compareVerificationAttempts)[0] || matches[0];
     return { tradeDate, status: item?.status || 'not-captured', captureId: item?.captureId || null,
       capturedAt: item?.capturedAt || null, discoveredAt: item?.discoveredAt || null, degraded: item?.degraded || false };
   });
@@ -8695,13 +8695,28 @@ function recordCaptureGaps(db, strategy, expectedDates, discoveredAt = new Date(
   return changed;
 }
 
-function recordCaptureAttempt(db, strategy, day, { status, reason, coverage = null, attemptedAt = new Date().toISOString() }) {
+function compareVerificationAttempts(a, b) {
+  return (b.lastAttemptSequence || 0) - (a.lastAttemptSequence || 0)
+    || String(b.lastAttemptedAt || b.capturedAt || '').localeCompare(String(a.lastAttemptedAt || a.capturedAt || ''))
+    || (b.revision || 0) - (a.revision || 0);
+}
+
+// 嘗試順序與不可變採集輸入分開；內容去重不能抹掉 failed→incomplete→failed 的最後一次結果。
+function markVerificationAttempt(db, manifest, attemptedAt = new Date().toISOString()) {
+  const sequence = Object.values(db.verificationCaptures || {})
+    .filter(item => item.strategy === manifest.strategy && item.tradeDate === manifest.tradeDate)
+    .reduce((max, item) => Math.max(max, item.lastAttemptSequence || 0), 0) + 1;
+  manifest.lastAttemptedAt = attemptedAt;
+  manifest.lastAttemptSequence = sequence;
+}
+
+function recordCaptureAttempt(db, strategy, day, { status, reason, stage = 'capture', coverage = null, attemptedAt = new Date().toISOString() }) {
   const tradeDate = compactToIsoDate(toCompactDate(day));
-  const attemptId = createHash('sha256').update(stableJson({ strategy, tradeDate, status, reason, coverage: verificationInputContent(coverage) })).digest('hex');
+  const attemptId = createHash('sha256').update(stableJson({ strategy, tradeDate, stage, status, reason, coverage: verificationInputContent(coverage) })).digest('hex');
   db.verificationCaptures ||= {};
-  if (db.verificationCaptures[attemptId]) return false;
-  db.verificationCaptures[attemptId] = { attemptId, captureId: null, strategy, tradeDate, status, reason, coverage: cloneJson(coverage),
-    canonical: true, fullRecord: false, capturedAt: attemptedAt, revision: 0 };
+  db.verificationCaptures[attemptId] ||= { attemptId, captureId: null, strategy, tradeDate, stage, status, reason, coverage: cloneJson(coverage),
+    canonical: stage === 'capture' && ['overnight','swing'].includes(strategy), fullRecord: false, capturedAt: attemptedAt, revision: 0 };
+  markVerificationAttempt(db, db.verificationCaptures[attemptId], attemptedAt);
   return true;
 }
 
@@ -8818,7 +8833,11 @@ function publishVerification(db, strategy, body) {
   const store = db.verificationPublications;
   const revisions = Object.values(store.captures).filter(capture => capture.publicationKey === key);
   const reusable = revisions.find(capture => capture.inputFingerprint === inputFingerprint && capture.complete === complete);
-  if (reusable) return cloneJson(reusable);
+  if (reusable) {
+    const manifest = db.verificationCaptures?.[reusable.captureId];
+    if (manifest && reusable.kind !== 'formal') markVerificationAttempt(db, manifest);
+    return cloneJson(reusable);
+  }
   const revision = revisions.length + 1;
   const first = store.current[key];
   const kind = !complete ? 'provisional' : !canonical ? 'research' : first ? 'correction' : 'formal';
@@ -8841,6 +8860,7 @@ function publishVerification(db, strategy, body) {
   store.captures[captureId] = capture;
   db.verificationCaptures ||= {};
   db.verificationCaptures[captureId] = buildCaptureManifest({ capture, body });
+  markVerificationAttempt(db, db.verificationCaptures[captureId], publicationStartedAt);
   if (kind === 'formal') {
     store.current[key] = captureId;
     if (strategy === 'swing') {
@@ -14834,20 +14854,24 @@ async function runScheduledCloseTasks(deps = {}) {
   const loadDbFn = deps.loadDb || loadDb;
   const saveAttempt = deps.recordCaptureAttempt || (deps.loadDb ? async () => {} : async (strategy, day, evidence) =>
     commitDbMutation(db => recordCaptureAttempt(db, strategy, day, evidence) ? true : skipDbMutation(false)));
-  const captureStatusFor = db => Object.fromEntries(['overnight','swing'].map(strategy => {
+  const captureStatusFor = (db, absent = 'incomplete') => Object.fromEntries(['overnight','swing'].map(strategy => {
     const key = verificationPublicationKey(strategy, today, currentVerificationIdentity(strategy).selectionVersion);
     const id = db.verificationPublications?.current?.[key];
-    const manifest = db.verificationCaptures?.[id];
-    return [strategy, manifest?.status || (id ? 'legacy-unknown' : 'incomplete')];
+    if (id) return [strategy, db.verificationCaptures?.[id]?.status || 'legacy-unknown'];
+    const manifest = Object.values(db.verificationCaptures || {}).filter(item => item.strategy === strategy
+      && toCompactDate(item.tradeDate) === today && item.canonical && item.status !== 'not-captured').sort(compareVerificationAttempts)[0];
+    return [strategy, manifest?.status || absent];
   }));
+  let activePhase = { stage: 'reference', strategy: null };
   try {
     const reference = await (deps.getReferenceData || getReferenceData)();
+    activePhase = null;
     const db = await loadDbFn();
     const decision = closeTasksDue({ today, reference, db, lastRunDay });
     const ran = [];
     if (!decision.due) {
-      if (decision.reason === 'reference-not-today') for (const strategy of ['overnight','swing']) {
-        await saveAttempt(strategy, today, { status: 'incomplete', reason: decision.reason,
+      if (decision.reason === 'reference-not-today') {
+        await saveAttempt(null, today, { stage: 'reference', status: 'incomplete', reason: decision.reason,
           coverage: { complete: Boolean(reference.coverageComplete), markets: reference.markets || {} }, attemptedAt: now.toISOString() });
       }
       if (useModuleState) {
@@ -14855,15 +14879,20 @@ async function runScheduledCloseTasks(deps = {}) {
         schedulerRetryAt = 0;
       }
       return { ran, skipped: decision.reason, persisted: false,
-        ...(decision.reason === 'reference-not-today' ? { captureStatus: { overnight: 'incomplete', swing: 'incomplete' } } : {}) };
+        ...(decision.reason === 'reference-not-today' ? { captureStatus: captureStatusFor(db, 'not-captured'),
+          inputStatus: { stage: 'reference', status: 'incomplete', reason: decision.reason } } : {}) };
     }
     if (decision.needOvernight) {
+      activePhase = { stage: 'capture', strategy: 'overnight' };
       await (deps.buildOvernightSignals || buildOvernightSignals)({ persistSnapshot: true });
+      activePhase = null;
       ran.push("overnight");
     }
     if (decision.needSwing) {
       // buildSwingBoard 內部會先 advanceSwingVerification 再掃描落快照。
+      activePhase = { stage: 'capture', strategy: 'swing' };
       await (deps.buildSwingBoard || buildSwingBoard)({});
+      activePhase = null;
       ran.push("swing");
     } else {
       // closeTasksDue 已要求兩市場整批收盤都是今天，收盤日就是今天（不需要再算眾數）。
@@ -14882,9 +14911,9 @@ async function runScheduledCloseTasks(deps = {}) {
     }
     return { ran, skipped: "", persisted, captureStatus: captureStatusFor(afterDb) };
   } catch (error) {
-    // 實際嘗試與正式發布分開保存；失敗紀錄本身落盤失敗不遮蔽原始錯誤。
-    for (const strategy of ['overnight','swing']) await saveAttempt(strategy, today,
-      { status: 'failed', reason: error?.code || 'capture-source-unavailable', attemptedAt: now.toISOString() }).catch(() => {});
+    // 只記真正失敗的階段；未開始／已完成的策略、DB讀取及獨立驗證推進都不是採集失敗。
+    if (activePhase) await saveAttempt(activePhase.strategy, today,
+      { stage: activePhase.stage, status: 'failed', reason: error?.code || 'capture-source-unavailable', attemptedAt: now.toISOString() }).catch(() => {});
     if (useModuleState) {
       schedulerFailures += 1;
       schedulerFailureDay = today;

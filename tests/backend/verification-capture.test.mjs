@@ -49,10 +49,43 @@ test('兩個真實builder把全上游失敗保留failed manifest，不以附加�
  const fixtures=pathToFileURL(SERVER_PATH.replace(/server\.mjs$/,'tests/helpers/fixtures.mjs')).href;
  const script=`import {importServer} from ${JSON.stringify(helper)}; import {surveillanceRoutes,fundamentalsRoutes,stockDayAllRow,tpexDailyCloseRow} from ${JSON.stringify(fixtures)};import {rm} from 'node:fs/promises';
  const {mod,mock,dataDir}=await importServer({routes:[...surveillanceRoutes({reference:[stockDayAllRow({code:'2330'})],tpexReference:[tpexDailyCloseRow({code:'00679B'})]}),...fundamentalsRoutes({}),{match:u=>u.pathname.endsWith('/STOCK_DAY'),reply:{stat:'SERVICE_UNAVAILABLE'}},{match:u=>u.pathname.includes('/finance/chart/'),reply:{chart:{result:null,error:{code:'Unavailable'}}}}]});
- try { const overnight=await mod.buildOvernightSignals();const swing=await mod.buildSwingBoard();const db=await mod.loadDb();console.log(JSON.stringify([overnight,swing].map(b=>({kind:b.publication?.kind,manifest:db.verificationCaptures?.[b.publication?.captureId]})))); }
+ try { const scheduled=await mod.runScheduledCloseTasks({lastRunDay:''});const db=await mod.loadDb();console.log(JSON.stringify(['overnight','swing'].map(strategy=>{const manifest=Object.values(db.verificationCaptures).find(m=>m.strategy===strategy&&m.kind==='provisional');return {kind:manifest?.kind,manifest,captureStatus:scheduled.captureStatus[strategy]};}))); }
  finally {await mod.flushPersistence();mock.restore();await rm(dataDir,{recursive:true,force:true});}`;
  const results=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8'}).trim().split('\n').at(-1));
- for(const r of results){assert.equal(r.kind,'provisional');assert.equal(r.manifest.status,'failed');assert.equal(r.manifest.issued.length,0);assert.equal(r.manifest.candidates.length,1);}
+ for(const r of results){assert.equal(r.kind,'provisional');assert.equal(r.manifest.status,'failed');assert.equal(r.captureStatus,'failed','排程回應應與真builder保存證據一致');assert.equal(r.manifest.issued.length,0);assert.equal(r.manifest.candidates.length,1);}
+});
+test('I2：reference失敗只原子保存一筆共享輸入證據，不假稱兩策略已開始採集',async()=>{
+  await assert.rejects(mod.runScheduledCloseTasks({lastRunDay:'',getReferenceData:async()=>{throw Object.assign(new Error('shared input failed'),{code:'TEST_REFERENCE_FAILURE'});}}),/shared input failed/);
+  const attempts=Object.values((await mod.loadDb()).verificationCaptures).filter(m=>m.reason==='TEST_REFERENCE_FAILURE');
+  assert.equal(attempts.length,1);assert.equal(attempts[0].strategy,null);assert.equal(attempts[0].stage,'reference');assert.equal(attempts[0].canonical,false);
+  const disk=JSON.parse(await readFile(join(dataDir,'stock1-db.json'),'utf8'));
+  assert.deepEqual(disk.verificationCaptures[attempts[0].attemptId],attempts[0]);
+  await mod.commitDbMutation(db=>{
+    mod.publishVerification(db,'overnight',source('2026-08-28'));
+    mod.recordCaptureGaps(db,'overnight',[compactToday()]);
+  });
+  const todayIso=compactToday().slice(0,4)+'-'+compactToday().slice(4,6)+'-'+compactToday().slice(6);
+  assert.equal((await mod.loadDb()).verificationCaptures[`not-captured:overnight:${todayIso}`].status,'not-captured','共享reference失敗不阻止未開始策略的缺採集紀錄');
+});
+test('I1：同毫秒重用failed保留最後嘗試序號；原時間與輸入不改，冷啟動coverage仍選failed',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-08-27T06:00:00Z')});
+  try {
+    const failed={...source('2026-08-27'),generatedAt:'2026-08-27T06:00:00Z',provisional:true,
+      inputEvidence:[{code:'2330',exchange:'TWSE',outcome:'source-error'}],scanQuality:{candidateCount:1,completedCount:1,reliable:false}};
+    const publish=b=>mod.commitDbMutation(db=>mod.publishVerification(db,'overnight',b));
+    await publish(source('2026-08-26'));
+    const first=await publish(failed);const original=structuredClone((await mod.loadDb()).verificationCaptures[first.captureId]);
+    const middle=await publish({...failed,inputEvidence:[{code:'2330',exchange:'TWSE',outcome:'scan-incomplete'}]});
+    const again=await publish(failed);assert.deepEqual(again,first,'重試不是新publication revision');
+    const live=structuredClone((await mod.loadDb()).verificationCaptures[first.captureId]);
+    assert.equal(live.capturedAt,original.capturedAt);assert.equal(live.publicationStartedAt,original.publicationStartedAt);
+    assert.equal(live.inputFingerprint,original.inputFingerprint);assert.deepEqual(live.candidates,original.candidates);assert.deepEqual(live.issued,original.issued);
+    assert.equal(live.lastAttemptedAt,(await mod.loadDb()).verificationCaptures[middle.captureId].lastAttemptedAt,'真的同毫秒');
+    assert.ok(live.lastAttemptSequence>(await mod.loadDb()).verificationCaptures[middle.captureId].lastAttemptSequence);
+    const cold=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',`const m=await import(${JSON.stringify(pathToFileURL(SERVER_PATH).href)});const db=await m.loadDb();console.log(JSON.stringify({manifest:db.verificationCaptures[process.argv[1]],coverage:m.summarizeCaptureCoverage(Object.values(db.verificationCaptures).filter(x=>x.strategy==='overnight'),['20260827'])}));`,first.captureId],
+      {encoding:'utf8',env:{...process.env,PORT:'0',STOCK1_SKIP_LISTEN:'1',DATA_DIR:dataDir}}).trim().split('\n').at(-1));
+    assert.deepEqual(cold.manifest,live);assert.equal(cold.coverage.days.find(day=>day.tradeDate==='2026-08-27').status,'failed');
+  } finally {t.mock.timers.reset();}
 });
 test('缺採集只從完整格式起始日及給定實際交易日發現，保留發現時刻與後續缺口',()=>{
   const db={};const p=mod.publishVerification(db,'overnight',source());
