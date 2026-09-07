@@ -3670,6 +3670,7 @@ function resolveDetailPanelOpener(trigger) {
   else if (trigger.matches(".verify-chip")) selector = `.verify-chip[data-overnight-code="${code}"]`;
   else if (trigger.matches("[data-overnight-code]")) selector = `[data-overnight-code="${code}"]`;
   else if (trigger.matches(".inspect-open")) selector = `.inspect-open[data-swing-code="${code}"]`;
+  else if (trigger.matches(".swing-open")) selector = `.swing-open[data-swing-code="${code}"]`;
   else if (trigger.matches("[data-swing-code]")) selector = `[data-swing-code="${code}"]`;
   else if (trigger.matches(".surv-card")) selector = `.surv-card[data-code="${code}"]`;
   else if (trigger.matches(".watch-stock-row")) selector = `.watch-row-select[data-code="${code}"]`;

@@ -12,6 +12,7 @@
     "secret": "node scripts/print-secret.mjs",
     "backup": "node --env-file-if-exists=.env scripts/backup.mjs",
     "test": "node --test tests/backend/*.test.mjs tests/frontend/*.test.mjs",
+    "test:browser": "node --test --test-concurrency=1 tests/browser/*.test.mjs",
     "test:backend": "node --test tests/backend/*.test.mjs",
     "test:frontend": "node --test tests/frontend/*.test.mjs",
     "test:live": "node --test tests/live/*.test.mjs",
@@ -22,6 +23,7 @@
     "fubon-neo": "^2.2.2"
   },
   "devDependencies": {
-    "jsdom": "^30.0.1"
+    "jsdom": "^30.0.1",
+    "playwright": "1.63.0"
   }
 }

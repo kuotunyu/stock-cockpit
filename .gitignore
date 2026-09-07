@@ -3,6 +3,7 @@ node_modules/
 .superpowers/
 .data/
 .data-preview/
+test-results/browser/
 log/
 .env
 *.pfx

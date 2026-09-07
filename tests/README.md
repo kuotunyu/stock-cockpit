@@ -8,10 +8,25 @@ Node 內建 `node --test`＋ `jsdom`（前端 DOM 測試）。使用 **Node 22.2
 npm test              # 後端 + 前端（全離線、臨時埠，絕不碰 5174）
 npm run test:backend  # 只跑後端
 npm run test:frontend # 只跑前端（jsdom）
+npm run test:browser  # 真實 Chromium UI 基準（node:test，序列執行）
 npm run test:coverage # 覆蓋率（見下方「覆蓋率說明」）
 npm run test:dates    # 【選跑】把時鐘平移到各種風險日期各跑一次全套（見下方「日期體檢」）
 npm run test:live     # 【選跑】真打 TWSE/TPEx 驗證上游欄位形狀（偵測 fixture 漂移）
 ```
+
+第一次在本機執行瀏覽器測試前，先安裝 Playwright 鎖定版本對應的 Chromium：
+
+```powershell
+npx playwright install chromium
+```
+
+`test:browser` 沿用 `node:test`，不另加 framework runner。`createBrowserFixture({ scenario })`
+固定提供 `populated`／`empty`／`partial`／`expired-session` 四種 UI 消費契約；HTML、CSS、JS
+仍由 `bootServer()` 在臨時埠提供，瀏覽器 API 回應則使用完整固定 fixture。它只允許本次 loopback
+origin，所有其他網路請求直接中止，因此不會碰 live API、5174、正式 `.data` 或 `.env`。
+每個案例都在 `finally` 關閉 page/context/browser，再由正式 `shutdownServer()` 排空伺服器與 timer。
+排版案例會等待指定內容及 `document.fonts.ready`，不以 `networkidle` 或任意 sleep 猜完成時間。
+失敗時 screenshot 與 trace 寫入 `test-results/browser/`；CI 的 Node 24 Chromium job 會上傳該目錄。
 
 `test:dates` 與 `test:live` 都**不掛在每次 push 的 CI**（一輪好幾分鐘），改由
 `.github/workflows/reliability.yml` **每天台北 06:00 排程執行**，也可以在 Actions 頁面手動觸發。
