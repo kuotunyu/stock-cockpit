@@ -2047,7 +2047,7 @@ async function restorePersonalBackup() {
 }
 
 function clearUserScopedState({ renderNow = true } = {}) {
-  // 備註的「能不能刪」（mine）是伺服器依當時登入者算的；換人或登出就重抓，不沿用上一個人的答案。
+  // 備註的「能不能刪」（canManage）是伺服器依當時登入者算的；換人或登出就重抓，不沿用上一個人的答案。
   notesState.code = "";
   notesState.notes = [];
   authScopeGeneration += 1;
@@ -10980,8 +10980,8 @@ function renderStockNotes(stock) {
     loadStockNotes(stock.code);
   }
   const notes = notesState.code === stock.code ? notesState.notes : [];
-  // 伺服器不再回 userId（免登入端點會外洩內部 id），改由它算好的 mine 決定能不能刪。
-  const canDelete = (note) => Boolean(authState.user && note.mine);
+  // 伺服器不再回 userId（免登入端點會外洩內部 id），改由它算好的 canManage 決定能不能刪。
+  const canDelete = (note) => Boolean(authState.user && note.canManage);
   const list = notes.length
     ? [...notes]
         .reverse()

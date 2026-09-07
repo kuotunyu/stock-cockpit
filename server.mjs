@@ -1864,12 +1864,13 @@ function sanitizeUser(user) {
 }
 
 // 共享備註對外的形狀：拿掉內部 userId（免登入端點也回，會讓 LAN 上任何人枚舉到
-// PATCH/DELETE /api/admin/users 要用的 u_xxxx），改用 mine 告訴前端「這是不是我的（或我是 admin）」。
+// PATCH/DELETE /api/admin/users 要用的 u_xxxx），mine 僅表示作者；canManage 另表示本人或管理者的操作權。
 function publicNotes(notes, auth) {
   const viewer = auth?.user || null;
   return (notes || []).map(({ userId, ...rest }) => ({
     ...rest,
-    mine: Boolean(viewer) && (userId === viewer.id || viewer.role === "admin"),
+    mine: Boolean(viewer) && userId === viewer.id,
+    canManage: Boolean(viewer) && (userId === viewer.id || viewer.role === "admin"),
   }));
 }
 
