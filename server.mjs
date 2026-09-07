@@ -287,6 +287,7 @@ const BACKTEST_CACHE_MAX_ENTRIES = 8;
 const BACKTEST_CACHE_TTL_MS = 5 * 60 * 1000;
 const marginCache = new Map();
 const marginInFlight = new Map();
+const SWING_CACHE_MAX_ENTRIES = 16; // UI共用1個canonical key，預留近期交易日與研究scope。
 const swingCache = new Map();
 const swingScanInFlight = new Map();
 const SWING_FORCE_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
@@ -13769,7 +13770,7 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
   const modelCacheKey = `${snapshotKey}:${verificationModelKey(currentVerificationIdentity("swing"))}`;
 
   // 1) 記憶體快取（最快路徑）
-  const cached = swingCache.get(modelCacheKey);
+  const cached = getFreshTtlCacheEntry(swingCache, modelCacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     cached.value = await confirmVerificationBody(cached.value);
     return sliceSwingBody(cached.value, limit, scenarioKey);
@@ -13782,7 +13783,7 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
     const stored = db.swingSnapshots?.[snapshotKey];
     if (stored?.body?.publication?.modelKey === verificationModelKey(currentVerificationIdentity("swing")) && stored.body.formulaVersion === SWING_FORMULA_VERSION) {
       const confirmedBody = await confirmVerificationBody(stored.body);
-      swingCache.set(modelCacheKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: confirmedBody });
+      setBoundedDateCache(swingCache, modelCacheKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: confirmedBody }, SWING_CACHE_MAX_ENTRIES);
       return sliceSwingBody(confirmedBody, limit, scenarioKey);
     }
   }
@@ -13807,13 +13808,13 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
             "本次更新資料覆蓋不足，已保留同日最近一次完整波段快照。",
           ]),
         };
-        swingCache.set(modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: fallbackBody });
+        setBoundedDateCache(swingCache, modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: fallbackBody }, SWING_CACHE_MAX_ENTRIES);
         return sliceSwingBody(fallbackBody, limit, scenarioKey);
       }
     } catch {
       // DB 暫時讀不到時仍可回 provisional 記憶體結果，不做持久化。
     }
-    swingCache.set(modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: body });
+    setBoundedDateCache(swingCache, modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: body }, SWING_CACHE_MAX_ENTRIES);
     return sliceSwingBody(body, limit, scenarioKey);
   }
 
@@ -13842,7 +13843,7 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
       return publishedBody;
     });
     persistedBody = await confirmVerificationBody(persistedBody);
-    swingCache.set(modelCacheKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: persistedBody });
+    setBoundedDateCache(swingCache, modelCacheKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: persistedBody }, SWING_CACHE_MAX_ENTRIES);
     return sliceSwingBody(persistedBody, limit, scenarioKey);
   } catch (error) {
     // 寫入失敗仍回本次分析，但只短暫快取並明確提示；下次會重試正式快照。
@@ -13851,7 +13852,7 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
       publication: { kind: "not-persisted" },
       warnings: unique([...(body.warnings || []), "正式波段快照暫時無法儲存，將在下次更新重試。"]),
     };
-    swingCache.set(modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: retryBody });
+    setBoundedDateCache(swingCache, modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: retryBody }, SWING_CACHE_MAX_ENTRIES);
     return sliceSwingBody(retryBody, limit, scenarioKey);
   }
 }
