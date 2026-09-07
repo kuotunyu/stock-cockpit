@@ -33,6 +33,19 @@ function makeEntry(overrides = {}) {
 const dayQuote = (over = {}) => ({ rawDate: compactTradingDay(0), open: 102, high: 105, low: 99, price: 103, ...over });
 const quoteAt = (rawDate, over = {}) => ({ rawDate, open: 100, high: 105, low: 96, price: 101, ...over });
 
+test('已知不支援模型：直接推進與歷史 replay 都保留價格、結案與缺口原證據', () => {
+  for (const mode of ['direct', 'replay']) {
+    const entry = makeEntry({ identity: { ...mod.currentVerificationIdentity('swing'), entryModel: 'next-open-simulation' },
+      dataGap: { from: compactTradingDay(-1) }, verificationRetry: { reason: 'original' } });
+    const before = structuredClone(entry);
+    if (mode === 'direct') assert.equal(mod.advanceSwingVerificationEntry(entry, dayQuote({high:120})), false);
+    else assert.equal(mod.replaySwingVerificationHistory(entry, [dayQuote({high:120})], compactTradingDay(0)).unavailableReason, 'unsupported-verification-model');
+    const { evaluationUnavailable, ...evidence } = entry;
+    assert.deepEqual(evidence, before);
+    assert.equal(evaluationUnavailable.reason, 'unsupported-verification-model');
+  }
+});
+
 test("推進：碰到目標＝達標（出場價＝目標；跳空開高用開盤價）", () => {
   const hit = makeEntry();
   assert.equal(mod.advanceSwingVerificationEntry(hit, dayQuote({ high: 111 })), true);

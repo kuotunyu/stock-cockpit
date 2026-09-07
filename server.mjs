@@ -6211,13 +6211,21 @@ async function getStockHistory(quote, dateCompact, monthsBack = 3, options = {})
   // 對呼叫端長得一模一樣。多數呼叫端（畫圖、型態計算）確實只要盡力而為，但驗證推進不行——
   // 它會把我方的抓取失敗當成官方缺 K 寫進 dataGap 並永久停等。想分辨的呼叫端傳一個陣列進來收。
   const failedMonths = [];
+  const sourceEvidence = options.sourceEvidence;
+  if (sourceEvidence) Object.assign(sourceEvidence, { official: [], fallback: { status: 'not-requested' } });
   const monthRows = await Promise.all(
     months.map((month) => fetchStockHistoryMonth(quote.code, quote.exchange, month, quote.name, { requireSourceSuccess: options.requireSourceSuccess })
+      .then(rows => {
+        sourceEvidence?.official.push({ month, status: rows.length ? 'success' : 'confirmed-empty' });
+        return rows;
+      })
       .catch((error) => {
         failedMonths.push({ month, message: error?.message || String(error) });
+        sourceEvidence?.official.push({ month, status: 'failed', reason: error?.message || String(error) });
         return [];
       }))
   );
+  sourceEvidence?.official.sort((a,b) => a.month.localeCompare(b.month));
   if (Array.isArray(options.failedMonths)) options.failedMonths.push(...failedMonths);
   const rows = monthRows
     .flat()
@@ -6231,8 +6239,11 @@ async function getStockHistory(quote, dateCompact, monthsBack = 3, options = {})
   const stale = !latestRowDate || latestRowDate < addDaysCompact(dateCompact, -(options.freshnessDays ?? 5));
   if (options.allowExternalFallback && (rows.length < (options.fallbackMinRows || 60) || stale)) {
     try {
-      return await fetchYahooHistory(quote, dateCompact, options.fallbackRange || "2y");
-    } catch {
+      const fallback = await fetchYahooHistory(quote, dateCompact, options.fallbackRange || "2y");
+      if (sourceEvidence) sourceEvidence.fallback = { status: fallback.length ? 'success' : 'confirmed-empty' };
+      return fallback;
+    } catch (error) {
+      if (sourceEvidence) sourceEvidence.fallback = { status: 'failed', reason: error?.message || String(error) };
       return rows;
     }
   }
@@ -8382,14 +8393,15 @@ async function buildOvernightSignalsUncached({
   const inputEvidence = [];
   const enriched = await mapLimit(candidates, 3, async (quote) => {
     const failedMonths = [];
+    const sourceEvidence = {};
     let history = await getStockHistory(quote, latestDate, 4, {
-      failedMonths,
+      failedMonths, sourceEvidence, requireSourceSuccess: true,
       allowExternalFallback: true,
       fallbackMinRows: 60,
       fallbackRange: "1y",
     });
     history = appendTodayCloseBar(history, quote, latestDate);
-    const evidence = { code: quote.code, exchange: quote.exchange, price: quote.price,
+    const evidence = { code: quote.code, exchange: quote.exchange, price: quote.price, sourceEvidence,
       sourceAsOf: quote.asOf || null, outcome: 'data-insufficient', failedMonths: failedMonths.map(item => item.month),
       historyFingerprint: createHash('sha256').update(stableJson(history.map(({observedAt,...row}) => row))).digest('hex'),
       observedAt: history.map(row => row.observedAt).filter(Boolean).sort().at(-1) || null };
@@ -8450,7 +8462,9 @@ async function buildOvernightSignalsUncached({
   const readyCount = inputEvidence.filter(item => item.outcome !== 'data-insufficient').length;
   const scanQuality = { candidateCount: candidates.length, completedCount: inputEvidence.length,
     readyCount, coverageRate: candidates.length ? roundTo(readyCount / candidates.length * 100) : 100,
-    reliable: inputEvidence.length === candidates.length && (!candidates.length || readyCount > 0 || inputEvidence.some(item => !item.failedMonths.length)),
+    reliable: inputEvidence.length === candidates.length && inputEvidence.every(item =>
+      item.sourceEvidence.official.every(source => source.status !== 'failed')
+      || ['success', 'confirmed-empty'].includes(item.sourceEvidence.fallback.status)),
     corporateActionResultsComplete: !corporateActionCoverage?.degraded };
   const body = {
     ok: true,
@@ -9279,6 +9293,40 @@ function storedObservationFor(snapshot, expected = null) {
   return null;
 }
 
+function authoritativeOvernightSnapshots(db) {
+  const byDay = new Map();
+  for (const snapshot of db.signalSnapshots || []) {
+    if (overnightSnapshotFormulaVersion(snapshot) !== OVERNIGHT_FORMULA_VERSION) continue;
+    const day = toCompactDate(snapshot.asOf);
+    const key = verificationPublicationKey('overnight', snapshot.asOf, OVERNIGHT_FORMULA_VERSION);
+    const currentId = db.verificationPublications?.current?.[key];
+    if (currentId) {
+      if (snapshot.captureId === currentId) byDay.set(day, snapshot);
+    } else if (!snapshot.captureId && !byDay.has(day)) byDay.set(day, snapshot);
+  }
+  return [...byDay.values()].sort((a,b) => String(a.asOf).localeCompare(String(b.asOf)));
+}
+
+async function verificationObservation(snapshot, options) {
+  const stored = storedObservationFor(snapshot) || storedObservationFor(snapshot, observationIdentityFor(snapshot));
+  let observed;
+  if (stored) observed = { ...stored, available: true, generatedAt: new Date().toISOString(), signalDate: snapshot.asOf,
+    expectedSignals: snapshot.picks.length, verifiedSignals: stored.rows.filter(row => row.verified).length,
+    pendingSignals: stored.rows.filter(row => !row.verified).length,
+    rows: stored.rows.map((row,index) => ({ ...snapshot.picks[index], ...row })) };
+  else if (snapshot.captureId && verificationModelKey(snapshot) !== verificationModelKey(currentVerificationIdentity('overnight'))) {
+    observed = { identity: verificationIdentity(snapshot), available: false, status: 'unavailable', complete: false,
+      unavailableReason: 'unsupported-verification-model', rows: [], warnings: ['此評估模型目前不支援補算，保留原版本與輸入。'] };
+  } else observed = { ...await observeSignalSnapshot(snapshot, options),
+    identity: observationIdentityFor(snapshot), computedAt: new Date().toISOString(),
+    kind: snapshot.captureId ? 'forward-observation' : 'retrospective-observation' };
+  return { ...observed, modelKey: verificationModelKey(observed.identity),
+    captureId: snapshot.captureId || null, inputFingerprint: observationInputFingerprint(snapshot),
+    publishedAt: snapshot.publishedAt || null, decisionAvailableAt: snapshot.decisionAvailableAt || null,
+    publicationStartedAt: snapshot.publicationStartedAt || null, publicationTimePrecision: snapshot.publicationTimePrecision || 'unknown',
+    kind: observed.kind || (snapshot.captureId ? 'forward-observation' : 'legacy-observation') };
+}
+
 // 寫回快照的精簡版：只留成績單用得到的欄位（不把整個 pick 與證據再存一份）。一次 mutation 寫全部。
 async function persistFinalObservations(entries) {
   const compactRows = (rows) => rows.map((row) => ({
@@ -9292,6 +9340,8 @@ async function persistFinalObservations(entries) {
     openReturn: Number.isFinite(row.openReturn) ? row.openReturn : null,
     highReturn: Number.isFinite(row.highReturn) ? row.highReturn : null,
     currentReturn: Number.isFinite(row.currentReturn) ? row.currentReturn : null,
+    ...Object.fromEntries(['currentPrice', 'lowReturn', 'openReturnNet', 'currentReturnNet', 'observationPhase', 'adjustedBase', 'signalClose']
+      .filter(key => key in row).map(key => [key, row[key]])),
     observationSource: row.observationSource || "",
     ...(row.corporateActionAdjusted ? { corporateActionAdjusted: true } : {}),
   }));
@@ -9303,7 +9353,7 @@ async function persistFinalObservations(entries) {
         .find((candidate) => snapshot.captureId ? candidate.captureId === snapshot.captureId
           : candidate.asOf === snapshot.asOf && overnightSnapshotFormulaVersion(candidate) === version && !candidate.captureId);
       if (item && observationInputFingerprint(item) !== observationInputFingerprint(snapshot)) continue;
-      if (!item || storedObservationFor(item, observed.identity)) continue;
+      if (!item || storedObservationFor(item) || storedObservationFor(item, observed.identity)) continue;
       const memo = {
         formulaVersion: version,
         identity: observed.identity, inputFingerprint: observationInputFingerprint(snapshot),
@@ -9351,9 +9401,7 @@ async function buildVerificationHistory() {
     formulaVersions[version] = (formulaVersions[version] || 0) + 1;
   }
   // 成績單只統計畫面目前使用的公式；舊版保留計數但不可混入分母。
-  const snapshots = allSnapshots
-    .filter((snapshot) => overnightSnapshotFormulaVersion(snapshot) === OVERNIGHT_FORMULA_VERSION)
-    .slice(-OVERNIGHT_SNAPSHOT_LIMIT);
+  const snapshots = authoritativeOvernightSnapshots(db).slice(-OVERNIGHT_SNAPSHOT_LIMIT);
   if (!snapshots.length) {
     return {
       ok: true,
@@ -9373,18 +9421,7 @@ async function buildVerificationHistory() {
   const observations = [];
   const finalized = [];
   for (const snapshot of snapshots) {
-    const stored = storedObservationFor(snapshot) || storedObservationFor(snapshot, observationIdentityFor(snapshot));
-    if (stored) {
-      observations.push(stored);
-      continue;
-    }
-    if (snapshot.captureId && verificationModelKey(snapshot) !== verificationModelKey(currentVerificationIdentity('overnight'))) {
-      observations.push({ identity: verificationIdentity(snapshot), status: 'unavailable', complete: false, rows: [], warnings: ['此評估模型目前不支援補算，保留原版本與輸入。'] });
-      continue;
-    }
-    const observed = { ...await observeSignalSnapshot(snapshot, { allowIntraday: false, reference, calendar }),
-      identity: observationIdentityFor(snapshot), computedAt: new Date().toISOString(),
-      kind: snapshot.captureId ? 'forward-observation' : 'retrospective-observation' };
+    const observed = await verificationObservation(snapshot, { allowIntraday: false, reference, calendar });
     observations.push(observed);
     if (observed.status === "final" && observed.complete) finalized.push({ snapshot, observed });
   }
@@ -9509,8 +9546,8 @@ async function buildVerificationHistory() {
 async function buildSignalVerification() {
   const generatedAt = new Date().toISOString();
   const db = await loadDb();
-  const snapshots = (Array.isArray(db.signalSnapshots) ? db.signalSnapshots : [])
-    .filter((snapshot) => overnightSnapshotFormulaVersion(snapshot) === OVERNIGHT_FORMULA_VERSION);
+  await confirmVerificationCaptures((db.signalSnapshots || []).slice(-OVERNIGHT_SNAPSHOT_LIMIT).map(snapshot => snapshot.captureId));
+  const snapshots = authoritativeOvernightSnapshots(db);
   const todayCompact = toTaipeiCompactDate();
   const snapshot = [...snapshots]
     .sort((a, b) => String(b.asOf).localeCompare(String(a.asOf)))
@@ -9526,18 +9563,22 @@ async function buildSignalVerification() {
     };
   }
 
-  const observed = await observeSignalSnapshot(snapshot, { allowIntraday: true });
+  const observed = await verificationObservation(snapshot, { allowIntraday: true });
+  if (observed.status === 'final' && observed.complete) await persistFinalObservations([{ snapshot, observed }]).catch(error => {
+    console.warn('[Stock1] 成績單觀察結果落盤失敗（下次重建再試）：', error?.message || error);
+  });
   if (!observed.available) {
     return {
       ok: true,
       ...observed,
-      message: observed.observationDate
+      message: observed.unavailableReason === 'unsupported-verification-model' ? observed.warnings[0] : observed.observationDate
         ? `${observed.observationDate} 是實際下一交易日，目前官方行情尚未足以完成驗證。`
         : "尚無法確認下一個實際交易日，稍後會依官方交易日資料自動重試。",
     };
   }
   const verifiedRows = observed.rows.filter((row) => row.verified);
   const unverifiedRows = observed.rows.filter((row) => !row.verified);
+  const observationNet = value => observed.identity.costModelVersion === currentVerificationIdentity('overnight').costModelVersion ? netReturnPct(value) : null;
   const summarize = (items) => ({
     total: items.length,
     hitPlus2: items.filter((row) => row.hitPlus2).length,
@@ -9545,13 +9586,13 @@ async function buildSignalVerification() {
     winAtOpen: items.filter((row) => row.winAtOpen).length,
     winAtClose: items.filter((row) => row.winAtClose).length,
     avgOpenReturn: average(items.map((row) => row.openReturn)),
-    avgOpenReturnNet: netReturnPct(average(items.map((row) => row.openReturn))),
+    avgOpenReturnNet: observationNet(average(items.map((row) => row.openReturn))),
     avgCurrentReturn: average(items.map((row) => row.currentReturn)),
     avgHighReturn: average(items.map((row) => row.highReturn)),
     // 毛報酬保留原值不動；並陳扣掉來回費稅的估算淨值（見 VERIFY_COST_NOTE）。
     // 隔日沖平均報酬本來就在 ±0.5% 這個量級，0.471% 的成本足以讓正負號翻轉。
-    avgCurrentReturnNet: netReturnPct(average(items.map((row) => row.currentReturn))),
-    avgHighReturnNet: netReturnPct(average(items.map((row) => row.highReturn))),
+    avgCurrentReturnNet: observationNet(average(items.map((row) => row.currentReturn))),
+    avgHighReturnNet: observationNet(average(items.map((row) => row.highReturn))),
   });
   // 三個分群是平行判定、沒有 else：strongContinuation 的條件是 pullbackReversal 的超集，
   // 所以溫和上漲的紅 K 必定同時進兩群，同一檔會出現兩筆、貢獻完全相同的漲跌結果。
@@ -11327,8 +11368,20 @@ function recordSwingVerification(db, body) {
 // 這只影響「要不要把百分比當結論呈現」，不改變任何選股結果。
 const WIN_RATE_MIN_SAMPLES = 20;
 const SWING_VERIFY_MAX_DAYS = 15;
+function supportsSwingEvaluation(entry) {
+  const identity = verificationIdentity(entry);
+  const axes = ['snapshotSchemaVersion', 'evaluationVersion', 'entryModel', 'returnBasis'];
+  // 無法證明原模型的 legacy pending 只允許帶 this-advance-only provenance 的補驗。
+  if (axes.every(axis => identity[axis] === 'legacy-unknown')) return true;
+  const current = currentVerificationIdentity('swing');
+  return axes.every(axis => identity[axis] === current[axis]);
+}
+function markUnsupportedSwingEvaluation(entry) {
+  entry.evaluationUnavailable = { reason: 'unsupported-verification-model', modelKey: verificationModelKey(entry) };
+}
 function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
   if (!entry || entry.status !== "pending" || !dayQuote) return false;
+  if (!supportsSwingEvaluation(entry)) { markUnsupportedSwingEvaluation(entry); return false; }
   const day = toCompactDate(dayQuote.rawDate || dayQuote.asOf);
   if (!day || day <= entry.lastChecked) return false;
   // Number(null)===0 的陷阱：缺值必須先擋掉，否則 high=null 會被當成 0 混進觸價判定。
@@ -11508,6 +11561,10 @@ function applySwingCorporateAction(entry, ratio, day) {
 // 這樣「D1 先停損、D2 才達標」不會被錯記成勝利，15 天也是真實交易日而非開 App 次數。
 function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar = {}) {
   if (!entry || entry.status !== "pending") return { changed: false, missingDate: "" };
+  if (!supportsSwingEvaluation(entry)) {
+    markUnsupportedSwingEvaluation(entry);
+    return { changed: false, missingDate: '', unavailableReason: 'unsupported-verification-model' };
+  }
   const latest = toCompactDate(latestDate);
   if (!latest || latest <= toCompactDate(entry.lastChecked)) return { changed: false, missingDate: "" };
   // 同一天可能同時來自兩個來源：advanceSwingVerification 直接把「官方逐檔月歷史」與
@@ -11739,10 +11796,23 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
     const store = cloneJson(db.swingVerification || {});
     const originalStore = stableJson(store);
     const originalRetry = stableJson(cloneJson(db.swingVerificationRetry || {}));
-    const batch = selectSwingVerificationBatch(store, db.swingVerificationRetry, {
+    const eligibleStore = Object.fromEntries(Object.entries(store).map(([day, entries]) => [day, entries.filter(entry => {
+      if (entry.status !== 'pending' || supportsSwingEvaluation(entry)) return true;
+      markUnsupportedSwingEvaluation(entry);
+      return false;
+    })]));
+    const batch = selectSwingVerificationBatch(eligibleStore, db.swingVerificationRetry, {
       asOf: targetDate, includeRecent: lastSwingAdvanceKey !== advanceKey,
     });
-    if (!batch.jobs.length) return;
+    if (!batch.jobs.length) {
+      if (stableJson(store) !== originalStore) await commitDbMutation(currentDb => {
+        if (stableJson(currentDb.swingVerification || {}) !== originalStore
+          || stableJson(currentDb.swingVerificationRetry || {}) !== originalRetry) return skipDbMutation(false);
+        currentDb.swingVerification = store;
+        return true;
+      });
+      return;
+    }
     const calendar = await getTradingCalendarEvidence();
     await loadFundamentalsHistory();
     if (batch.jobs.some(job => !job.historical)) {
@@ -11948,6 +12018,7 @@ async function buildSwingVerificationSummary() {
   const cacheKey = stableJson({ summaryToday, store, model: currentVerificationIdentity('swing') });
   if (swingVerifySummaryCache.value && swingVerifySummaryCache.expiresAt > Date.now() && swingVerifySummaryCache.key === cacheKey) return swingVerifySummaryCache.value;
   const modelEntries = Object.values(store).flat();
+  const unavailableCount = modelEntries.filter(entry => entry.status === 'pending' && !supportsSwingEvaluation(entry)).length;
   const currentModelKey = verificationModelKey(currentVerificationIdentity('swing'));
   const matchingEntries = modelEntries.filter(entry => entry.formulaVersion === SWING_FORMULA_VERSION);
   const selectedModelKey = matchingEntries.some(entry => verificationModelKey(entry) === currentModelKey) ? currentModelKey
@@ -12098,7 +12169,7 @@ async function buildSwingVerificationSummary() {
     ok: true,
     generatedAt: new Date().toISOString(),
     currentFormulaVersion: SWING_FORMULA_VERSION,
-    modelGroups, selectedModelKey,
+    modelGroups, selectedModelKey, unavailableCount,
     formulaVersions: [...versionCounts.values()].sort((a, b) => b.formulaVersion.localeCompare(a.formulaVersion)),
     // 版本作為分層而非排除：headline 只用現版，這裡另給「全版本合併」讓改版不會把累積歸零。
     allVersions: (() => {

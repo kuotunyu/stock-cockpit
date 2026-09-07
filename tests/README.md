@@ -161,6 +161,8 @@ node scripts/date-sweep.mjs 2027-01-01   # 只掃指定日期，用來重現回�
 
 `verification-publication.test.mjs` 覆蓋首次完整發布、零訊號、研究 scope、逐檔完整性與 degraded、每場景上限、原計畫凍結、兩 builder 的場景／候選快取、手動 refresh、並發、atomic temp 故障及獨立 Node 冷啟動；另鎖兩階段發布時間、確認寫入失敗重啟、跨 09:00 上下界及並發補證不覆蓋已推進 entry。`verification-model-version.test.mjs` 驗 canonical 模型鍵、非破壞冪等遷移、memo 版本與輸入隔離、未知成本空值與摘要分組。`verify-history-memo.test.mjs` 驗 legacy 事後觀察 revision 落盤與離線重用；legacy final 原始證據不覆寫。數學 fixture 若期待目前成本的淨值，須明確給目前模型 identity，不可假造舊成本已知。
 
+T03 修正回歸另走真實隔日 builder 的 HTTP200 未成功／TPEx 缺表／備援失敗與官方成功空資料；故障 logger 只在注入個案局部 capture、斷言及 finally 還原。模型測試包含部分未知但明確不相容的 pending、全數不支援不抓行情且游標不動；`swing-verify.test.mjs` 釘直接推進與 replay 邊界。`signal-verify.test.mjs` 驗同日 legacy A／formal B 的兩入口一致、完整 memo 價格欄位與 legacy final 原證據不另造 revision。
+
 ```powershell
 node --test tests/backend/verification-publication.test.mjs tests/backend/verification-model-version.test.mjs tests/backend/verify-history-memo.test.mjs
 ```

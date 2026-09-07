@@ -2,9 +2,10 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
+import { compactTradingDay, rocCompact, fundamentalsRoutes } from '../helpers/fixtures.mjs';
 import { importServer } from '../helpers/test-server.mjs';
 const {mod,mock,dataDir} = await importServer();
-after(async()=>{mock.restore(); await rm(dataDir,{recursive:true,force:true});});
+after(async()=>{await mod.flushPersistence();mock.restore(); await rm(dataDir,{recursive:true,force:true});});
 test('canonical identity/key 的物件鍵順序無關；每個版本軸改動皆隔離',()=>{
  const input={formulaVersion:'test',evaluationVersion:'e1',costModelVersion:'c1',cohortPolicyVersion:'p1',entryModel:'signal-close-observation',returnBasis:'adjusted-reference-price',snapshotSchemaVersion:2};
  const id=mod.verificationIdentity(input);
@@ -51,4 +52,41 @@ test('legacy 未知成本只保留毛結果，不能套今日成本補出淨值�
  assert.equal(s.profitFactorNet,null); assert.equal(s.medianResultPctNet,null);
  assert.equal(s.maxConsecutiveLossDays,null); assert.equal(s.nextOpenEntry.wins,null);
  assert.equal(s.netUnavailableReason,'legacy-unknown-cost-model');
+});
+
+test('I2：相同selection但不支援evaluation/entry/return的現代pending不被current evaluator推進',async()=>{
+ const today=compactTradingDay(0), yesterday=compactTradingDay(-1);
+ const removers=[...fundamentalsRoutes({}),
+   {match:/exchangeReport\/FMTQIK/,reply:[{Date:rocCompact(yesterday)},{Date:rocCompact(today)}]},
+   {match:/holidaySchedule/,reply:[]}].map(route=>mock.override(route));
+ try {
+  const db=await mod.loadDb();const identity=mod.currentVerificationIdentity('swing');
+  const base={code:'2330',exchange:'TWSE',formulaVersion:mod.SWING_FORMULA_VERSION,scenario:'midBandDefense',entry:100,stop:95,target:110,status:'pending',lastChecked:yesterday,daysHeld:0,resultPct:null};
+  const variants=[{evaluationVersion:'disabled-evaluator',entryModel:'legacy-unknown'},{entryModel:'next-open-simulation'},{returnBasis:'cash-holding-return',evaluationVersion:'legacy-unknown'}];
+  const entries=variants.map(over=>({...base,identity:{...identity,...over}}));
+  db.swingVerification={[yesterday]:[...structuredClone(entries),{...base}]}; db.swingVerificationRetry={};
+  await mod.saveDb(db);mod.resetSwingAdvanceKeyForTest();
+  const quote={code:'2330',exchange:'TWSE',rawDate:today,price:111,open:100,high:112,low:99};
+  await mod.advanceSwingVerification({coverageComplete:true,byCode:new Map([['2330',quote]])},today,{riskSets:null});
+  const actual=db.swingVerification[yesterday];
+  for(let i=0;i<3;i++) {
+   const {evaluationUnavailable,...evidence}=actual[i];
+   assert.deepEqual(evidence,entries[i]);
+   assert.equal(evaluationUnavailable.reason,'unsupported-verification-model');
+  }
+  assert.equal(actual[3].status,'win','legacy補驗例外仍能用目前觀察算式');
+  assert.equal(actual[3].evaluationApplied.kind,'retrospective-legacy-evidence');
+  const summary=await mod.buildSwingVerificationSummary();
+  assert.equal(summary.unavailableCount,3);
+  db.swingVerification={[yesterday]:structuredClone(entries)};
+  db.swingVerificationRetry={recentCursor:'preserve',historicalCursor:'preserve'};
+  await mod.saveDb(db);
+  const callsBefore=mock.calls.length;
+  await mod.advanceSwingVerification({coverageComplete:true,byCode:new Map()},today,{riskSets:null});
+  assert.equal(mock.calls.length,callsBefore,'全數不支援不消耗行情來源');
+  assert.deepEqual(db.swingVerificationRetry,{recentCursor:'preserve',historicalCursor:'preserve'});
+  const first=structuredClone(db.swingVerification);
+  await mod.advanceSwingVerification({coverageComplete:true,byCode:new Map()},today,{riskSets:null});
+  assert.deepEqual(db.swingVerification,first,'重試不改來源證據或新增時間戳');
+ } finally {removers.forEach(remove=>remove());}
 });

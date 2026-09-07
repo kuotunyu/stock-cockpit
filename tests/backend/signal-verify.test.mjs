@@ -234,3 +234,47 @@ test("buildVerificationHistory：已驗證日＋今日 pending、totals 用驗�
   assert.ok("winAtOpen" in by.unknown.ci && "winAtClose" in by.unknown.ci, JSON.stringify(by.unknown));
   assert.equal(by.unknown.ci.winAtOpen, null, "只有 1 天算不出區間 → null，不是 0");
 });
+
+test('I3：同日legacy A與formal B並存，單日與history選同一正式cohort並回模型/發布metadata',async()=>{
+ const legacy={asOf:iso(YESTERDAY),picks:[{...pickOf(50),code:'1101'}]};
+ const db=await resetSnapshots([legacy]);
+ const formal=await saveFormal({asOf:iso(YESTERDAY),groups:{strongContinuation:[{...pickOf(100),exchange:'TWSE'}]}});
+ const single=await mod.buildSignalVerification();
+ assert.equal(single.captureId,formal.captureId);
+ assert.deepEqual(single.identity,mod.currentVerificationIdentity('overnight'));
+ assert.equal(single.kind,'forward-observation'); assert.equal(single.publishedAt,formal.publishedAt);
+ assert.deepEqual(single.rows.map(row=>row.code),['2330']);
+ const history=await mod.buildVerificationHistory();
+ const sameDay=history.records.filter(record=>record.asOf===iso(YESTERDAY));
+ assert.equal(sameDay.length,1); assert.equal(sameDay[0].captureId,single.captureId);
+ assert.equal(sameDay[0].modelKey,single.modelKey);
+ assert.equal(db.signalSnapshots[0].picks[0].price,50,'legacy證據仍保留');
+});
+test('I3：沒有formal時單日legacy補觀察明示事後模型，完整memo與history共用',async()=>{
+ await resetSnapshots([{asOf:iso(YESTERDAY),picks:[pickOf(100)]}]);
+ const single=await mod.buildSignalVerification();
+ assert.equal(single.captureId,null); assert.equal(single.kind,'retrospective-observation');
+ assert.equal(single.identity.cohortPolicyVersion,'legacy-unknown');
+ assert.equal(single.identity.evaluationVersion,mod.currentVerificationIdentity('overnight').evaluationVersion);
+ assert.equal(single.publishedAt,null);
+ const history=await mod.buildVerificationHistory();
+ assert.equal(history.records[0].modelKey,single.modelKey);
+ const db=await mod.loadDb();
+ const memo=structuredClone(db.signalSnapshots[0].observationRevisions);
+ const again=await mod.buildSignalVerification();
+ assert.deepEqual(again.rows,single.rows,'完整memo保留pick欄位及相同價格觀察');
+ assert.deepEqual(db.signalSnapshots[0].observationRevisions,memo);
+});
+
+test('I3：legacy 已保存 final 原觀察兩入口沿用原身份，不複製成新事後revision',async()=>{
+ const observed={formulaVersion:mod.OVERNIGHT_FORMULA_VERSION,status:'final',complete:true,
+   observationDate:iso(TODAY),rows:[{code:'2330',verified:true,openReturn:3,highReturn:4,currentReturn:2}]};
+ const db=await resetSnapshots([{asOf:iso(YESTERDAY),picks:[pickOf(100)],observed:structuredClone(observed)}]);
+ const single=await mod.buildSignalVerification();
+ assert.equal(single.kind,'legacy-observation');
+ assert.equal(single.identity.evaluationVersion,'legacy-unknown');
+ assert.equal(single.summary.avgCurrentReturnNet,null);
+ await mod.buildVerificationHistory();
+ assert.deepEqual(db.signalSnapshots[0].observed,observed);
+ assert.equal(db.signalSnapshots[0].observationRevisions,undefined);
+});

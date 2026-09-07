@@ -102,7 +102,14 @@ test('兩個並發發布只一份正式，B 寫入失敗 RAM/磁碟只見 A，�
   const before = structuredClone((await mod.loadDb()).verificationPublications);
   const b = body('overnight',a.asOf,['2330','1101']);
   const blocker = join(dataDir,'stock1-db.json.tmp'); await mkdir(blocker);
-  await assert.rejects(publish(b),error => error.code === 'PERSISTENCE_FAILED');
+  const errors=[]; const originalError=console.error;
+  console.error=(...args)=>errors.push(args);
+  try {
+    await assert.rejects(publish(b),error => error.code === 'PERSISTENCE_FAILED');
+    assert.equal(errors.length,1);
+    assert.match(errors[0][0],/主資料庫寫入失敗.*草稿已丟棄/);
+    assert.match(errors[0][1],/stock1-db\.json\.tmp/);
+  } finally { console.error=originalError; }
   assert.deepEqual((await mod.loadDb()).verificationPublications,before);
   const disk = JSON.parse(await readFile(join(dataDir,'stock1-db.json'),'utf8'));
   assert.deepEqual(disk.verificationPublications,before);
@@ -140,7 +147,14 @@ test('兩 builder 真實 canonical 零候選發布；研究參數不搶身份，
 test('首次清單成功但時間補證失敗仍正式；冷啟動以本次真實確認時間補上，不回填', async () => {
   const a=await mod.commitDbMutation(db=>mod.publishVerification(db,'overnight',body('overnight','2026-08-27')));
   const blocker=join(dataDir,'stock1-db.json.tmp'); await mkdir(blocker);
-  const failed=await mod.confirmVerificationPublication(a);
+  const errors=[]; const originalError=console.error; let failed;
+  console.error=(...args)=>errors.push(args);
+  try {
+    failed=await mod.confirmVerificationPublication(a);
+    assert.equal(errors.length,1);
+    assert.match(errors[0][0],/主資料庫寫入失敗.*草稿已丟棄/);
+    assert.match(errors[0][1],/stock1-db\.json\.tmp/);
+  } finally { console.error=originalError; }
   assert.equal(failed.kind,'formal'); assert.equal(failed.publishedAt,null);
   assert.equal(failed.timingReason,'availability-not-confirmed');
   const disk=JSON.parse(await readFile(join(dataDir,'stock1-db.json'),'utf8'));
@@ -156,4 +170,30 @@ test('首次清單成功但時間補證失敗仍正式；冷啟動以本次真�
   assert.equal(confirmed.timingReason,null);
   const persisted=JSON.parse(await readFile(join(dataDir,'stock1-db.json'),'utf8'));
   assert.equal(persisted.signalSnapshots.find(snapshot=>snapshot.captureId===a.captureId).publishedAt,confirmed.publishedAt);
+});
+
+// I1 必須走真實 builder；每個 source shape 用獨立離線程序，避免 reference/歷史快取相互遮蔽。
+test('I1：HTTP200未成功/缺table與官方成功空資料分開，fallback失敗不凍結正式零訊號', () => {
+  const helper=pathToFileURL(SERVER_PATH.replace(/server\.mjs$/, 'tests/helpers/test-server.mjs')).href;
+  const fixtures=pathToFileURL(SERVER_PATH.replace(/server\.mjs$/, 'tests/helpers/fixtures.mjs')).href;
+  for (const mode of ['twse-failed','tpex-missing-table','twse-empty']) {
+    const script=`import {importServer} from ${JSON.stringify(helper)};
+      import {surveillanceRoutes,fundamentalsRoutes,stockDayAllRow,tpexDailyCloseRow} from ${JSON.stringify(fixtures)};
+      import {rm} from 'node:fs/promises';
+      const mode=process.argv[1]; const tpex=mode==='tpex-missing-table';
+      const {mod,mock,dataDir}=await importServer({routes:[
+        ...surveillanceRoutes({reference:[stockDayAllRow({code:tpex?'0050':'2330'})],tpexReference:[tpexDailyCloseRow({code:tpex?'6488':'00679B'})]}),
+        ...fundamentalsRoutes({}),
+        {match:url=>url.pathname.includes('/exchangeReport/STOCK_DAY'),reply:mode==='twse-empty'?{stat:'OK',data:[]}:{stat:'SERVICE_UNAVAILABLE'}},
+        {match:url=>url.pathname.includes('/afterTrading/tradingStock'),reply:{stat:'OK'}},
+        {match:url=>url.pathname.includes('/finance/chart/'),reply:{chart:{result:null,error:{code:'Unavailable'}}}}
+      ]});
+      try {const body=await mod.buildOvernightSignals();console.log(JSON.stringify(body));}
+      finally {await mod.flushPersistence();mock.restore();await rm(dataDir,{recursive:true,force:true});}`;
+    const result=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',script,mode],{encoding:'utf8'}).trim().split('\n').at(-1));
+    assert.equal(result.candidateCount,1,mode); assert.equal(result.scanQuality.readyCount,0,mode);
+    assert.equal(result.publication.kind,mode==='twse-empty'?'formal':'provisional',mode);
+    assert.equal(result.inputEvidence[0].sourceEvidence.fallback.status,'failed',mode);
+    assert.ok(result.inputEvidence[0].sourceEvidence.official.every(row=>row.status===(mode==='twse-empty'?'confirmed-empty':'failed')),mode);
+  }
 });
