@@ -210,8 +210,125 @@ export function visibleNav(page, screen) {
   return page.locator(`.nav-action[data-screen="${screen}"]:visible`).first();
 }
 
-export async function createBrowserFixture({ scenario } = {}) {
+function rectEdges(box) {
+  return { ...box, left: box.x, top: box.y, right: box.x + box.width, bottom: box.y + box.height };
+}
+
+async function expectedRect(locator, label) {
+  assert.equal(await locator.count(), 1, `${label} 必須有且只有一個`);
+  assert.equal(await locator.isVisible(), true, `${label} 必須可見`);
+  const rendered = await locator.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return style.display !== "none" && style.visibility !== "hidden" && Number.parseFloat(style.opacity) > 0;
+  });
+  assert.equal(rendered, true, `${label} 不得以 display/visibility/opacity 隱藏`);
+  const box = await locator.boundingBox();
+  assert.ok(box && box.width > 0 && box.height > 0, `${label} 必須有正尺寸：${JSON.stringify(box)}`);
+  return rectEdges(box);
+}
+
+function assertInside(inner, outer, label) {
+  assert.ok(
+    inner.left >= outer.left - 1
+      && inner.right <= outer.right + 1
+      && inner.top >= outer.top - 1
+      && inner.bottom <= outer.bottom + 1,
+    `${label} 應在容器內：${JSON.stringify({ inner, outer })}`,
+  );
+}
+
+function assertNoOverlap(items, label) {
+  for (let leftIndex = 0; leftIndex < items.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < items.length; rightIndex += 1) {
+      const left = items[leftIndex];
+      const right = items[rightIndex];
+      const overlaps = left.rect.left < right.rect.right - 0.5
+        && left.rect.right > right.rect.left + 0.5
+        && left.rect.top < right.rect.bottom - 0.5
+        && left.rect.bottom > right.rect.top + 0.5;
+      assert.equal(overlaps, false, `${label} 不可重疊：${left.label} ${JSON.stringify(left.rect)} / ${right.label} ${JSON.stringify(right.rect)}`);
+    }
+  }
+}
+
+export async function assertExpectedLayout(page, { width, detailOpen = false }) {
+  assert.equal(page.viewportSize()?.width, width, `viewport 寬度應為 ${width}px`);
+  const viewport = { left: 0, top: 0, right: width, bottom: page.viewportSize().height };
+  if (detailOpen) {
+    const detail = await expectedRect(page.locator("#detailPanel.is-open"), `${width}px 明細面板`);
+    assert.ok(detail.left >= -1 && detail.right <= width + 1, `${width}px 明細面板不可橫向超出 viewport：${JSON.stringify(detail)}`);
+    if (width < 1040) {
+      const closeButton = await expectedRect(page.locator("#detailClose"), `${width}px 明細關閉按鈕`);
+      assertInside(closeButton, detail, `${width}px 明細關閉按鈕`);
+      assert.equal(await page.locator("#detailClose").evaluate((node) => !node.disabled && node.tabIndex >= 0), true, `${width}px 明細關閉按鈕必須可聚焦`);
+    } else {
+      assert.equal(await page.locator("#detailClose").isVisible(), false, `${width}px 桌面常駐明細的關閉按鈕應依現行設計隱藏`);
+    }
+    return;
+  }
+  const topbar = await expectedRect(page.locator(".topbar"), `${width}px 頂欄`);
+  assertInside(topbar, viewport, `${width}px 頂欄`);
+  const sourceControls = width < 1040
+    ? [["#sourcePill", "資料來源 pill"]]
+    : [
+        ['[data-source-option="official"]', "官方資料按鈕"],
+        ['[data-source-option="broker"]', "券商資料按鈕"],
+      ];
+  const topbarSelectors = [
+    ["#marketPill", "市場指標按鈕"],
+    ["#screenTitle", "畫面標題"],
+    ["#screenHelp", "畫面說明按鈕"],
+    ...sourceControls,
+    ["#searchOpen", "搜尋按鈕"],
+    ["#filterOpen", "篩選按鈕"],
+    ["#glossaryOpen", "名詞解釋按鈕"],
+  ];
+  const topbarItems = [];
+  for (const [selector, label] of topbarSelectors) {
+    const locator = page.locator(selector);
+    const rect = await expectedRect(locator, `${width}px ${label}`);
+    assertInside(rect, topbar, `${width}px ${label}`);
+    assertInside(rect, viewport, `${width}px ${label}`);
+    topbarItems.push({ label, rect });
+  }
+  assertNoOverlap(topbarItems, `${width}px 頂欄子元素`);
+
+  const card = await expectedRect(page.locator(".swing-card"), `${width}px 波段卡`);
+  const actionRow = await expectedRect(page.locator(".swing-actions"), `${width}px 波段動作列`);
+  assertInside(actionRow, card, `${width}px 波段動作列`);
+  const actionSelectors = [
+    ['.swing-open[data-swing-code="6488"]', "查看明細按鈕"],
+    ['.swing-plan-alerts[data-plan-alerts="6488"]', "建立提醒按鈕"],
+  ];
+  const actionItems = [];
+  for (const [selector, label] of actionSelectors) {
+    const locator = page.locator(selector);
+    const rect = await expectedRect(locator, `${width}px ${label}`);
+    assertInside(rect, actionRow, `${width}px ${label}`);
+    assert.ok(rect.left >= -1 && rect.right <= width + 1, `${width}px ${label} 不可橫向超出 viewport：${JSON.stringify(rect)}`);
+    assert.equal(await locator.evaluate((node) => !node.disabled && node.tabIndex >= 0), true, `${width}px ${label} 必須可聚焦`);
+    actionItems.push({ label, rect });
+  }
+  assertNoOverlap(actionItems, `${width}px 波段主要操作`);
+
+  const scorecardsHost = await expectedRect(page.locator("#swingVerify .sv-chips"), `${width}px 成績卡容器`);
+  const scorecardLocator = page.locator("#swingVerify .sv-chip");
+  assert.equal(await scorecardLocator.count(), 2, `${width}px 必須恰有兩張成績卡`);
+  const scorecardItems = [];
+  for (let index = 0; index < 2; index += 1) {
+    const label = `成績卡 ${index + 1}`;
+    const rect = await expectedRect(scorecardLocator.nth(index), `${width}px ${label}`);
+    assertInside(rect, scorecardsHost, `${width}px ${label}`);
+    assert.ok(rect.left >= -1 && rect.right <= width + 1, `${width}px ${label} 不可橫向超出 viewport：${JSON.stringify(rect)}`);
+    scorecardItems.push({ label, rect });
+  }
+  assertNoOverlap(scorecardItems, `${width}px 成績卡`);
+
+}
+
+export async function createBrowserFixture({ scenario, setupFailure } = {}) {
   assert.ok(SCENARIOS.has(scenario), `未知 browser scenario：${scenario}`);
+  assert.ok(setupFailure === undefined || typeof setupFailure === "function", "setupFailure 必須是測試用 function");
   const server = await bootServer({ routes: [], env: { UPDATE_CHECK: "off", DISABLE_CLOSE_SCHEDULER: "1" } });
   assert.notEqual(new URL(server.baseUrl).port, "5174", "瀏覽器測試不得使用正式埠 5174");
   assert.doesNotMatch(server.dataDir, /[\\/]\.data(?:[\\/]|$)/, "瀏覽器測試不得使用正式 .data");
@@ -219,7 +336,8 @@ export async function createBrowserFixture({ scenario } = {}) {
   let browser;
   let context;
   let page;
-  let textZoomSession;
+  let textZoomCss = "";
+  let textZoomVersion = 0;
   let traceActive = false;
   let closed = false;
   const externalRequests = [];
@@ -261,6 +379,10 @@ export async function createBrowserFixture({ scenario } = {}) {
         await route.abort("blockedbyclient");
         return;
       }
+      if (url.pathname === "/__browser-text-zoom.css") {
+        await route.fulfill({ status: 200, contentType: "text/css; charset=utf-8", body: textZoomCss });
+        return;
+      }
       if (!url.pathname.startsWith("/api/")) {
         await route.continue();
         return;
@@ -277,11 +399,22 @@ export async function createBrowserFixture({ scenario } = {}) {
     await page.evaluate(() => document.fonts.ready);
     await page.locator(".topbar").waitFor({ state: "visible" });
     await page.waitForFunction(() => document.querySelector("#overnightGroups")?.textContent?.trim().length > 0);
+    await setupFailure?.({ server, browser, context, page });
   } catch (error) {
-    if (traceActive) await context?.tracing.stop().catch(() => {});
-    await context?.close().catch(() => {});
-    await browser?.close().catch(() => {});
-    await server.close().catch(() => {});
+    await mkdir(ARTIFACT_DIR, { recursive: true }).catch(() => {});
+    await page?.screenshot({ path: resolve(ARTIFACT_DIR, `setup-${scenario}.png`), fullPage: true }).catch(() => {});
+    if (traceActive) {
+      await context?.tracing.stop({ path: resolve(ARTIFACT_DIR, `setup-${scenario}.zip`) }).catch(() => {});
+      traceActive = false;
+    }
+    for (const cleanup of [
+      () => page?.close(),
+      () => context?.close(),
+      () => browser?.close(),
+      () => server.close(),
+    ]) {
+      await cleanup().catch(() => {});
+    }
     throw error;
   }
 
@@ -302,33 +435,42 @@ export async function createBrowserFixture({ scenario } = {}) {
     },
     emulateTextZoom: async (factor) => {
       const setup = await page.evaluate((zoomFactor) => {
+        window.__stock1BrowserTextZoomBases ||= new WeakMap();
+        const baseSizes = window.__stock1BrowserTextZoomBases;
         const trackedSelectors = [".swing-nm", ".swing-stat strong", ".swing-open", ".swing-plan-alerts"];
         const tracked = trackedSelectors.map((selector) => {
           const node = document.querySelector(selector);
-          return { selector, node, before: node ? Number.parseFloat(getComputedStyle(node).fontSize) : 0 };
+          const before = node
+            ? (baseSizes.get(node) || Number.parseFloat(getComputedStyle(node).fontSize))
+            : 0;
+          return { selector, before };
         });
         const elements = [...document.body.querySelectorAll("*")];
-        const originalSizes = elements.map((node) => Number.parseFloat(getComputedStyle(node).fontSize));
+        const originalSizes = elements.map((node) => baseSizes.get(node) || Number.parseFloat(getComputedStyle(node).fontSize));
         const rules = [];
         elements.forEach((node, index) => {
           const size = originalSizes[index];
           if (!Number.isFinite(size) || size <= 0) return;
+          baseSizes.set(node, size);
           node.dataset.browserTextZoom = String(index);
           rules.push(`[data-browser-text-zoom="${index}"]{font-size:${size * zoomFactor}px !important}`);
         });
         return {
           rules: rules.join("\n"),
-          tracked: tracked.map(({ selector, before }) => ({ selector, before })),
+          tracked,
         };
       }, factor);
-      textZoomSession = await context.newCDPSession(page);
-      await textZoomSession.send("DOM.enable");
-      await textZoomSession.send("CSS.enable");
-      const frameTree = await textZoomSession.send("Page.getFrameTree");
-      const { styleSheetId } = await textZoomSession.send("CSS.createStyleSheet", {
-        frameId: frameTree.frameTree.frame.id,
-      });
-      await textZoomSession.send("CSS.setStyleSheetText", { styleSheetId, text: setup.rules });
+      textZoomCss = setup.rules;
+      textZoomVersion += 1;
+      await page.evaluate((version) => new Promise((resolveLoad, rejectLoad) => {
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = `/__browser-text-zoom.css?v=${version}`;
+        link.onload = resolveLoad;
+        link.onerror = () => rejectLoad(new Error("測試用文字放大樣式載入失敗"));
+        document.head.append(link);
+      }), textZoomVersion);
+      await page.evaluate(() => new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))));
       const measurements = await page.evaluate((tracked) => tracked.map(({ selector, before }) => {
         const node = document.querySelector(selector);
         return {
@@ -351,6 +493,10 @@ export async function createBrowserFixture({ scenario } = {}) {
         traceActive = false;
       }
     },
+    captureSnapshot: async (name) => {
+      await mkdir(ARTIFACT_DIR, { recursive: true });
+      await page.screenshot({ path: resolve(ARTIFACT_DIR, `${name}.png`) });
+    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -361,7 +507,6 @@ export async function createBrowserFixture({ scenario } = {}) {
           await context.tracing.stop();
           traceActive = false;
         },
-        () => textZoomSession?.detach(),
         () => page.close(),
         () => context.close(),
         () => browser.close(),

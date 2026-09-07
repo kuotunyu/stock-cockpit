@@ -7361,6 +7361,8 @@ body.is-locked .app-shell {
 
   .market-pill {
     grid-area: market;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .screen-help {
@@ -8808,10 +8810,13 @@ body.is-locked .app-shell {
   }
 }
 
-/* 375px 手機：第一列 market＋title＋actions 剛好等於可用寬度，市場 pill 會被擠成兩行（「台／指 +473」）。
-   ⇄ 只是裝飾提示（aria-hidden），窄螢幕收掉、pill 不換行。 */
+/* 375px 手機：⇄ 只是裝飾提示（aria-hidden），窄螢幕收掉。
+   一般字級仍有足夠寬度維持單行；文字放大時允許 pill 換行，不可用 intrinsic width 把右側控制頂出 viewport。 */
 @media (max-width: 400px) {
-  .market-pill { white-space: nowrap; }
+  .market-pill {
+    white-space: normal;
+    flex-wrap: wrap;
+  }
   .market-pill .pill-swap { display: none; }
 }
 

@@ -1,7 +1,35 @@
 // 真實 Chromium 互動基準：鍵盤焦點、內層操作、輪詢草稿及登入失效。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createBrowserFixture, visibleNav } from "../helpers/browser-fixtures.mjs";
+import { rm, stat } from "node:fs/promises";
+import { resolve } from "node:path";
+import { assertExpectedLayout, createBrowserFixture, visibleNav } from "../helpers/browser-fixtures.mjs";
+
+test("fixture 啟動失敗：保留原錯誤、screenshot/trace 並排空資源", { timeout: 60_000 }, async () => {
+  const screenshotPath = resolve("test-results/browser/setup-populated.png");
+  const tracePath = resolve("test-results/browser/setup-populated.zip");
+  await Promise.all([rm(screenshotPath, { force: true }), rm(tracePath, { force: true })]);
+  const originalError = new Error("可控啟動失敗");
+  let resources;
+  await assert.rejects(
+    createBrowserFixture({
+      scenario: "populated",
+      setupFailure: ({ server, browser, page }) => {
+        resources = { baseUrl: server.baseUrl, browser, page };
+        throw originalError;
+      },
+    }),
+    (error) => error === originalError,
+    "fixture 必須保留啟動時的原始錯誤",
+  );
+  assert.equal(resources.page.isClosed(), true, "setup 失敗後 page 必須關閉");
+  assert.equal(resources.browser.isConnected(), false, "setup 失敗後 browser 必須關閉");
+  await assert.rejects(fetch(resources.baseUrl, { signal: AbortSignal.timeout(1_000) }), "setup 失敗後 server 必須停止監聽");
+  for (const artifactPath of [screenshotPath, tracePath]) {
+    const artifact = await stat(artifactPath);
+    assert.ok(artifact.size > 0, `setup 失敗產物不可為空：${artifactPath}`);
+  }
+});
 
 test("populated：Tab/Enter/Escape 操作真按鈕、內層提醒不誤開明細且輪詢保留草稿", { timeout: 90_000 }, async () => {
   const fixture = await createBrowserFixture({ scenario: "populated" });
@@ -47,23 +75,24 @@ test("populated：Tab/Enter/Escape 操作真按鈕、內層提醒不誤開明細
     await fixture.advancePollingCycle();
     assert.equal(await draft.inputValue(), "環球晶圓草稿尚未送出", "10 秒輪詢不可清掉未送出草稿");
 
+    const scoreFold = page.locator("#swingVerify details.sv-fold");
+    if (!(await scoreFold.evaluate((node) => node.open))) await scoreFold.locator("summary").click();
     const zoomMeasurements = await fixture.emulateTextZoom(2);
     assert.equal(zoomMeasurements.length, 4);
-    const zoomLayout = await page.evaluate(() => {
-      const buttons = [...document.querySelectorAll(".swing-actions button")];
-      const [first, second] = buttons.map((node) => node.getBoundingClientRect());
-      return {
-        bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
-        actionCount: buttons.length,
-        actionOverlap: first && second ? first.left < second.right && first.right > second.left && first.top < second.bottom && first.bottom > second.top : true,
-      };
-    });
-    assert.equal(zoomLayout.bodyFits, true, "375px、文字 200% 後 body 不可橫向溢出");
-    assert.equal(zoomLayout.actionCount, 2, "文字 200% 後兩個主要操作仍存在");
-    assert.equal(zoomLayout.actionOverlap, false, "文字 200% 後主要操作不可重疊");
+    await assertExpectedLayout(page, { width: 375 });
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+      true,
+      "375px、文字 200% 後 body 不可橫向溢出",
+    );
+    await alertButton.focus();
+    assert.equal(await alertButton.evaluate((node) => node === document.activeElement), true, "文字 200% 後建立提醒按鈕仍可聚焦");
     await opener.focus();
     await page.keyboard.press("Enter");
     await page.locator("#detailPanel.is-open").waitFor({ state: "visible" });
+    await fixture.emulateTextZoom(2);
+    await scoreFold.evaluate((node) => { node.open = true; });
+    await assertExpectedLayout(page, { width: 375, detailOpen: true });
     assert.equal(await page.locator("#detailClose").isVisible(), true, "375px、200% 文字放大後仍能完成開啟與關閉主要操作");
     await page.locator("#detailClose").click();
   } catch (error) {
@@ -112,6 +141,11 @@ test("波段查看明細：Escape 應回到原本的 swing-open 按鈕", { timeo
       selector: document.activeElement?.className || document.activeElement?.tagName || "",
     }));
     assert.equal(active.code, "6488", `應回到 swing-open，實際 ${active.selector}`);
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.matches('.swing-open[data-swing-code="6488"]')),
+      true,
+      `應精確回到 .swing-open[data-swing-code="6488"]，實際 ${active.selector}`,
+    );
   } catch (error) {
     await fixture.captureFailure("interaction-swing-refocus");
     throw error;
