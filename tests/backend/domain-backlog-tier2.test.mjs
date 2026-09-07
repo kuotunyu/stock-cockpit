@@ -5,6 +5,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { importServer } from "../helpers/test-server.mjs";
+import { compactTradingDay } from "../helpers/fixtures.mjs";
 
 const { mod, mock, dataDir } = await importServer({ routes: [] });
 after(async () => {
@@ -19,7 +20,7 @@ const daysAgo = (n) => {
 };
 const pendingEntry = (code, gapFrom) => ({
   code, scenario: "midBandDefense", status: "pending", entry: 100, stop: 95, target: 110,
-  lastChecked: "20260601", daysHeld: 2, formulaVersion: mod.SWING_FORMULA_VERSION,
+  lastChecked: compactTradingDay(-45), daysHeld: 2, formulaVersion: mod.SWING_FORMULA_VERSION,
   ...(gapFrom ? { dataGap: { from: gapFrom, through: gapFrom } } : {}),
 });
 
@@ -28,7 +29,7 @@ const pendingEntry = (code, gapFrom) => ({
 test("D-26：缺口久到不可能自行結案的驗證單要被標為卡住並計數", async () => {
   const db = await mod.loadDb();
   db.swingVerification = {
-    20260601: [
+    [compactTradingDay(-45)]: [
       pendingEntry("1111", daysAgo(60)), // 缺口 60 天 → 卡住
       pendingEntry("2222", daysAgo(3)),  // 缺口 3 天 → 還在正常等待
       pendingEntry("3333", null),        // 沒有缺口 → 正常 pending
@@ -69,7 +70,7 @@ test("D-01：公司行動停等要單獨計數，久到不自癒時併入卡住"
   });
   const db = await mod.loadDb();
   db.swingVerification = {
-    20260601: [
+    [compactTradingDay(-45)]: [
       holdEntry("4444", daysAgo(1)),  // 昨天的除權息，等官方比率 → 正常停等
       holdEntry("5555", daysAgo(60)), // 60 天還沒解開 → 不可能自癒，算卡住
       pendingEntry("6666", null),     // 正常 pending

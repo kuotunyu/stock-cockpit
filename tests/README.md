@@ -115,6 +115,9 @@ tests/
 
 ## Mock 與驗證範圍
 
+- `verification-retention` 驗證儲存保留與查詢窗口分離、16／4 組有界補判、歷史月份與跨年日曆、未知市場、來源失敗、已封月但被歸檔上限淘汰的公司行動，以及 copy-on-write 證據／游標回滾。`verification-retention-restart` 使用 1040 日純合成資料，經每日備份與真正 `scripts/backup.mjs` 還原至新臨時目錄，再以獨立程序在埠 0 啟動／關閉並比對 SHA-256；不讀正式資料或 `.env`。
+- `node --expose-gc tests/helpers/verification-retention-bench.mjs 260`（或 `1040`）是手動同機量測，不是效能 CI 門檻。量實際冷 load、save、read/parse、summary 冷重建、暖機後函式與 JSON 序列化延遲，以及離線上游呼叫數與 GC 後記憶體；報告需保留同一 fixture 的前後值與量測方法。不要把函式快取命中時間當成完整 HTTP 延遲。
+
 - `fetch-mock.mjs` 的 `match(url, init)` 與 `reply(url, init)` 都能讀取 method、body、headers、signal；`calls` 記錄 url／method／body／headers。同 URL 不同 POST body 可以分流，不必以日期或呼叫次數猜測。
 - `dom-harness.mjs` 載入實際 HTML 與 app.js，但 Canvas、`matchMedia` 等由測試替身提供。jsdom 不計算真實 CSS 版面；DOM／樣式原文斷言通過，不代表欄寬、換行、遮擋、Canvas 繪製或手機互動已在瀏覽器驗證。
 - UI 排版改動需另用真實瀏覽器驗證。預覽必須使用獨立資料目錄與 5180 或臨時埠，結束後完整關閉；不可連到使用者的正式 5174 進行測試。

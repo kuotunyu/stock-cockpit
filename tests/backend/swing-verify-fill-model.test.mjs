@@ -84,17 +84,17 @@ test("只保存判定用得到的欄位，不整包塞進不可回溯的歷史�
 test("成績單要數得出分盤樣本；headline 勝率分母排除分盤（2026-09-05 拍板），含分盤的口徑另列", async () => {
   const db = await mod.loadDb();
   db.swingVerification = {
-    20260701: [
+    [compactTradingDay(-4)]: [
       // 三筆連續競價：2 勝 1 敗
-      { code: "1111", scenario: "midBandDefense", status: "win", resultPct: 5, daysHeld: 3, entry: 100, stop: 95, target: 110, lastChecked: "20260703", formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "continuous" },
-      { code: "2222", scenario: "midBandDefense", status: "win", resultPct: 4, daysHeld: 2, entry: 100, stop: 95, target: 110, lastChecked: "20260703", formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "continuous" },
-      { code: "3333", scenario: "midBandDefense", status: "loss", resultPct: -5, daysHeld: 1, entry: 100, stop: 95, target: 110, lastChecked: "20260702", formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "continuous" },
+      { code: "1111", scenario: "midBandDefense", status: "win", resultPct: 5, daysHeld: 3, entry: 100, stop: 95, target: 110, lastChecked: compactTradingDay(-2), formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "continuous" },
+      { code: "2222", scenario: "midBandDefense", status: "win", resultPct: 4, daysHeld: 2, entry: 100, stop: 95, target: 110, lastChecked: compactTradingDay(-2), formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "continuous" },
+      { code: "3333", scenario: "midBandDefense", status: "loss", resultPct: -5, daysHeld: 1, entry: 100, stop: 95, target: 110, lastChecked: compactTradingDay(-3), formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "continuous" },
       // 一筆分盤撮合，已結案
-      { code: "4444", scenario: "midBandDefense", status: "loss", resultPct: -5, daysHeld: 1, entry: 100, stop: 95, target: 110, lastChecked: "20260702", formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "periodicCall20", surveillance: { kind: "disposition", label: "處置", interval: 20 } },
+      { code: "4444", scenario: "midBandDefense", status: "loss", resultPct: -5, daysHeld: 1, entry: 100, stop: 95, target: 110, lastChecked: compactTradingDay(-3), formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "periodicCall20", surveillance: { kind: "disposition", label: "處置", interval: 20 } },
       // 一筆分盤撮合，還沒結案
-      { code: "5555", scenario: "midBandDefense", status: "pending", resultPct: null, daysHeld: 1, entry: 100, stop: 95, target: 110, lastChecked: "20260702", formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "periodicCall5", surveillance: { kind: "disposition", label: "處置", interval: 5 } },
+      { code: "5555", scenario: "midBandDefense", status: "pending", resultPct: null, daysHeld: 1, entry: 100, stop: 95, target: 110, lastChecked: compactTradingDay(-3), formulaVersion: mod.SWING_FORMULA_VERSION, fillModel: "periodicCall5", surveillance: { kind: "disposition", label: "處置", interval: 5 } },
       // 舊紀錄完全沒有 fillModel 欄位 → 不得追溯改寫成分盤
-      { code: "6666", scenario: "midBandDefense", status: "win", resultPct: 3, daysHeld: 2, entry: 100, stop: 95, target: 110, lastChecked: "20260703", formulaVersion: mod.SWING_FORMULA_VERSION },
+      { code: "6666", scenario: "midBandDefense", status: "win", resultPct: 3, daysHeld: 2, entry: 100, stop: 95, target: 110, lastChecked: compactTradingDay(-2), formulaVersion: mod.SWING_FORMULA_VERSION },
     ],
   };
   await mod.saveDb(db);

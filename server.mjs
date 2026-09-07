@@ -5999,8 +5999,8 @@ function normalizeTpexHistoryRow(row, code, name) {
   };
 }
 
-async function fetchStockHistoryMonth(code, exchange, monthCompact, name = "") {
-  const cacheKey = `${exchange}:${code}:${monthCompact}`;
+async function fetchStockHistoryMonth(code, exchange, monthCompact, name = "", options = {}) {
+  const cacheKey = `${exchange}:${code}:${monthCompact}${options.requireSourceSuccess ? ":verified-source" : ""}`;
   const cached = historyCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     historyCache.delete(cacheKey);
@@ -6015,10 +6015,12 @@ async function fetchStockHistoryMonth(code, exchange, monthCompact, name = "") {
       const url = `https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?code=${encodeURIComponent(code)}&date=${compactToSlashDate(monthCompact)}&id=&response=json`;
       const payload = await fetchJsonWithRetry(url, {}, 1);
       const table = Array.isArray(payload.tables) ? payload.tables[0] : null;
+      if (options.requireSourceSuccess && !Array.isArray(table?.data)) throw new Error("上櫃月歷史回應缺少資料表");
       rows = Array.isArray(table?.data) ? table.data.map((row) => normalizeTpexHistoryRow(row, code, payload.name || name)) : [];
     } else {
       const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?date=${monthCompact}&stockNo=${encodeURIComponent(code)}&response=json`;
       const payload = await fetchJsonWithRetry(url, {}, 1);
+      if (options.requireSourceSuccess && (payload?.stat !== "OK" || !Array.isArray(payload.data))) throw new Error("上市月歷史來源未成功");
       rows = Array.isArray(payload.data) ? payload.data.map((row) => normalizeTwseHistoryRow(row, code, name)) : [];
     }
 
@@ -6204,7 +6206,7 @@ async function getStockHistory(quote, dateCompact, monthsBack = 3, options = {})
   // 它會把我方的抓取失敗當成官方缺 K 寫進 dataGap 並永久停等。想分辨的呼叫端傳一個陣列進來收。
   const failedMonths = [];
   const monthRows = await Promise.all(
-    months.map((month) => fetchStockHistoryMonth(quote.code, quote.exchange, month, quote.name)
+    months.map((month) => fetchStockHistoryMonth(quote.code, quote.exchange, month, quote.name, { requireSourceSuccess: options.requireSourceSuccess })
       .catch((error) => {
         failedMonths.push({ month, message: error?.message || String(error) });
         return [];
@@ -8296,7 +8298,7 @@ const OVERNIGHT_FORMULA_VERSION = "overnight-v4-tpex-exright";
 const LEGACY_OVERNIGHT_FORMULA_VERSION = "overnight-v1-aggressive-controlled";
 // 一年份交易日。以前是 15：成績單永遠「累計 ≤15 天」，同一天 40~60 檔共享大盤 beta，
 // 有效樣本 ≈ 天數，15 天的 95% 信賴區間約 ±8 個百分點——50% 與 57% 分不開，卻一個染色一個不染。
-// 每天約 60 筆 × 8 欄位，260 份體積可忽略。
+// 這是成績單的讀取窗口；儲存的歷史不再依份數裁剪。
 const OVERNIGHT_SNAPSHOT_LIMIT = 260;
 // 與波段的 WIN_RATE_MIN_SAMPLES 同精神：累計天數低於此，成績單的百分比不當結論呈現（不染色）。
 const OVERNIGHT_MIN_DAYS = 20;
@@ -8550,9 +8552,7 @@ async function saveSignalSnapshot(body) {
       regime,
       picks,
     });
-    db.signalSnapshots = db.signalSnapshots
-      .sort((a, b) => String(a.asOf).localeCompare(String(b.asOf)))
-      .slice(-OVERNIGHT_SNAPSHOT_LIMIT);
+    db.signalSnapshots.sort((a, b) => String(a.asOf).localeCompare(String(b.asOf)));
   });
 }
 
@@ -11026,16 +11026,10 @@ function pruneSwingSnapshots(store, keepDays = 7) {
 // 做法：每天把看板選出的 picks（entry/停損/目標）存成驗證單，之後每個交易日用整批收盤的
 // 當日高低價「逐日推進」（零額外請求）：先碰目標＝達標、先碰停損＝停損、15 個交易日沒碰＝超時結案。
 
-function pruneSwingVerification(store, keepDays = 90) {
-  const cutoff = addDaysCompact(toTaipeiCompactDate(), -keepDays);
-  let changed = false;
-  for (const key of Object.keys(store)) {
-    if (key < cutoff) {
-      delete store[key];
-      changed = true;
-    }
-  }
-  return changed;
+function selectSwingVerificationWindow(store, { asOf = toTaipeiCompactDate(), keepDays = 90 } = {}) {
+  const through = toCompactDate(asOf);
+  const cutoff = addDaysCompact(through, -keepDays);
+  return Object.fromEntries(Object.entries(store || {}).filter(([day]) => day >= cutoff && day <= through));
 }
 
 // 看板掃描完成時記錄驗證單（同日去重、每場景最多 40 檔＝前端顯示上限）。
@@ -11080,7 +11074,7 @@ function recordSwingVerification(db, body) {
     if (pick.fillRisk === "limit-up-locked") continue;
     seen.add(key);
     perScenario.set(scenarioVersion, (perScenario.get(scenarioVersion) || 0) + 1);
-    // 只留判定用得到的欄位，不整包塞進去：驗證單留 90 天，寫進去的東西就是不可回溯的歷史。
+    // 只留判定與來源識別用得到的欄位；查詢窗口不再刪除儲存的歷史。
     const surveillance = pick.surveillance ? {
       kind: String(pick.surveillance.kind || ""),
       label: String(pick.surveillance.label || ""),
@@ -11089,6 +11083,7 @@ function recordSwingVerification(db, body) {
     list.push({
       code: pick.code,
       name: pick.name,
+      ...(["TWSE", "TPEx"].includes(pick.exchange) ? { exchange: pick.exchange } : {}),
       scenario,
       entry: plan.entry,
       stop: plan.structuralStop, // 用結構停損（RR 與目標都以它為基準）
@@ -11108,7 +11103,6 @@ function recordSwingVerification(db, body) {
     });
     changed = true;
   }
-  if (pruneSwingVerification(db.swingVerification, 90)) changed = true;
   if (changed) invalidateSwingVerifySummaryCache();
   return changed;
 }
@@ -11330,7 +11324,9 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
   const indexByDate = new Map(candidateDays.map((date, index) => [date, index]));
   let changed = false;
   for (let step = 0; step < 90 && entry.status === "pending"; step += 1) {
-    const resolution = resolveNextTradingDate(entry.lastChecked, {
+    const resolution = calendar.coveredMonths ? {
+      date: (calendar.tradingDays || []).find(day => day > entry.lastChecked && day <= latest) || "",
+    } : resolveNextTradingDate(entry.lastChecked, {
       tradingDays: calendar.tradingDays || [],
       holidayRows: calendar.holidayRows || [],
       candidateDays,
@@ -11353,7 +11349,10 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
       // 只靠昨收比值推比率其實**只有上櫃有效**（2026-07-26 實測）。也就是說這道除權息保護
       // 過去對上市股票從來沒有生效過，除息當天照樣被記成假停損。
       // 計算結果表給的是絕對的「前收盤價／參考價」配對，不依賴相鄰列，所以不需要相鄰性檢查。
-      const resultRatio = corporateActionResultRatio(entry.code, expected);
+      const batchAction = calendar.actionResults?.get(entry.code)?.[expected];
+      const resultRatio = calendar.actionResults
+        ? (batchAction ? batchAction.referencePrice / batchAction.preClose : null)
+        : corporateActionResultRatio(entry.code, expected);
       const quantification = resultRatio !== null
         ? { quantified: true, ratio: Math.abs(resultRatio - 1) > CORPORATE_ACTION_RATIO_TOLERANCE ? resultRatio : null }
         : swingVerificationActionRatio(row, previousRow, { adjacent });
@@ -11368,7 +11367,8 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
       // 通常隔天就解開，而 daysHeld 不會遞增，所以 15 個交易日的觀察窗不會被停等吃掉。
       const holdReason = quantification.quantified
         ? ""
-        : swingVerificationActionDetected(entry.code, expected, row);
+        : (calendar.actionResults && row.exchangeCorporateActionMark ? "上市除權息標記"
+          : swingVerificationActionDetected(entry.code, expected, row));
       if (holdReason) {
         const hold = { from: expected, reason: holdReason, detectedAt: new Date().toISOString() };
         const previous = entry.corporateActionPending;
@@ -11405,6 +11405,70 @@ let lastSwingAdvanceKey = "";
 function resetSwingAdvanceKeyForTest() {
   lastSwingAdvanceKey = "";
 }
+const SWING_VERIFY_RECENT_BATCH = 16;
+const SWING_VERIFY_HISTORY_BATCH = 4;
+const SWING_VERIFY_RETRY_MS = 5 * 60 * 1000;
+const swingHistoricalCalendarCache = new Map();
+
+// 月份＋代號去重，兩條佇列各有預算與游標；失敗的最舊單不會霸佔下一輪。
+function selectSwingVerificationBatch(store, retryState, { asOf, now = Date.now(), includeRecent = true } = {}) {
+  const cutoff = addDaysCompact(asOf, -90);
+  const lanes = { recent: new Map(), historical: new Map() };
+  for (const entries of Object.values(store || {})) {
+    for (const entry of entries) {
+      if (entry.status !== "pending" || !entry.lastChecked || entry.lastChecked >= asOf) continue;
+      const historical = entry.lastChecked < cutoff;
+      if ((!historical && !includeRecent) || (historical && Number(entry.verificationRetry?.nextRetryAt) > now)) continue;
+      const lane = historical ? "historical" : "recent";
+      const key = `${entry.code}:${entry.exchange || ""}:${historical ? entry.lastChecked.slice(0, 6) : "recent"}`;
+      if (!lanes[lane].has(key)) lanes[lane].set(key, { key, historical, entries: [] });
+      lanes[lane].get(key).entries.push(entry);
+    }
+  }
+  const cursors = { ...retryState };
+  const jobs = [];
+  let recentRemaining = false;
+  for (const [lane, limit] of [["recent", SWING_VERIFY_RECENT_BATCH], ["historical", SWING_VERIFY_HISTORY_BATCH]]) {
+    const keys = [...lanes[lane].keys()].sort();
+    const cursor = retryState?.[`${lane}Cursor`] || "";
+    const ordered = [...keys.filter(key => key > cursor), ...keys.filter(key => key <= cursor)];
+    const selected = ordered.slice(0, limit);
+    if (selected.length) cursors[`${lane}Cursor`] = selected.at(-1);
+    if (lane === "recent") recentRemaining = keys.length > selected.length;
+    jobs.push(...selected.map(key => lanes[lane].get(key)));
+  }
+  return { jobs, cursors, recentRemaining };
+}
+
+// 已結束的兩個月份才宣稱完整涵蓋；空包／混月／缺少指數值都不能當成「整月休市」。
+async function getSwingHistoricalCalendar(from, through) {
+  const months = [from.slice(0, 6), through.slice(0, 6)].filter((month, i, all) => all.indexOf(month) === i);
+  const tradingDays = [];
+  for (const month of months) {
+    let state = swingHistoricalCalendarCache.get(month);
+    if (!state) {
+      state = { value: null, expiresAt: 0, retryAt: 0, lastError: "", inFlight: null };
+      swingHistoricalCalendarCache.set(month, state);
+      // 失敗月份也受上限約束，不能等成功返回才清理。
+      for (const [key, cached] of swingHistoricalCalendarCache) {
+        if (swingHistoricalCalendarCache.size <= 48) break;
+        if (key !== month && !cached.inFlight) swingHistoricalCalendarCache.delete(key);
+      }
+    }
+    const { value: rows } = await loadWithLastGood(state, { ttlMs: 24 * 60 * 60 * 1000, retryMs: SWING_VERIFY_RETRY_MS, load: async () => {
+      const parsed = parseTaiexMonthlyPayload(await fetchJson(TAIEX_HISTORY_URL(month)));
+      if (!parsed.length || parsed.some(row => !row.date.startsWith(month))) throw new Error("歷史交易日月份覆蓋不明");
+      return parsed;
+    } });
+    if (!rows?.length) throw new Error("歷史交易日無法確認");
+    tradingDays.push(...rows.map(row => row.date));
+  }
+  for (const [key, state] of swingHistoricalCalendarCache) {
+    if (swingHistoricalCalendarCache.size <= 48) break;
+    if (!months.includes(key) && !state.inFlight) swingHistoricalCalendarCache.delete(key);
+  }
+  return { tradingDays: unique(tradingDays).sort(), holidayRows: [], coveredMonths: months };
+}
 let swingVerifySummaryCache = { expiresAt: 0, value: null };
 // 摘要有 10 分鐘快取，任何改動驗證單的路徑都必須讓它失效。抽成具名函式的理由：
 // 原本兩處各自寫字面值，測試又沒有正當的把手，於是「只有第一個呼叫者拿到新鮮結果」
@@ -11437,111 +11501,140 @@ function swingAdvanceTargetDate(reference, latestDate) {
   const common = twseCompact < tpexCompact ? twseCompact : tpexCompact;
   return common < requested ? common : requested;
 }
+let swingAdvanceInFlight = null;
 async function advanceSwingVerification(reference, latestDate, options = {}) {
+  if (swingAdvanceInFlight) return swingAdvanceInFlight;
+  const task = runSwingVerificationAdvance(reference, latestDate, options)
+    .finally(() => { if (swingAdvanceInFlight === task) swingAdvanceInFlight = null; });
+  swingAdvanceInFlight = task;
+  return task;
+}
+
+async function runSwingVerificationAdvance(reference, latestDate, options = {}) {
   const targetDate = swingAdvanceTargetDate(reference, latestDate);
   if (!targetDate) return;
   const twseDate = reference?.markets?.twse?.asOf || "";
   const tpexDate = reference?.markets?.tpex?.asOf || "";
   const advanceKey = twseDate && tpexDate ? `${twseDate}|${tpexDate}` : targetDate;
-  if (lastSwingAdvanceKey === advanceKey) return;
   try {
     const db = await loadDb();
-    if (!db.swingVerification) {
-      lastSwingAdvanceKey = advanceKey;
-      return;
-    }
-    // replay 可能要 await 多檔歷史；先在 draft 上計算，不能提前修改共享 dbCache。
-    const originalStore = cloneJson(db.swingVerification);
-    const store = cloneJson(originalStore);
-    // replaySwingVerificationHistory 是同步的，官方除權除息計算結果表要先補齊才查得到。
-    // 驗證單最長留 90 天，抓 4 個月綽綽有餘；一次請求涵蓋全市場，所有 pending 共用。
+    const store = cloneJson(db.swingVerification || {});
+    const originalStore = stableJson(store);
+    const originalRetry = stableJson(cloneJson(db.swingVerificationRetry || {}));
+    const batch = selectSwingVerificationBatch(store, db.swingVerificationRetry, {
+      asOf: targetDate, includeRecent: lastSwingAdvanceKey !== advanceKey,
+    });
+    if (!batch.jobs.length) return;
     const calendar = await getTradingCalendarEvidence();
-    await Promise.all([
-      loadFundamentalsHistory(),
-      ensureCorporateActionResults(compactMonthsBefore(targetDate, 4), targetDate),
-    ]);
-    // 停牌中的標的沒有日 K、也賣不掉：標成 halted 單獨計數，不併進「卡住」（那是資料缺口），
-    // 也不進分母；停牌解除後照常推進。名單抓不到就不標（不猜）。
-    // 測試可注入 null 代表「名單抓不到」；正式路徑抓失敗也回 null，兩者走同一條「不碰 halted」的路。
-    const riskSets = "riskSets" in options ? options.riskSets : await getRiskSets(targetDate).catch(() => null);
-    const pendingByCode = new Map();
-    for (const entries of Object.values(store)) {
-      for (const entry of entries) {
-        if (entry.status !== "pending") continue;
-        if (!pendingByCode.has(entry.code)) pendingByCode.set(entry.code, []);
-        pendingByCode.get(entry.code).push(entry);
-      }
+    await loadFundamentalsHistory();
+    if (batch.jobs.some(job => !job.historical)) {
+      await ensureCorporateActionResults(compactMonthsBefore(targetDate, 3), targetDate);
     }
-    let changed = false;
+    const riskSets = "riskSets" in options ? options.riskSets : await getRiskSets(targetDate).catch(() => null);
+    const actionMonths = new Map();
+    const historicalActions = async (from, through) => {
+      const results = new Map();
+      for (const month of unique([from.slice(0, 6), through.slice(0, 6)])) {
+        if (!actionMonths.has(month)) actionMonths.set(month, (async () => {
+          const start = `${month}01`;
+          const end = addDaysCompact(addMonthsCompact(start, 1), -1);
+          const payload = await fetchJson(`${CORPORATE_ACTION_RESULT_URL}?startDate=${start}&endDate=${end}&response=json`);
+          const rows = corporateActionResultPayloadRows(payload);
+          if (rows === null) throw new Error("歷史公司行動來源無法確認");
+          return normalizeCorporateActionResultRows(rows);
+        })());
+        for (const [code, slot] of await actionMonths.get(month)) results.set(code, { ...results.get(code), ...slot });
+      }
+      return results;
+    };
     let historyUnavailable = 0;
-    await mapLimit([...pendingByCode.entries()], 4, async ([code, entries]) => {
+    await mapLimit(batch.jobs, 4, async ({ entries, historical }) => {
+      const code = entries[0].code;
       const quote = reference.byCode.get(code);
-      const quoteDay = toCompactDate(quote?.rawDate || quote?.asOf);
+      // 新單保存市場來源；舊單只在目前主檔確知市場時補查，不猜下市或消失代號的交易所。
+      const exchange = entries[0].exchange || quote?.exchange;
+      const identity = ["TWSE", "TPEx"].includes(exchange) ? { code, name: quote?.name || entries[0].name, exchange } : null;
+      const quoteDay = quote ? toCompactDate(quote.rawDate || quote.asOf || "") : "";
       const directRows = quote && quoteDay ? [quote] : [];
-      const needsHistory = entries.some((entry) => {
-        const expected = resolveNextTradingDate(entry.lastChecked, {
-          tradingDays: calendar.tradingDays || [],
-          holidayRows: calendar.holidayRows || [],
-          candidateDays: quoteDay ? [quoteDay] : [],
-        }).date;
+      const from = historical ? entries[0].lastChecked.slice(0, 6) + "01" : compactMonthsBefore(targetDate, 3);
+      const through = historical ? [addDaysCompact(addMonthsCompact(from, 2), -1), targetDate].sort()[0] : targetDate;
+      const retry = (reason) => {
+        for (const entry of entries) entry.verificationRetry = {
+          from, through, reason, attemptedAt: new Date().toISOString(),
+          ...(historical ? { nextRetryAt: Date.now() + SWING_VERIFY_RETRY_MS } : {}),
+        };
+      };
+      // 停牌狀態是目前名單的事實，與有沒有抓到 K／歷史交易日分開更新。
+      if (riskSets) for (const entry of entries) {
+        const since = riskSets.halted?.has(code) ? (riskSets.halted.get(code) || targetDate) : "";
+        if (since && !entry.halted) entry.halted = { since };
+        else if (!since && entry.halted) delete entry.halted;
+      }
+      const needsHistory = historical || entries.some(entry => {
+        const expected = resolveNextTradingDate(entry.lastChecked, { ...calendar, candidateDays: quoteDay ? [quoteDay] : [] }).date;
         return !expected || expected < targetDate || quoteDay !== targetDate;
       });
+      if (needsHistory && !identity) {
+        retry("market-unknown");
+        historyUnavailable += 1;
+        return;
+      }
+      let replayCalendar = calendar;
       let rows = directRows;
-      if (needsHistory && quote?.exchange) {
-        // 「抓不到歷史」與「官方真的缺這一天」必須分得開。分不開的後果是實測出來的：
-        // 逐月抓取失敗被 getStockHistory 的 .catch(() => []) 吞掉之後，rows 只剩整批收盤那一根，
-        // 中間每一個交易日都變成「查無 K」→ 寫進 dataGap → 而 replay 依設計不跳日，於是**永久停等**。
-        // 停等本身是對的（D-26／stock1-domain：中間缺 K 不可跳日），錯的是把我方的抓取失敗
-        // 當成官方缺漏餵給它。抓不到就整檔跳過，這一輪什麼都不寫，下一輪重試。
-        const failedMonths = [];
-        const history = await getStockHistory(quote, targetDate, 4, { failedMonths });
-        const historyLatest = history.length ? toCompactDate(history[history.length - 1].date) : "";
-        // 逐檔月歷史的當月資料偶爾比整批收盤晚一天更新（appendTodayCloseBar 就是為此存在），
-        // 所以容忍到 5 個日曆日；再舊就是抓取殘缺，不是上游只慢了一步。
-        const historyStale = !historyLatest || historyLatest < addDaysCompact(targetDate, -5);
-        if (failedMonths.length || historyStale) {
+      if (historical) {
+        try {
+          replayCalendar = await getSwingHistoricalCalendar(from, through);
+        } catch {
+          retry("calendar-unavailable");
           historyUnavailable += 1;
           return;
         }
-        rows = [...history, ...directRows];
+        try {
+          // 全域歸檔每代號有 40 筆上限；sealed 月份不代表舊事件仍在。
+          // 舊月份重查的結果只屬本批，直接傳給 replay，不寫 capped archive、不覆蓋全域快取。
+          replayCalendar.actionResults = await historicalActions(from, through);
+        } catch {
+          retry("corporate-action-source-unavailable");
+          historyUnavailable += 1;
+          return;
+        }
+      }
+      if (needsHistory) {
+        const failedMonths = [];
+        const history = await getStockHistory(identity, through, historical ? 2 : 4, { failedMonths, requireSourceSuccess: true });
+        const historyLatest = history.length ? toCompactDate(history.at(-1).date) : "";
+        const expectedLatest = historical ? replayCalendar.tradingDays.filter(day => day <= through).at(-1) || through : through;
+        // 新鮮度比對本批的尾日；舊單不得用今天的四個月冒充已查過原始缺口。
+        if (failedMonths.length || !historyLatest || historyLatest < addDaysCompact(expectedLatest, -5)) {
+          retry(failedMonths.length ? "history-source-unavailable" : "history-stale");
+          historyUnavailable += 1;
+          return;
+        }
+        rows = historical ? history : [...history, ...directRows];
       }
       for (const entry of entries) {
-        // 名單抓不到（riskSets 為 null）就整段不碰：不猜、也不撕既有標記。以前 null 會讓 haltedSince
-        // 恆為空字串、走進「不再停牌」分支，一次抓取失敗就把 haltedCount 歸零、下一輪再標回來。
-        if (riskSets) {
-          const haltedSince = riskSets.halted?.has(code) ? (riskSets.halted.get(code) || targetDate) : "";
-          if (haltedSince && !entry.halted) {
-            entry.halted = { since: haltedSince };
-            changed = true;
-          } else if (!haltedSince && entry.halted) {
-            delete entry.halted;
-            changed = true;
-          }
-        }
-        const result = replaySwingVerificationHistory(entry, rows, targetDate, calendar);
-        if (result.changed) changed = true;
+        replaySwingVerificationHistory(entry, rows, through, replayCalendar);
+        if (entry.status !== "pending") delete entry.verificationRetry;
+        else entry.verificationRetry = {
+          from, through,
+          reason: entry.corporateActionPending ? "corporate-action-pending" : entry.dataGap ? "data-gap" : "awaiting-session",
+          attemptedAt: new Date().toISOString(),
+          ...(historical ? { nextRetryAt: Date.now() + SWING_VERIFY_RETRY_MS, calendarMonths: replayCalendar.coveredMonths } : {}),
+        };
       }
     });
-    if (changed) {
-      const committed = await commitDbMutation((currentDb) => {
-        // 等歷史資料期間若另一輪已更新驗證資料，不用舊 draft 覆蓋；保持未節流讓下次重算。
-        if (stableJson(currentDb.swingVerification || {}) !== stableJson(originalStore)) {
-          return skipDbMutation(false);
-        }
-        currentDb.swingVerification = store;
-        return true;
-      });
-      if (!committed) return;
-      invalidateSwingVerifySummaryCache();
-    }
-    // 有檔案因為抓不到歷史而被跳過 → 不節流，讓下一次看板重算時重試。
-    // 節流的用意是「這個收盤日已經處理完了」，被跳過的檔案顯然還沒處理完。
-    if (historyUnavailable) {
-      console.warn(`[Stock1] 波段驗證推進：${historyUnavailable} 檔官方歷史抓取殘缺，這一輪跳過不寫缺口，下次重試。`);
-      return;
-    }
-    // 只有完整流程成功後才節流；讀檔或寫檔失敗要讓下一次有機會恢復。
-    lastSwingAdvanceKey = advanceKey;
+    const committed = await commitDbMutation(currentDb => {
+      // 證據與游標原子提交；重入、其他紀錄寫入、失敗落盤都不可吃掉下一批或覆蓋新證據。
+      if (stableJson(currentDb.swingVerification || {}) !== originalStore
+        || stableJson(currentDb.swingVerificationRetry || {}) !== originalRetry) return skipDbMutation(false);
+      currentDb.swingVerification = store;
+      currentDb.swingVerificationRetry = batch.cursors;
+      return true;
+    });
+    if (!committed) return;
+    invalidateSwingVerifySummaryCache();
+    // 批次尚有未處理近期單或來源失敗，不能宣稱整個資料日已完成。歷史批次始終可恢復。
+    if (!historyUnavailable && !batch.recentRemaining) lastSwingAdvanceKey = advanceKey;
   } catch (error) {
     console.warn("[Stock1] 波段驗證推進失敗（下次看板重算時再試）：", error.message);
   }
@@ -11549,8 +11642,8 @@ async function advanceSwingVerification(reference, latestDate, options = {}) {
 
 // 各場景統計＋最近結案明細（10 分鐘快取；獨立於 /api/swing——那份 body 會被凍結存快照，不能內嵌會過期的數字）。
 // D-26：驗證單若因官方日 K 缺漏而停在缺口前，會**永遠**留在 pending——`daysHeld` 只在成功推進時
-// 才 +1，所以 15 個交易日超時結案也永遠碰不到；90 天後被 pruneSwingVerification 無差別刪掉，
-// 從頭到尾都沒進過 resolved 分母。健康的 pending 最多 15 個交易日（約 3 週）就會結案，
+// 才 +1，所以 15 個交易日超時結案也永遠碰不到；歷史仍保留並分批重試。
+// 健康的 pending 最多 15 個交易日（約 3 週）就會結案，
 // 所以缺口超過 30 個日曆日的視為「卡住」，單獨計數並揭露，讓分母損耗看得見。
 // **刻意不做**「缺 K 就跳到下一個交易日」：stock1-domain 明訂「中間日期缺 K 就停在缺口前，不可跳日」，
 // 那是為了避免「D1 先停損、D2 才達標」被錯記成勝利，屬刻意設計，不能為了衝分母而破壞。
@@ -11624,8 +11717,8 @@ async function buildSwingVerificationSummary() {
     return swingVerifySummaryCache.value;
   }
   const db = await loadDb();
-  const store = db.swingVerification || {};
   const summaryToday = toTaipeiCompactDate();
+  const store = selectSwingVerificationWindow(db.swingVerification, { asOf: summaryToday, keepDays: 90 });
   const byScenario = new Map();
   const all = [];
     const versionCounts = new Map();
@@ -14496,7 +14589,8 @@ export {
   // 波段前向驗證
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification, applySwingCorporateAction, resetSwingAdvanceKeyForTest,
   swingAdvanceTargetDate,
-  buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, pruneSwingVerification,
+  buildSwingVerificationSummary, invalidateSwingVerifySummaryCache, selectSwingVerificationWindow,
+  selectSwingVerificationBatch,
   median, maxConsecutiveLossDays, worstResolvedDay,
   // 基本面
   rocYearMonthToIso, getMonthlyRevenue, getQuarterlyEps, getValuations, getDividendSchedule,

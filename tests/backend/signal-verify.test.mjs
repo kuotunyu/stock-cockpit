@@ -1,4 +1,4 @@
-// 隔日沖前向驗證引擎：快照存檔規則（更完整才覆蓋、保留 15 份）、隔日驗證數學、長期成績單。
+// 隔日沖前向驗證引擎：快照存檔規則（更完整才覆蓋、保留歷史、讀取 260 份）、隔日驗證數學、長期成績單。
 // 快照直接操作 loadDb() 的 dbCache（每測開頭重設，彼此獨立）；行情走 fetch-mock 離線。
 // 注意：buildVerificationHistory 有 10 分鐘模組級快取 → 只能呼叫一次（放最後一個測試）。
 import test, { before } from "node:test";
@@ -107,16 +107,16 @@ test("saveSignalSnapshot：同日快照——較短不覆蓋（半個市場）�
   assert.equal(db.signalSnapshots[0].picks[0].price, 101);
 });
 
-test("saveSignalSnapshot：只保留最近 OVERNIGHT_SNAPSHOT_LIMIT 份（依訊號日排序砍最舊）", async () => {
+test("saveSignalSnapshot：超過讀取窗口仍完整保留歷史（依訊號日排序）", async () => {
   const limit = mod.OVERNIGHT_SNAPSHOT_LIMIT;
   const seed = Array.from({ length: limit }, (_, i) => ({
     asOf: iso(compactTradingDay(-(limit + 5 - i))), savedAt: "", picks: [pickOf()],
   }));
   const db = await resetSnapshots(seed);
   await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { a: [pickOf()] } });
-  assert.equal(db.signalSnapshots.length, limit);
+  assert.equal(db.signalSnapshots.length, limit + 1);
   assert.ok(db.signalSnapshots.some((s) => s.asOf === iso(YESTERDAY)), "新的一份要在");
-  assert.ok(!db.signalSnapshots.some((s) => s.asOf === iso(compactTradingDay(-(limit + 5)))), "最舊的要被砍");
+  assert.ok(db.signalSnapshots.some((s) => s.asOf === iso(compactTradingDay(-(limit + 5)))), "最舊的證據仍在");
 });
 
 test("saveSignalSnapshot：同日不同公式版本互不覆蓋，舊缺欄位明確視為 v1", async () => {

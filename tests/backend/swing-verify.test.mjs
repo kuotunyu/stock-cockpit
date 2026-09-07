@@ -1,5 +1,5 @@
 // 波段前向驗證（審計 E）：逐日推進規則（達標/停損/超時/雙觸/防重跑）、
-// 驗證單記錄（去重/欄位缺漏跳過/每場景上限）、90 天裁剪、批次推進＋場景統計。
+// 驗證單記錄（去重/欄位缺漏跳過/每場景上限）、90 天讀取窗口、批次推進＋場景統計。
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { importServer } from "../helpers/test-server.mjs";
@@ -252,13 +252,14 @@ test("recordSwingVerification：provisional 掃描不可建立不可回溯的驗
   assert.deepEqual(db.swingVerification, {}, "資料覆蓋不足時不能新增正式樣本");
 });
 
-test("pruneSwingVerification：只留最近 90 天", () => {
+test("selectSwingVerificationWindow：窗口排除但儲存保留", () => {
   const store = {
     [compactTradingDay(-100)]: [makeEntry()],
     [compactTradingDay(-5)]: [makeEntry()],
   };
-  mod.pruneSwingVerification(store, 90);
-  assert.equal(store[compactTradingDay(-100)], undefined, "超過 90 天的要刪");
+  const window = mod.selectSwingVerificationWindow(store, { keepDays: 90 });
+  assert.equal(window[compactTradingDay(-100)], undefined, "超過 90 天不進窗口");
+  assert.ok(store[compactTradingDay(-100)], "儲存證據仍在");
   assert.ok(store[compactTradingDay(-5)], "近期的要留");
 });
 
@@ -291,7 +292,7 @@ test("批次推進：reference 覆蓋不完整時不鎖日也不推進", async (
   assert.equal(db.swingVerification[compactTradingDay(-4)][0].status, "pending");
 });
 
-test("批次推進＋場景統計：相鄰交易日用整批收盤，缺個股報價保留 dataGap", async () => {
+test("批次推進＋場景統計：相鄰交易日用整批收盤，未知市場保留重試原因", async () => {
   const db = await mod.loadDb();
   db.swingVerification = {
     [compactTradingDay(-3)]: [
@@ -326,7 +327,8 @@ test("批次推進＋場景統計：相鄰交易日用整批收盤，缺個股�
   assert.equal(s.winRate, null, `結案 2 筆低於門檻 ${mod.WIN_RATE_MIN_SAMPLES}，不得給百分比`);
   assert.equal(s.winRateMinSamples, mod.WIN_RATE_MIN_SAMPLES, "前端要靠這個顯示累積進度");
   assert.equal(summary.pendingCount, 1);
-  assert.equal(summary.dataGapCount, 1, "5555 缺官方 K 棒要標缺口，不能跳過");
+  assert.equal(summary.dataGapCount, 0, "5555 未知市場不能冒充官方缺 K");
+  assert.equal(entries.find(e => e.code === "5555").verificationRetry.reason, "market-unknown");
   assert.equal(summary.recent.length, 2, "只列已結案");
   assert.equal(summary.currentFormulaVersion, mod.SWING_FORMULA_VERSION);
   assert.ok(summary.formulaVersions.some((item) => item.formulaVersion === "old-v1" && item.samples === 1));
@@ -442,8 +444,8 @@ test("停牌：pending 單標 halted、單獨計數、不併進「卡住」，�
   const stale = compactTradingDay(-45);
   db.swingVerification = {
     [stale]: [
-      makeEntry({ code: "5555", lastChecked: stale }),
-      makeEntry({ code: "6666", lastChecked: stale }),
+      makeEntry({ code: "5555", lastChecked: stale, dataGap: { from: stale, through: target } }),
+      makeEntry({ code: "6666", lastChecked: stale, dataGap: { from: stale, through: target } }),
     ],
   };
   const reference = { byCode: new Map() };
@@ -454,7 +456,7 @@ test("停牌：pending 單標 halted、單獨計數、不併進「卡住」，�
   const normal = entries.find((e) => e.code === "6666");
   assert.deepEqual(halted.halted, { since: "20260801" });
   assert.equal(normal.halted, undefined);
-  assert.ok(halted.dataGap && normal.dataGap, "兩檔都沒有日 K，都有缺口");
+  assert.ok(halted.dataGap && normal.dataGap, "既有已確認缺口須保留，未知市場不能清除舊證據");
   mod.invalidateSwingVerifySummaryCache();
   const summary = await mod.buildSwingVerificationSummary();
   assert.equal(summary.haltedCount, 1);
