@@ -1319,7 +1319,7 @@ function renderFocusPickCard(groupKey, pick) {
   }
   const reason = (pick.reasons || []).slice(0, 2).join("、") || meta.hint;
   return `
-    <button class="today-focus-card" data-overnight-code="${pick.code}" type="button">
+    <button class="today-focus-card" ${overnightPickAttributes(pick, groupKey)} type="button">
       <span>${escapeHtml(meta.title)}</span>
       <strong><span class="focus-pick-name">${escapeHtml(pick.name)}</span><em>${formatSignedPercent(pick.changePct)}</em></strong>
       <p>${escapeHtml(reason)}</p>
@@ -2721,6 +2721,10 @@ function tradePlanFromDisplayedPick(pick, strategy, publication) {
     entryPrice: positivePriceOrNull(pick?.plan?.entry ?? pick?.price), stopPrice: positivePriceOrNull(pick?.plan?.structuralStop),
     targetPrice: positivePriceOrNull(pick?.plan?.target), quantity:null, expiresOn:null, entryLow:null, entryHigh:null,
     riskBudgetCash:null, invalidationReason:'', reason:'' };
+}
+// 卡片保留當時顯示身份；重新發布或無法精確配對時，只建立手動隔日計畫。
+function overnightPickAttributes(pick, group) {
+  return `data-overnight-code="${escapeHtml(pick.code)}" data-overnight-group="${escapeHtml(group)}" data-overnight-exchange="${escapeHtml(pick.exchange || '')}" data-overnight-capture="${escapeHtml(overnightState.publication?.captureId || '')}"`;
 }
 function rememberTradePlanDraft() {
   const form = document.getElementById('tradePlanForm');
@@ -5889,7 +5893,7 @@ function renderOvernightGroups() {
             ${displayedPicks
               .map(
                 (pick) => `
-                  <button class="overnight-pick" data-overnight-code="${pick.code}" type="button">
+                  <button class="overnight-pick" ${overnightPickAttributes(pick, key)} type="button">
                     ${renderScoreBadge(pick, key)}
                     <span class="pick-main">
                       <strong>${escapeHtml(pick.name)}</strong>
@@ -6047,7 +6051,7 @@ function renderSignalVerification() {
       <div class="verify-rows">
         ${topRows
           .map((row) => `
-            <button class="verify-chip ${Number.isFinite(row.currentReturn) ? (row.currentReturn >= 0 ? "is-up" : "is-down") : ""}" data-overnight-code="${row.code}" type="button">
+            <button class="verify-chip ${Number.isFinite(row.currentReturn) ? (row.currentReturn >= 0 ? "is-up" : "is-down") : ""}" data-overnight-code="${escapeHtml(row.code)}" data-overnight-exchange="${escapeHtml(row.exchange || '')}" type="button">
               <strong>${escapeHtml(row.name)}</strong>
               <span>${row.holdingOutcomes ? '價格 ' : ''}${formatSignedPercent(row.currentReturn)}</span>
               <small>高 ${formatSignedPercent(row.highReturn)}${row.hitPlus2 ? " ✓" : ""}</small>
@@ -12483,9 +12487,13 @@ document.addEventListener("click", async (event) => {
   const overnightPick = event.target.closest("[data-overnight-code]");
   if (overnightPick) {
     const code = normalizeStockCodeInput(overnightPick.dataset.overnightCode);
-    const displayed = Object.values(overnightState.groups || {}).flat().filter(pick=>pick.code===code);
-    detailTradePlanContext = displayed.length === 1 && !overnightPick.classList.contains('verify-chip')
-      ? tradePlanFromDisplayedPick(displayed[0],'overnight',overnightState.publication) : null;
+    const group = overnightPick.dataset.overnightGroup;
+    const exchange = overnightPick.dataset.overnightExchange;
+    const displayed = (overnightState.groups?.[group] || []).filter(pick=>pick.code===code && pick.exchange===exchange && pick.group===group);
+    const pick = displayed.length === 1 ? displayed[0] : {code,exchange,group:group || null};
+    const publication = !overnightPick.classList.contains('verify-chip') && displayed.length === 1
+      && overnightPick.dataset.overnightCapture === overnightState.publication?.captureId ? overnightState.publication : null;
+    detailTradePlanContext = tradePlanFromDisplayedPick(pick,'overnight',publication);
     await ensureStockForDetailCode(code);
     state.selectedCode = code;
     state.technicalCode = state.selectedCode;
@@ -13099,12 +13107,12 @@ const GLOSSARY = [
   { term: '事後 netR', aliases: ['netR','R 倍數'], cat: '成績單與決策', def: '完整淨損益 ÷ 初始風險金額。初始風險＝（該模型原始進場價−當時鎖定有效停損價）×原始股數，有限且大於零；分母不再加成本。950 元淨損益、500 元原始風險為 1.9R；負損益保留負 R。移停、公司行動與重開報表不改原始風險。缺股數、有效停損或完整損益就無 R，不能用固定 2% 補造。隔日沖未計畫停損不顯示 R 數值。選股卡的計畫淨 RR 與含成本部位預算是另一用途。' },
   { term: '假設含息持有', aliases: ['含息持有','含息淨獲利率'], cat: '成績單與決策', def: '每筆新訊號固定假設 1 股，保存原始價格與風險，股利不再投入。含息損益包含退出價款與公告假設應收股利，減原始投入及模型成本；成本是原始價款的 0.471%，未計個人股利稅與補充保費。新股須有退出前可處分證據；現增追加投入只列絕對損益，未定義多時點報酬率。這不是實際成交、實際入帳或帳戶收益。已保存為未知的含息結果不會自動補算；可檢視原價格觀察與缺漏原因。' },
   { term: "開盤賣勝率／收盤賣勝率", aliases: ["開盤賣勝率", "收盤賣勝率", "勝率"], cat: "成績單與決策", def: "隔日沖成績單的勝率：訊號日收盤至<strong>實際下一交易日</strong>的開盤價（或收盤價）之價格觀察，扣掉一買一賣的手續費與證交稅（來回約 0.471%）後<strong>淨報酬 > 0</strong> 才算淨獲利；並非可成交回測或帳戶收益。「盤中曾達 +2%／曾破 −2%」只是盤中曾觸及的價位，不是可實現損益，不要當勝率讀。" },
-  { term: "信賴區間（成績單的括號）", aliases: ["信賴區間", "區間"], cat: "成績單與決策", def: "括號裡的「區間 60～90%」是 95% 信賴區間：同一批條件再來一次，真實勝率有 95% 的機會落在這個範圍。本 App 以「日」為單位算（同一天選出的幾十檔共享大盤走勢，不能當獨立樣本），未滿 20 天不顯示。<strong>看下界</strong>：下界高於 50% 才染色。" },
+  { term: "信賴區間（成績單的括號）", aliases: ["信賴區間", "區間"], cat: "成績單與決策", def: "95% 信賴區間描述估計的不確定性：在抽樣與模型假設成立時，長期重複抽樣並用相同方法建立的區間，約 95% 會涵蓋真實參數；不是說這一次區間有 95% 機率包含真實勝率。本 App 以「日」為叢集處理同日股票共同波動，依該欄有效日期計算，未滿 20 個有效日期不顯示。日叢集仍不能消除日間相依，市場變化也可能使假設不成立；區間下界與歷史成績均不保證未來績效。" },
   { term: "獲利因子（PF）", aliases: ["獲利因子", "PF"], cat: "成績單與決策", def: "所有獲利單的報酬總和 ÷ 所有虧損單的虧損總和。<strong>大於 1</strong> 代表賺的比賠的多，1.5 以上算健康。它看的是「幅度」不是「次數」：勝率不高但賺大賠小的策略，獲利因子仍可能很好。" },
   { term: "中位數與最長連虧", aliases: ["中位數", "中位", "最長連虧", "最差單日"], cat: "成績單與決策", def: "<strong>中位數</strong>是把所有結案報酬排序後正中間的那個值，不像平均會被一兩筆極端值拉走。<strong>最長連虧</strong>是連續虧損最長的一串，用來想像最壞時要撐多久；「最差單日」是同一天結案的單平均最差的那一天。" },
   { term: "大盤位階（季線上／下）", aliases: ["大盤位階", "位階", "季線上", "季線下", "月線上", "月線下"], cat: "成績單與決策", def: "加權指數收盤相對 20 日（月線）與 60 日（季線）均線的位置。只用來把成績單<strong>分層看</strong>（季線上／季線下各算一組），不是選股濾網——它不會改變任何選股結果。" },
   { term: "期指基差", aliases: ["基差", "夜盤 vs 現貨收盤", "夜盤"], cat: "成績單與決策", def: "台指期近月價格減加權指數。正數（正價差）通常代表期貨偏多、負數偏空。只有<strong>日盤</strong>同一交易日的數字才叫基差；15:00 後期交所給的是夜盤價，減 13:30 的現貨收盤等於「夜盤自己的漲跌＋基差」，畫面上會改標「夜盤 vs 現貨收盤」。結算週換月時基差會跳一個月的持有成本，所以合約月份一起顯示。" },
-  { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "策略雷達頂部填「資金」與「單筆風險 %」後，每張波段卡算 <strong>建議張數＝資金 × 風險% ÷（進場 − 結構停損）× 1000</strong>，再以買得起的張數封頂。意思是：這筆若打到停損，最多賠掉資金的那個百分比。資金只存在這台裝置。" },
+  { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
   { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "跳空略過"], cat: "成績單與決策", def: "波段驗證的另一個口徑：同一批驗證單改以<strong>第一個交易日的開盤價</strong>當進場價重算。訊號要等收盤後的整批資料才算得出來，真實進場多半是次日開盤，所以並陳。開盤已經在停損下方或目標上方的單，這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];
 const glossaryState = { cat: "", q: "" };

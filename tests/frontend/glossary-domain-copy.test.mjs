@@ -9,6 +9,19 @@ after(() => app.cleanup());
 const glossary = JSON.parse(app.evalIn("JSON.stringify(GLOSSARY)"));
 const definition = (term) => glossary.find((item) => item.term === term)?.def || "";
 
+test('部位名詞依含成本風險預算與明示可用現金分開解釋，不保證停損損失',()=>{
+ const text=definition('建議張數與單筆風險 %');
+ assert.match(text,/風險本金/);assert.match(text,/可用現金/);assert.match(text,/未檢查/);
+ assert.match(text,/0\.471%/);assert.match(text,/最低買費/);assert.match(text,/1000/);
+ assert.match(text,/跳空/);assert.match(text,/滑價/);
+ assert.doesNotMatch(text,/最多賠掉|÷（進場 − 結構停損）× 1000/);
+});
+test('信賴區間是條件性長期覆蓋，日叢集未消除日間相依',()=>{
+ const text=definition('信賴區間（成績單的括號）');
+ assert.match(text,/假設/);assert.match(text,/重複抽樣/);assert.match(text,/95%/);assert.match(text,/涵蓋/);
+ assert.match(text,/日間相依/);assert.doesNotMatch(text,/真實勝率有 95% 的機會|才染色/);
+});
+
 test("策略雷達名詞表不得誤稱注意／處置／變更交易股會被排除", () => {
   const scope = definition("掃描範圍（前 240 檔）");
   const changed = definition("變更交易 / 全額交割");
