@@ -128,3 +128,23 @@ test('portable link gross cash rejects malformed audit values and preserves null
  assert.equal(mod.buildTradePlanLinkEvidence(missing,[{...records[0],grossAmountTwd:null}])[p.plans[0].planId].buyCash,2004);
  const zero=mod.validatePortableTradePlans(changed(0),now);assert.equal(mod.buildTradePlanLinkEvidence(zero,[{...records[0],grossAmountTwd:0}])[p.plans[0].planId].buyCash,4);
 });
+
+
+test('restore uses live broker consistency for current links but preserves unrelated audit history',async()=>{
+ const records=mod.normalizeTradesPayload({schemaVersion:2,records:[trade('broker-a','buy',100,{brokerAccountId:'A',executedAt:'',instrumentType:'stock'}),trade('broker-b','buy',100,{brokerAccountId:'B',executedAt:'',instrumentType:'stock'})]}).records;
+ let a=build([plan()]);a=build([{...a.plans[0],tradeLinks:[{tradeId:'broker-a',allocatedShares:10}]}],a,records);
+ let b=build([plan()]);b=build([{...b.plans[0],tradeLinks:[{tradeId:'broker-b',allocatedShares:10}]}],b,records);
+ const mixed=structuredClone(a);mixed.plans[0].tradeLinks.push(b.plans[0].tradeLinks[0]);mixed.plans[0].metadataRevisions[0].tradeLinks=structuredClone(mixed.plans[0].tradeLinks);
+ assert.throws(()=>mod.validatePortableTradePlans(mixed,now),{code:'PLAN_LINK_ACCOUNT_INVALID'});
+ const prior=a.plans[0].metadataRevisions[0];a=build([{...a.plans[0],tradeLinks:[{tradeId:'broker-b',allocatedShares:10}]}],a,records);
+ const portable=mod.validatePortableTradePlans(a,now);assert.deepEqual(portable.plans[0].metadataRevisions[0],prior);assert.deepEqual(build(portable.plans,portable,records),portable);
+ const existingTrades=await api('/api/trades');await api('/api/trades',{...existingTrades,records});
+ const bundle=(await api('/api/personal-data/export')).bundle;
+ const stable=value=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?`[${value.map(stable).join(',')}]`:`{${Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+stable(value[key])).join(',')}}`;
+ const signed=plans=>{const out=structuredClone(bundle);out.data.tradePlans=plans;const {integrity,...unsigned}=out;out.integrity={algorithm:'sha256',contentHash:createHash('sha256').update(stable(unsigned)).digest('hex')};return out;};
+ const options={watchLists:'replace',alerts:'replace',trades:'replace',stockNotes:'merge',companyProfiles:'skip'};
+ const preview=async(plans,status=200)=>json(await srv.api('/api/personal-data/restore/preview',{method:'POST',body:JSON.stringify({bundle:signed(plans),options})}),status);
+ assert.equal((await preview(mixed,422)).code,'PLAN_LINK_ACCOUNT_INVALID');
+ const valid=await preview(a);await json(await srv.api('/api/personal-data/restore',{method:'POST',body:JSON.stringify({previewToken:valid.previewToken,confirmation:'RESTORE',currentPassword:'test-admin-pw'})}));
+ const restored=await api('/api/trade-plans');assert.deepEqual(restored.plans[0].metadataRevisions[0],prior);assert.equal(restored.linkEvidence[a.plans[0].planId].links[0].status,'valid');await api('/api/trade-plans',restored);
+});

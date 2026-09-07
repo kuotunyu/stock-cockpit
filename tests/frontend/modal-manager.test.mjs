@@ -161,7 +161,7 @@ test("mobile stock detail is inert while closed, owns focus while open, and rest
   assert.equal(opener.closest("[inert]"), null);
 });
 
-test("mobile detail restores focus to the replacement stock row after its opener is rerendered", async () => {
+test("mobile detail restores focus to the replacement stock button after whole-row mouse activation", async () => {
   app.evalIn(`
     stocks.length = 0;
     stocks.push({
@@ -195,9 +195,10 @@ test("mobile detail restores focus to the replacement stock row after its opener
   pressKey(app.doc.activeElement, "Escape");
   await app.settle(4);
 
-  const replacement = app.doc.querySelector('.stock-row[data-code="2330"]');
-  assert.ok(replacement);
-  assert.notEqual(replacement, original, "opening detail rerenders the active stock list");
+  const replacementRow = app.doc.querySelector('.stock-row[data-code="2330"]');
+  assert.notEqual(replacementRow, original, "opening detail rerenders the active stock list");
+  const replacement = replacementRow?.querySelector('.quote-stock-open');
+  assert.ok(replacement instanceof app.win.HTMLButtonElement, "Escape returns to the native action within the semantic row");
   for (let attempt = 0; attempt < 8 && app.doc.activeElement !== replacement; attempt += 1) {
     await app.settle(1);
   }

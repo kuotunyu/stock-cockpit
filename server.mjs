@@ -2560,6 +2560,11 @@ function validateSavedTradeLinks(links) {
   }
   return cloneJson(links);
 }
+// 只約束目前同時存在的分配；不同時期已解除的 audit 不合併檢查券商。
+function assertTradePlanLinkBrokerAccounts(links) {
+  const knownAccounts = new Set(links.map(link=>link.snapshot.brokerAccountId).filter(id=>id && !['default','unknown','legacy-unknown'].includes(id)));
+  if (knownAccounts.size > 1 || (knownAccounts.size && links.some(link=>link.snapshot.brokerAccountId === 'default'))) throw tradePlanError('PLAN_LINK_ACCOUNT_INVALID', '同一計畫的成交須使用相同券商帳號');
+}
 function canonicalizeTradePlanMetadata(raw, prior, plan, records, now) {
   const supplied = raw.tradeLinks ?? prior?.tradeLinks ?? [];
   if (!Array.isArray(supplied) || supplied.length > TRADE_PLAN_LINK_LIMIT) throw tradePlanError('PLAN_LINK_INVALID', '每個計畫最多關聯 100 筆成交');
@@ -2580,8 +2585,7 @@ function canonicalizeTradePlanMetadata(raw, prior, plan, records, now) {
     return { tradeId:link.tradeId, allocatedShares:link.allocatedShares, snapshot, fingerprint:tradeLinkFingerprint(snapshot), linkedAt:now };
   });
   validateSavedTradeLinks(links);
-  const knownAccounts = new Set(links.map(link=>link.snapshot.brokerAccountId).filter(id=>id && !['default','unknown','legacy-unknown'].includes(id)));
-  if (knownAccounts.size > 1 || (knownAccounts.size && links.some(link=>link.snapshot.brokerAccountId === 'default'))) throw tradePlanError('PLAN_LINK_ACCOUNT_INVALID', '同一計畫的成交須使用相同券商帳號');
+  assertTradePlanLinkBrokerAccounts(links);
   const review = validateTradePlanReview(Object.hasOwn(raw,'review') ? raw.review : prior?.review, prior?.review, now);
   const history = cloneJson(prior?.metadataRevisions || []);
   if (stableJson(links) !== stableJson(prior?.tradeLinks || []) || stableJson(review) !== stableJson(prior?.review || null)) {
@@ -2772,6 +2776,7 @@ function validatePortableTradePlans(payload, now = new Date().toISOString()) {
       validateSavedTradeLinks(revision.tradeLinks); validateTradePlanReview(revision.review,null,now,true);
     }
     const tradeLinks = validateSavedTradeLinks(raw.tradeLinks ?? []), review = validateTradePlanReview(raw.review,null,now,true);
+    assertTradePlanLinkBrokerAccounts(tradeLinks);
     for(const link of [...tradeLinks,...metadataRevisions.flatMap(revision=>revision.tradeLinks)]) if(link.snapshot.code!==identity.code || link.snapshot.market!==identity.exchange) throw tradePlanError('BACKUP_PLAN_INVALID','歷史成交關聯股票或市場不符');
     const latest = metadataRevisions.at(-1);
     if (latest ? stableJson(latest.tradeLinks)!==stableJson(tradeLinks) || stableJson(latest.review)!==stableJson(review) : tradeLinks.length || review) throw tradePlanError('BACKUP_PLAN_INVALID','檢討與關聯歷史不一致');

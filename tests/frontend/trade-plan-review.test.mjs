@@ -55,3 +55,20 @@ test('repeated plan save notices coalesce without discarding unrelated notificat
   assert.equal(app.doc.querySelectorAll('#toastStack .toast').length,baseline+2);assert.match(app.doc.querySelector('#toastStack').textContent,/獨立到價通知/);assert.doesNotMatch(app.doc.querySelector('#toastStack').textContent,/第一筆/);
  }finally{await app.settle();app.cleanup();}
 });
+
+
+test('reopening unsaved draft refreshes same-rev invalidation without replacing fields, folds or focus',async()=>{
+ let release;const response=new Promise(resolve=>release=resolve);
+ const app=await createAppWindow({fetchRoutes:{'/api/trade-plans':()=>response}});try{
+  const link={tradeId:'linked',allocatedShares:10,snapshot:{date:'20260908',side:'buy',price:100,fee:0,tax:0,feeSource:'manual',taxSource:'manual',timePrecision:'date-only'}};
+  const saved={...plan,status:'active',tradeLinks:[link],review:{decision:'insufficient-data',reason:'saved'}};
+  const evidence={links:[{...link,status:'valid'}],buyShares:10,sellShares:0,buyCash:1000,sellCash:0,cashDifference:-1000};
+  app.evalIn(`tradePlansState.rev=1;tradePlansState.linkEvidence={p1:${JSON.stringify(evidence)}};tradePlanDrafts.set(authState.user.id,{editor:{...${JSON.stringify(saved)},reason:'UNSAVED_INTENT',review:{decision:'insufficient-data',reason:'UNSAVED_REVIEW'}},base:${JSON.stringify(saved)}})`);
+  const opening=app.evalIn('openTradePlans()');await app.settle();
+  const field=app.doc.querySelector('[name=reviewReason]'),comparison=app.doc.querySelector('.trade-plan-comparison');comparison.open=true;comparison.querySelector('summary').focus();
+  release({ok:true,rev:1,plans:[saved],linkEvidence:{p1:{...evidence,links:[{...link,status:'source-deleted'}],buyShares:0,buyCash:0,cashDifference:null}}});await opening;
+  assert.match(app.doc.querySelector('#tradePlanEvidence').textContent,/來源成交已刪除/);assert.doesNotMatch(app.doc.querySelector('#tradePlanEvidence').textContent,/有效關聯/);
+  assert.equal(app.doc.querySelector('[name=reviewReason]'),field);assert.equal(field.value,'UNSAVED_REVIEW');assert.equal(app.doc.querySelector('[name=reason]').value,'UNSAVED_INTENT');
+  assert.equal(app.doc.querySelector('.trade-plan-comparison').open,true);assert.equal(app.doc.activeElement,app.doc.querySelector('.trade-plan-comparison > summary'));
+ }finally{await app.settle();app.cleanup();}
+});

@@ -88,3 +88,18 @@ test('T11 plan partial fills, review, source correction and no-entry work on mob
   assert.equal(await page.locator('#tradePlanLinkDraft').textContent(),'');assert.equal(await form.locator('[name=linkTradeId] option').count(),0);
  }catch(e){await f.captureFailure('t11-plan-review');throw e;}finally{await f.close();}
 });
+
+
+test('T11 quote buttons reopen after Escape and retain identity through real polling', {timeout:60000},async()=>{
+ const f=await createBrowserFixture({scenario:'populated'});try{
+  const {page}=f;await page.setViewportSize({width:375,height:900});
+  for(const screen of ['screener','watchlist']){
+   await visibleNav(page,screen).click();const button=page.locator(`[data-screen-panel=${screen}] .quote-stock-open`).first();await button.waitFor();const code=await button.getAttribute('data-code');
+   const open=async()=>{await button.focus();await page.keyboard.press('Enter');await page.locator('#detailPanel.is-open').waitFor({state:'visible'});};
+   const close=async()=>{await page.keyboard.press('Escape');await page.locator('#detailPanel.is-open').waitFor({state:'detached'});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));assert.equal(await button.evaluate(n=>n===document.activeElement),true,JSON.stringify(await page.evaluate(()=>({tag:document.activeElement.tagName,role:document.activeElement.getAttribute('role'),code:document.activeElement.dataset.code}))));};
+   await open();await close();await open();
+   await page.evaluate(selector=>window.__quoteOpenerBeforePoll=document.querySelector(selector),`[data-screen-panel=${screen}] .quote-stock-open[data-code="${code}"]`);await f.advancePollingCycle();assert.equal(await page.evaluate(()=>window.__quoteOpenerBeforePoll.isConnected),false);await close();
+   await button.locator('xpath=ancestor::*[@role="row"]').locator('.stock-cell').last().click();await page.locator('#detailPanel.is-open').waitFor({state:'visible'});await close();
+  }
+ }catch(e){await f.captureFailure('t11-fix1-quote-focus');throw e;}finally{await f.close();}
+});

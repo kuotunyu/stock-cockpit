@@ -2771,6 +2771,7 @@ async function loadTradePlansFromServer() {
   const payload = await fetchApi('/api/trade-plans');
   if (!isCurrentAuthScope(scope) || seq !== tradePlansState.requestSeq || Number(payload.rev) < tradePlansState.rev) return;
   applyTradePlansPayload(payload);
+  return true;
 }
 function renderTradePlanList() {
   const list = document.getElementById('tradePlanList');
@@ -2801,6 +2802,21 @@ function renderTradePlanEditor() {
     <p>${activation ? `首次啟用停損 ${escapeHtml(String(activation.intent.stopPrice))} · 計畫價差風險 ${escapeHtml(String(activation.riskAmount))} 元（非實際成交 R 分母）` : '尚未建立首次啟用風險基準'}</p>
     ${(plan.revisions || []).map(rev=>`<p>#${rev.revision} · ${escapeHtml(formatTradePlanTime(rev.recordedAt))} · 停損 ${escapeHtml(String(rev.intent.stopPrice ?? '未設定'))} · ${escapeHtml(rev.intent.reason)}</p>`).join('')}</details>` : ''}${renderTradePlanReviewEvidence(plan)}`;
 }
+// 只刷新衍生比較區，不重建未送出的表單與原始證據；保留原生 details 與鍵盤位置。
+function refreshTradePlanReviewEvidence() {
+  const plan = tradePlansState.editor;
+  const previous = document.querySelector('#tradePlanEvidence .trade-plan-comparison');
+  if (!plan || !previous) return;
+  const folds = [previous, ...previous.querySelectorAll('details')].map(node => node.open);
+  const controls = 'summary,button,a,[tabindex]';
+  const focusIndex = [...previous.querySelectorAll(controls)].indexOf(document.activeElement);
+  const template = document.createElement('template');
+  template.innerHTML = renderTradePlanReviewEvidence(plan);
+  const replacement = template.content.firstElementChild;
+  [replacement, ...replacement.querySelectorAll('details')].forEach((node, index) => { node.open = folds[index] || false; });
+  previous.replaceWith(replacement);
+  if (focusIndex >= 0) replacement.querySelectorAll(controls)[focusIndex]?.focus({preventScroll:true});
+}
 async function openTradePlans(trigger = document.activeElement, create = false) {
   if (!authState.user) { setLoginGateVisible(true, '登入後保存你的交易計畫'); return; }
   const scope = captureAuthScope();
@@ -2819,7 +2835,15 @@ async function openTradePlans(trigger = document.activeElement, create = false) 
     tradePlansState.base = null;
   } else { tradePlansState.editor=null; tradePlansState.base=null; }
   renderTradePlanEditor(); renderTradePlanList();
-  try { await loadTradePlansFromServer(); if(isCurrentAuthScope(scope)) {renderTradePlanList();renderTradePlanLinkChoices();} }
+  const openedEditorId = tradePlansState.editor?.planId;
+  try {
+    const applied = await loadTradePlansFromServer();
+    if (applied && isCurrentAuthScope(scope) && !modal.hidden && openedEditorId === tradePlansState.editor?.planId) {
+      const focus = captureLiveFocus();
+      renderTradePlanList(); renderTradePlanLinkChoices(); refreshTradePlanReviewEvidence();
+      restoreLiveFocus(focus);
+    }
+  }
   catch(error) { if(isCurrentAuthScope(scope) && editorSeq === tradePlansState.editorSeq && !handleAuthRequired(error)) document.getElementById('tradePlanError').textContent=error.message; }
 }
 async function putTradePlanIntent(operation) {
@@ -3996,6 +4020,7 @@ function detailIsDialogLayer() {
 
 function resolveDetailPanelOpener(trigger) {
   if (!(trigger instanceof HTMLElement)) return el.searchOpen;
+  if (trigger.matches(".stock-row")) trigger = trigger.querySelector(".quote-stock-open") || trigger;
   if (trigger.isConnected) return trigger;
   // 開明細前會重繪目前清單，原本被點的卡片因此可能已離開 DOM。
   // 依它的穩定 data 契約找回新節點，Escape 才能回到使用者剛才的位置。
@@ -4016,8 +4041,8 @@ function resolveDetailPanelOpener(trigger) {
   else if (trigger.matches(".swing-open")) selector = `.swing-open[data-swing-code="${code}"]`;
   else if (trigger.matches("[data-swing-code]")) selector = `[data-swing-code="${code}"]`;
   else if (trigger.matches(".surv-card")) selector = `.surv-card[data-code="${code}"]`;
-  else if (trigger.matches(".watch-stock-row")) selector = `.watch-row-select[data-code="${code}"]`;
-  else if (trigger.matches(".stock-row")) selector = `.stock-row[data-code="${code}"]`;
+  else if (trigger.matches(".quote-stock-open")) selector = `.quote-stock-open[data-code="${code}"]`;
+  else if (trigger.matches(".stock-row")) selector = `.stock-row[data-code="${code}"] .quote-stock-open`;
   const activeScreen = document.querySelector(`[data-screen-panel="${state.screen}"]`);
   const replacement = selector
     ? (activeScreen?.querySelector(selector) || document.querySelector(selector))
@@ -12685,10 +12710,11 @@ document.addEventListener("click", async (event) => {
       render();
       return;
     }
+    const opener = stockRow.querySelector(".quote-stock-open") || stockRow;
     state.selectedCode = stockRow.dataset.code;
     state.technicalCode = state.selectedCode;
     render();
-    openDetailPanel(stockRow);
+    openDetailPanel(opener);
     return;
   }
 });
