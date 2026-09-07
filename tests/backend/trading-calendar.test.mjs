@@ -27,20 +27,21 @@ test("春節長假依開休市表跳到開始交易日", () => {
 test("臨時休市由 FMTQIK 缺日證據修正", () => {
   const resolved = mod.resolveNextTradingDate("20260709", {
     tradingDays: ["20260709", "20260713"],
+    coveredMonths:['202607'],monthEvidence:{202607:{source:'TWSE FMTQIK',requestedAt:'2026-08-01T08:00:00Z',observedAt:'2026-08-01T08:00:00Z',coveredFrom:'20260701',coveredThrough:'20260731',completeMonth:true,status:'fresh'}},
     holidayRows: [],
   });
   assert.equal(resolved.scheduledDate, "20260710");
   assert.equal(resolved.date, "20260713", "排定 7/10 開市但實際序列缺席 → 取下一個實際交易日");
 });
 
-test("FMTQIK 未涵蓋舊月份時，多檔官方歷史共識可修正臨時休市", () => {
+test("FMTQIK 未涵蓋舊月份時，未具名candidate共識不可修改預定日", () => {
   const resolved = mod.resolveNextTradingDate("20260601", {
     tradingDays: ["20260701", "20260702"],
     holidayRows: [],
     candidateDays: ["20260603", "20260603", "20260603", "20260604"],
   });
   assert.equal(resolved.scheduledDate, "20260602");
-  assert.equal(resolved.date, "20260603");
-  assert.equal(resolved.source, "official history consensus");
+  assert.equal(resolved.date, "20260602");
+  assert.equal(resolved.source, "TWSE holiday schedule");
 });
 

@@ -14,7 +14,7 @@ assert.equal(initLogs.length, 1);
 assert.match(initLogs[0], /^\[Stock1\] Created initial admin user "admin"\./);
 // 固定歷史日期配顯式asOf，星期六/日及9/10合成颱風休市不在官方session fixture。
 const days = ['20260901','20260902','20260903','20260904','20260907','20260908','20260909','20260911','20260914','20260915','20260916','20260917','20260918','20260921','20260922','20260923'];
-const calendar = { tradingDays: days, coveredMonths: ['202609'], through: '20260923' };
+const calendar = { tradingDays: days, coveredMonths: ['202609'], through: '20260923',monthEvidence:{202609:{source:'TWSE FMTQIK',requestedAt:'2026-09-24T08:00:00Z',observedAt:'2026-09-24T08:00:00Z',coveredFrom:'20260901',coveredThrough:'20260923',completeMonth:false,status:'fresh'}} };
 test('成熟只看訊號後15官方交易日，快贏快輸不提前，日曆不足unknown', () => {
   assert.equal(typeof mod.classifyCohort, 'function');
   for (const status of ['win','loss','expired','pending']) {

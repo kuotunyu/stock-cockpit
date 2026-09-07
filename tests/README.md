@@ -239,3 +239,4 @@ npm run test:browser
 `verification-evidence-codec`／`verification-evidence-persistence` 驗 UTF8 無損、SHA256、未知 codec／損壞拒絕、32 MiB 解壓限制、完成 transition 的失敗回滾、queue／epoch、冷啟動與完整 DB 備份還原。只有新完成 memo 自動壓縮；舊 raw memo 不遷移。超過 codec 上限仍完整保留 raw，32 MiB 不是歷史或 cohort 上限。摘要與完成 worker 不需解壓；需查原證據時使用 `readBenchmarkEvidence`，錯誤不能當作缺資料而重算。
 
 `swing-cache-bounds` 驗實際研究 scope 增長、LRU／TTL及場景共用；`notes-ownership` 的 backend／frontend 各驗 A/B/admin 作者與管理權；`broker-settings-guard` 驗對外訊息不洩漏绝對路徑、非預期錯誤安全診斷。鍵盤修改仍需完整 Chromium；DOM 不能代替真實原生按鈕與回焦驗證。
+`calendar-evidence-consumers` 與 `calendar-recent-recovery` 驗不完整跨月的停損／達標差異、相互衝突的官方正證據、完整 stale 月份休市、成熟日期覆蓋、已知 v1 與 unknown/final 邊界；包括真正近期／歷史 runner 及隔日 observation 的缺章→恢復。近期案例不重設 advance key，以同一收盤日第二次 tick 確認可補驗。`getSwingHistoricalCalendar` 仍預設回三欄；需要原章的 consumers 明示 `includeSourceEvidence:true`。日期相關修改另跑受影響測試在跨年與跨月情境，無 UI 變更不需重複 Chromium。

@@ -41,3 +41,9 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 
 ---
 
+
+歷史觀察與成熟日數採 `official-session-interval-v1` 來源完整性檢查。預定交易日仍可由開休市表顯示；歷史推進若需要排除中間交易日，必須有原 TWSE FMTQIK 月份的請求／取得時間與涵蓋區間，不能以日期 min/max 或未驗證個股日期共識當成休市。原先已完整的月份證據即使快取 stale 仍可使用；未完整的 last-good 不因重試而變完整。官方成功價格的精確排定日只在沒有較早官方開市正證據、且已提供的月份章充分時使用。
+
+缺章保留 `calendarEvidencePending`／`calendar-coverage-unknown`，不跳過交易日；近期跨月和舊 pending 會在既有有界批次內補查原月份，同日恢復不被一次收盤節流鎖住。近期與歷史每組最多核對停住月及下一月；隔日觀察最多同樣兩月，超出範圍保持待補。月快取的失敗重試沿用 5 分鐘，成熟摘要沿既有 90 日視窗逐月取證；不足時精確日數未知，至少 15 個真正官方日期僅證明成熟下界。
+
+此修正維持已知價格／含息 v1 的財務評估、進出場、公司行動與成本定義。已知舊 pending 仍可續驗，未知身份保留原限制，既有 final 不重算。實際波段 advance 的 `evaluationApplied` 記錄來源政策版本、原月份證據與 inputFingerprint，`scope=this-advance-only`，不聲稱過去每一步都已通過新檢查。固定期間 benchmark 的獨立 calendarVersion v2 保持原樣。

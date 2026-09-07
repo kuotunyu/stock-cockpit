@@ -3,11 +3,11 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { importServer } from "../helpers/test-server.mjs";
-import { compactTradingDay } from "../helpers/fixtures.mjs";
+import { compactTradingDay, rocSlash } from "../helpers/fixtures.mjs";
 
-let mod;
+let mod, mock;
 before(async () => {
-  ({ mod } = await importServer({ routes: [] })); // 純函式＋本機 DB，不打網路
+  ({ mod, mock } = await importServer({ routes: [] })); // 純函式＋本機 DB，不打網路
 });
 
 // 標準驗證單：進場 100、停損 95、目標 110，昨天建立。
@@ -305,7 +305,15 @@ test("批次推進：reference 覆蓋不完整時不鎖日也不推進", async (
   assert.equal(db.swingVerification[compactTradingDay(-4)][0].status, "pending");
 });
 
-test("批次推進＋場景統計：相鄰交易日用整批收盤，未知市場保留重試原因", async () => {
+test("批次推進＋場景統計：相鄰交易日用整批收盤，未知市場保留重試原因", async (t) => {
+  // 此案例餵完整當日收盤，時刻與跨月來源章也必須一致；不能在跨年時靠無路由失敗。
+  const today = compactTradingDay(0);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(`${today.slice(0,4)}-${today.slice(4,6)}-${today.slice(6)}T08:00:00Z`) });
+  const removeCalendar = mock.override({ match: /rwd\/zh\/afterTrading\/FMTQIK/, reply: (url) => {
+    const month = url.searchParams.get('date').slice(0,6);
+    return { stat: 'OK', data: Array.from({length:70},(_,i)=>compactTradingDay(-i)).filter(day=>day.startsWith(month)).reverse().map(day=>[rocSlash(day)]) };
+  } });
+  t.after(() => { removeCalendar(); t.mock.timers.reset(); });
   const db = await mod.loadDb();
   db.swingVerification = {
     [compactTradingDay(-3)]: [
@@ -317,8 +325,8 @@ test("批次推進＋場景統計：相鄰交易日用整批收盤，未知市�
   };
   const reference = {
     byCode: new Map([
-      ["2330", { code: "2330", rawDate: compactTradingDay(0), open: 104, high: 111, low: 101, price: 108 }],
-      ["1101", { code: "1101", rawDate: compactTradingDay(0), open: 39, high: 40, low: 37.5, price: 38.5 }],
+      ["2330", { code: "2330", source: "TWSE OpenAPI", rawDate: compactTradingDay(0), open: 104, high: 111, low: 101, price: 108 }],
+      ["1101", { code: "1101", source: "TWSE OpenAPI", rawDate: compactTradingDay(0), open: 39, high: 40, low: 37.5, price: 38.5 }],
     ]),
   };
   await mod.advanceSwingVerification(reference, compactTradingDay(0));

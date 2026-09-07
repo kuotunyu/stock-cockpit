@@ -8738,11 +8738,7 @@ function classifyCohort(capture, { asOf, tradingDates, maxSessions = 15 }) {
   if (!isValidCompactCalendarDate(start) || !isValidCompactCalendarDate(end) || end < start) return unknown;
   if (array) return knownSessions >= maxSessions
     ? { mature: true, ageSessions: null, reason: 'known-sessions-lower-bound', knownSessions } : unknown;
-  const covered = new Set(tradingDates?.coveredMonths || []);
-  for (let month = start.slice(0,6); month <= end.slice(0,6); month = addMonthsCompact(`${month}01`, 1).slice(0,6)) {
-    if (!covered.has(month)) return knownSessions >= maxSessions ? lowerBound : unknown;
-  }
-  if (!days.includes(start) || toCompactDate(tradingDates?.through || '') < end) return knownSessions >= maxSessions
+  if (!officialCalendarCoversInterval(tradingDates, start, end) || !days.includes(start) || toCompactDate(tradingDates?.through || '') < end) return knownSessions >= maxSessions
     ? { mature: true, ageSessions: null, reason: 'known-sessions-lower-bound', knownSessions } : unknown;
   return { mature: knownSessions >= maxSessions, ageSessions: knownSessions, reason: knownSessions >= maxSessions ? null : 'window-not-complete' };
 }
@@ -9845,15 +9841,16 @@ function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, popula
 }
 
 async function getMaturityCalendar(from, through) {
-  const tradingDays = []; const coveredMonths = [];
+  const tradingDays = []; const coveredMonths = []; const monthEvidence = {};
   for (let month = from.slice(0,6); month <= through.slice(0,6); month = addMonthsCompact(`${month}01`, 1).slice(0,6)) {
     try {
-      const evidence = await getSwingHistoricalCalendar(`${month}01`, `${month}01`);
+      const evidence = await getSwingHistoricalCalendar(`${month}01`, `${month}01`, {includeSourceEvidence:true});
       tradingDays.push(...evidence.tradingDays.filter(day => day <= through)); coveredMonths.push(month);
+      Object.assign(monthEvidence,evidence.monthEvidence);
     } catch { /* 日曆不足保留unknown，不改用平日或個股K推算。 */ }
   }
-  const confirmedThrough = tradingDays.sort().at(-1) || '';
-  return { tradingDays: unique(tradingDays).sort(), coveredMonths, through: confirmedThrough, source: 'TWSE-FMTQIK-official-monthly-sessions',
+  const confirmedThrough = Object.values(monthEvidence).map(row=>row.coveredThrough).filter(Boolean).sort().at(-1) || '';
+  return { tradingDays: unique(tradingDays).sort(), coveredMonths, monthEvidence, through: confirmedThrough < through ? confirmedThrough : through, source: 'TWSE-FMTQIK-official-monthly-sessions',
     reason: coveredMonths.includes(from.slice(0,6)) && coveredMonths.includes(through.slice(0,6)) ? null : 'official-calendar-coverage-unknown' };
 }
 
@@ -10227,40 +10224,46 @@ function previousScheduledTradingDate(dateText, holidayRows = []) {
   return "";
 }
 
-// 唯一合法觀察日＝訊號日後第一個實際交易日。FMTQIK 能證明時優先；
-// 超出當月涵蓋範圍時用官方開休市表，若多檔官方歷史一致顯示臨時休市則以共識修正。
-function resolveNextTradingDate(signalDate, { tradingDays = [], holidayRows = [], candidateDays = [] } = {}) {
-  const signal = toCompactDate(signalDate);
-  if (!signal) return { date: "", source: "", scheduledDate: "" };
-  const scheduledDate = nextScheduledTradingDate(signal, holidayRows);
-  const official = unique(tradingDays.map(toCompactDate).filter(Boolean)).sort();
-  const officialNext = official.find((day) => day > signal) || "";
-  const officialMin = official[0] || "";
-  const officialMax = official.at(-1) || "";
-  const officialCoversScheduled = Boolean(
-    scheduledDate && officialNext && officialMin <= scheduledDate && officialMax >= scheduledDate
-  );
-  if (officialCoversScheduled) {
-    return { date: officialNext, source: "TWSE FMTQIK", scheduledDate };
+// 原月份來源章只證明取得時已覆蓋的期間；快取刷新／last-good不延伸此上界。
+const CALENDAR_EVIDENCE_POLICY_VERSION = 'official-session-interval-v1';
+function officialCalendarCoversInterval(calendar, from, through) {
+  if (!isValidCompactCalendarDate(from) || !isValidCompactCalendarDate(through) || through < from) return false;
+  for (let month=from.slice(0,6);month<=through.slice(0,6);month=addMonthsCompact(month+'01',1).slice(0,6)) {
+    const proof=calendar?.monthEvidence?.[month];
+    const end=month===through.slice(0,6)?through:addDaysCompact(addMonthsCompact(month+'01',1),-1);
+    if (!calendar.coveredMonths?.includes(month) || !proof || proof.source!=='TWSE FMTQIK'
+      || !Number.isFinite(Date.parse(proof.requestedAt)) || !Number.isFinite(Date.parse(proof.observedAt))
+      || Date.parse(proof.observedAt)<Date.parse(proof.requestedAt) || proof.coveredFrom!==month+'01'
+      || !isValidCompactCalendarDate(proof.coveredThrough) || proof.coveredThrough<end) return false;
   }
-
-  const candidates = candidateDays.map(toCompactDate).filter((day) => day && day > signal);
-  if (scheduledDate && candidates.includes(scheduledDate)) {
-    return { date: scheduledDate, source: "TWSE holiday schedule + official history", scheduledDate };
-  }
-  const counts = new Map();
-  for (const day of candidates) counts.set(day, (counts.get(day) || 0) + 1);
-  const consensus = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
-  if (consensus && consensus[0] > scheduledDate && consensus[1] >= 2 && consensus[1] * 2 >= candidates.length) {
-    return { date: consensus[0], source: "official history consensus", scheduledDate };
-  }
-  return {
-    date: scheduledDate || officialNext || consensus?.[0] || "",
-    source: scheduledDate ? "TWSE holiday schedule" : officialNext ? "TWSE FMTQIK" : consensus ? "official history consensus" : "",
-    scheduledDate,
-  };
+  return true;
 }
-
+function officialSessionCandidates(rows) {
+  return rows.filter(row=>['TWSE STOCK_DAY','TPEx tradingStock','TWSE OpenAPI','TPEx OpenAPI'].includes(row?.source)
+    && [row.open,row.high,row.low,row.price??row.close].every(value=>Number.isFinite(value)&&value>0))
+    .map(row=>({date:toCompactDate(row.rawDate||row.date||row.asOf),source:row.source,status:'ok'}));
+}
+// 預定日顯示可用schedule；歷史結算不得把min/max、任意candidateDays或共識當缺日證據。
+function resolveNextTradingDate(signalDate, calendar = {}) {
+  const {tradingDays=[],holidayRows=[],verifiedOfficialDays=[],requireObservedSessions=false}=calendar;
+  const signal=toCompactDate(signalDate);
+  if(!signal)return {date:'',source:'',scheduledDate:''};
+  const scheduledDate=nextScheduledTradingDate(signal,holidayRows);
+  const official=unique(tradingDays.map(toCompactDate).filter(isValidCompactCalendarDate)).sort();
+  const officialNext=official.find(day=>day>signal)||'';
+  const intervalFrom=addDaysCompact(signal,1);
+  const covered=officialNext && officialCalendarCoversInterval(calendar,intervalFrom,officialNext);
+  const verified=verifiedOfficialDays.filter(row=>row.status==='ok' && isValidCompactCalendarDate(row.date)
+    && ['TWSE STOCK_DAY','TPEx tradingStock','TWSE OpenAPI','TPEx OpenAPI','TWSE/TPEx official daily close','TWSE MIS official intraday'].includes(row.source));
+  const earlierPrice=verified.some(row=>row.date>signal && row.date<officialNext);
+  if(!earlierPrice && (covered || (officialNext===scheduledDate && !calendar.monthEvidence)))return {date:officialNext,source:'TWSE FMTQIK',scheduledDate};
+  const exact=verified.find(row=>row.date===scheduledDate);
+  const earlierKnown=(officialNext && officialNext<scheduledDate)||verified.some(row=>row.date>signal && row.date<scheduledDate);
+  if(exact && !earlierKnown && (!calendar.monthEvidence || officialCalendarCoversInterval(calendar,intervalFrom,scheduledDate)))
+    return {date:scheduledDate,source:exact.source,scheduledDate};
+  return {date:requireObservedSessions?'':scheduledDate,source:requireObservedSessions?'':'TWSE holiday schedule',scheduledDate,
+    ...(requireObservedSessions?{reason:'calendar-coverage-unknown'}:{})};
+}
 async function getOfficialObservationEvidence(quote, signalDate, observationDate) {
   const signal = toCompactDate(signalDate);
   const observation = toCompactDate(observationDate);
@@ -10434,11 +10437,30 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
   };
 
   let evidenceByCode = await collectEvidence(observationCompact);
-  const candidateDays = [...evidenceByCode.values()].map((evidence) => evidence.nextDate).filter(Boolean);
-  const refined = resolveNextTradingDate(signalCompact, { ...calendar, candidateDays });
+  const verifiedOfficialDays = [...evidenceByCode.values()].filter(e=>e.status==='ok' && e.bar?.date===e.nextDate)
+    .map(e=>({date:e.nextDate,source:e.source,status:'ok'}));
+  let refined = resolveNextTradingDate(signalCompact, { ...calendar, verifiedOfficialDays, requireObservedSessions:true });
+  if (!refined.date && observationCompact <= todayCompact) {
+    // 最多訊號月及下一月；需要更遠期間時保留pending，不一次補抓全部歷史。
+    const nextOfficial=(calendar.tradingDays||[]).filter(day=>day>signalCompact).sort()[0]||'';
+    const hint=[observationCompact,nextOfficial,...[...evidenceByCode.values()].map(e=>e.nextDate||'')].filter(day=>day>signalCompact).sort().at(-1)||observationCompact;
+    const through=[addDaysCompact(addMonthsCompact(signalCompact,2),-1),todayCompact,hint].sort()[0];
+    try {
+      const historical=await getSwingHistoricalCalendar(signalCompact,through,{includeSourceEvidence:true});
+      calendar={...calendar,...historical};
+      refined=resolveNextTradingDate(signalCompact,{...calendar,verifiedOfficialDays,requireObservedSessions:true});
+    } catch { /* 失敗保留原證據，不能把缺章當成休市。 */ }
+  }
+  if (!refined.date) return {
+    available:false,status:'pending',generatedAt,signalDate:snapshot.asOf,observationDate:compactToIsoDate(observationCompact),
+    observationPhase:'pending',expectedSignals:picks.length,verifiedSignals:0,pendingSignals:picks.length,complete:false,
+    rows:picks.map(pick=>({...pick,verified:false})),warnings:baseWarnings,
+    unavailableReason:'calendar-coverage-unknown',evidence:{calendarEvidencePolicyVersion:CALENDAR_EVIDENCE_POLICY_VERSION,
+      monthEvidence:cloneJson(calendar.monthEvidence||null),calendarSource:'',priceSources:[]},
+  };
+  resolution = refined;
   if (refined.date && refined.date !== observationCompact && refined.date <= todayCompact) {
     observationCompact = refined.date;
-    resolution = refined;
     evidenceByCode = await collectEvidence(observationCompact);
   }
 
@@ -10553,6 +10575,8 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
     warnings,
     evidence: {
       calendarSource: resolution.source || "",
+      calendarEvidencePolicyVersion: CALENDAR_EVIDENCE_POLICY_VERSION,
+      monthEvidence: cloneJson(calendar.monthEvidence || null),
       scheduledDate: resolution.scheduledDate ? compactToIsoDate(resolution.scheduledDate) : "",
       priceSources: unique(verifiedRows.map((row) => row.observationSource)),
     },
@@ -12887,13 +12911,16 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
   const indexByDate = new Map(candidateDays.map((date, index) => [date, index]));
   let changed = false;
   for (let step = 0; step < 90 && entry.status === "pending"; step += 1) {
-    const resolution = calendar.coveredMonths ? {
-      date: (calendar.tradingDays || []).find(day => day > entry.lastChecked && day <= latest) || "",
-    } : resolveNextTradingDate(entry.lastChecked, {
-      tradingDays: calendar.tradingDays || [],
-      holidayRows: calendar.holidayRows || [],
-      candidateDays,
+    const resolution = resolveNextTradingDate(entry.lastChecked, {
+      ...calendar, requireObservedSessions:true, verifiedOfficialDays:officialSessionCandidates(dayQuotes),
     });
+    if (resolution.reason) {
+      if (resolution.scheduledDate > latest) break;
+      entry.calendarEvidencePending={reason:resolution.reason,policyVersion:CALENDAR_EVIDENCE_POLICY_VERSION,
+        monthEvidence:cloneJson(calendar.monthEvidence||null)};
+      return {changed,missingDate:'',unavailableReason:resolution.reason};
+    }
+    if(entry.calendarEvidencePending){delete entry.calendarEvidencePending;changed=true;}
     const expected = toCompactDate(resolution.date);
     if (!expected || expected > latest) break;
     const row = byDate.get(expected);
@@ -13023,7 +13050,11 @@ function selectSwingVerificationBatch(store, retryState, { asOf, now = Date.now(
 // 已結束的月份才宣稱完整涵蓋；交易日證據不依賴指數 close。
 // 每個原始日期列都須有效且屬於要求月份，不能 filter 後才驗完整性。
 async function getSwingHistoricalCalendar(from, through, { includeSourceEvidence = false } = {}) {
-  const months = [from.slice(0, 6), through.slice(0, 6)].filter((month, i, all) => all.indexOf(month) === i);
+  const months = [];
+  for(let month=from.slice(0,6);month<=through.slice(0,6);month=addMonthsCompact(month+'01',1).slice(0,6)) {
+    if(!/^\d{6}$/.test(month) || months.length>=4)throw new Error('歷史交易日查詢超出有界月份');
+    months.push(month);
+  }
   const tradingDays = [], monthEvidence = {};
   for (const month of months) {
     let state = swingHistoricalCalendarCache.get(month);
@@ -13205,7 +13236,7 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
       let rows = directRows;
       if (historical) {
         try {
-          replayCalendar = await getSwingHistoricalCalendar(from, through);
+          replayCalendar = await getSwingHistoricalCalendar(from, through, {includeSourceEvidence:true});
         } catch {
           retry("calendar-unavailable");
           historyUnavailable += 1;
@@ -13235,26 +13266,37 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
         }
         rows = historical ? history : [...history, ...directRows];
       }
+      if (!historical && entries.some(entry=>entry.lastChecked.slice(0,6)!==through.slice(0,6) || !resolveNextTradingDate(entry.lastChecked,{...replayCalendar,
+        requireObservedSessions:true,verifiedOfficialDays:officialSessionCandidates(rows)}).date)) {
+        const start=entries.map(entry=>entry.lastChecked).sort()[0];
+        const calendarThrough=[addDaysCompact(addMonthsCompact(start,2),-1),through].sort()[0];
+        try { replayCalendar=await getSwingHistoricalCalendar(start,calendarThrough,{includeSourceEvidence:true}); }
+        catch { retry('calendar-unavailable');historyUnavailable+=1;return; }
+      }
       if (exchange === 'TPEx' && entries.some(isHoldingIdentity)) {
         const months = unique(rows.map(row => toCompactDate(row.rawDate || row.date || row.asOf).slice(0,6))).filter(Boolean).slice(-4);
         replayCalendar = { ...replayCalendar, holdingMonths: new Map(await Promise.all(months.map(async month => [month, await getTpexHoldingActionMonth(month)]))) };
       }
       for (const entry of entries) {
         const beforeEvaluation = stableJson(entry);
+        const checkedBefore = entry.lastChecked;
         replaySwingVerificationHistory(entry, rows, through, replayCalendar);
-        if (beforeEvaluation !== stableJson(entry)) {
+        if (beforeEvaluation !== stableJson(entry) && (!entry.calendarEvidencePending || entry.lastChecked!==checkedBefore)) {
           entry.evaluationApplied = {
             evaluationVersion: isHoldingIdentity(entry) ? currentVerificationIdentity('swing').evaluationVersion : priceVerificationIdentity('swing').evaluationVersion,
             evaluatedAt: new Date().toISOString(),
             kind: entry.captureId ? 'forward-observation' : 'retrospective-legacy-evidence',
             inputFingerprint: createHash('sha256').update(stableJson(verificationInputContent({ rows, through, calendar: replayCalendar, beforeEvaluation }))).digest('hex'),
             scope: 'this-advance-only',
+            calendarEvidencePolicyVersion: CALENDAR_EVIDENCE_POLICY_VERSION,
+            calendarEvidence: cloneJson({monthEvidence:replayCalendar.monthEvidence||null,coveredMonths:replayCalendar.coveredMonths||[],tradingDays:replayCalendar.tradingDays||[]}),
           };
         }
+        if (entry.calendarEvidencePending) historyUnavailable += 1;
         if (entry.status !== "pending") delete entry.verificationRetry;
         else entry.verificationRetry = {
           from, through,
-          reason: entry.corporateActionPending ? "corporate-action-pending" : entry.dataGap ? "data-gap" : "awaiting-session",
+          reason: entry.calendarEvidencePending ? "calendar-coverage-unknown" : entry.corporateActionPending ? "corporate-action-pending" : entry.dataGap ? "data-gap" : "awaiting-session",
           attemptedAt: new Date().toISOString(),
           ...(historical ? { nextRetryAt: Date.now() + SWING_VERIFY_RETRY_MS, calendarMonths: replayCalendar.coveredMonths } : {}),
         };
@@ -16293,7 +16335,7 @@ export {
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
   runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,
-  summarizeFiniteMetric, classifyCohort, summarizeMatureVerification,
+  summarizeFiniteMetric, classifyCohort, summarizeMatureVerification, getMaturityCalendar, officialCalendarCoversInterval,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
   holidayCalendarCoversYear,
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,
