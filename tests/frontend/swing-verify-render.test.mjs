@@ -11,6 +11,28 @@ after(() => app.cleanup());
 
 const json = (expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 
+test('正式成熟cohort取代快結案headline，淨獲利/達標/歷史平均分名並保留最近結案', () => {
+  const metric = {value:2,validCount:1,totalCount:2,missingCount:1,validDays:1,reason:'partial-field-coverage'};
+  const headline = {issued:3,matureCount:2,immatureCount:1,unknownCount:0,signalDays:1,
+    metricCoverage:{avgResultPctNet:metric},scenarios:[{scenario:'midBandDefense',samples:3,wins:0,losses:0,expired:1,pending:1,
+      resolved:1,continuousResolved:1,netProfitRate:null,targetHitRate:null,avgResultPct:2.5,avgResultPctNet:2,
+      metricCoverage:{netProfitRate:metric,avgResultPctNet:metric}}]};
+  app.evalIn(`state.screen='strategy'; swingVerifyState.data=${JSON.stringify({scenarios:[{samples:50,winRate:100}],
+    cohort:{headline,models:[{...headline,identity:{entryModel:'signal-close-observation',returnBasis:'adjusted-reference-price'}}]},
+    population:{legacy:{samples:8},models:[]},captureCoverage:{fullRecordStartDate:'2026-09-01',expectedDateReason:'official-session-dates-only'},
+    recent:[{code:'2330',scenario:'midBandDefense',status:'win',resultPct:5,resolvedAt:'20260902'}]})}; renderSwingVerifyPanel();`);
+  const text = app.evalIn('el.swingVerify.textContent');
+  assert.match(text,/成熟 2.*未成熟 1/);
+  assert.match(text,/淨獲利率/);
+  assert.match(text,/達標率/);
+  assert.match(text,/歷史平均淨報酬/);
+  assert.match(text,/有效 1\/2.*缺 1/);
+  assert.match(text,/舊紀錄 8 筆驗證單/);
+  assert.doesNotMatch(app.evalIn("el.swingVerify.querySelector('.sv-chips').textContent"),/100%/,'舊結案口徑只留在details，不作主卡');
+  assert.equal(json("el.swingVerify.querySelectorAll('.sv-row').length"),1);
+  assert.equal(json("el.swingVerify.querySelectorAll('.sv-rate.is-up').length"),0);
+});
+
 const sample = {
   ok: true,
   currentFormulaVersion: "swing-v15-valid-min-target",

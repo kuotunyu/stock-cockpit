@@ -115,8 +115,8 @@ sequenceDiagram
 
 | 策略引擎模組 | 選股特徵與演算法 | 驗證機制與對答案邏輯 |
 |---|---|---|
-| **隔日沖選股引擎 (Overnight)** | 以還原權息後的日 K 分三群：強勢續攻（漲 3～9.5%、量比 ≥1.5、收在高檔、站上 MA5/MA20）、爆量高危（量比 ≥3 且振幅大或收盤轉弱）、回檔轉強；候選池為日量 ≥100 張的普通股依動能取前 260 檔。注意／處置與法人資料只做標示，不進判定 | 伺服器排程在兩市場整批收盤對齊後凍結快照，之後以官方認定的實際下一交易日對答案；成績單以開盤賣／收盤賣的淨報酬勝率為主，附以日為叢集的信賴區間與大盤季線上／下分層 |
-| **波段選股雷達 (Swing Strategy)** | 全市場日量 ≥500 張的普通股取前 240 檔，掃中軌攻防與上軌續攻；每檔附進場（當日收盤）、結構停損、目標與扣成本後的淨盈虧比（≥1 才上榜），價位套台股升降單位 | 最多追蹤 15 個實際交易日：開盤價優先，同日雙觸保守記停損，跌停鎖死順延出場。除權息有可用官方基準即調整，未解決或缺日 K 則停等。主要勝率是連續競價樣本的達標比例，滿 20 筆結案才顯示；另列次日開盤進場、淨 PF／中位數／連虧天數與分盤樣本 |
+| **隔日沖選股引擎 (Overnight)** | 以還原權息後的日 K 分三群：強勢續攻（漲 3～9.5%、量比 ≥1.5、收在高檔、站上 MA5/MA20）、爆量高危（量比 ≥3 且振幅大或收盤轉弱）、回檔轉強；候選池為日量 ≥100 張的普通股依動能取前 260 檔。注意／處置與法人資料只做標示，不進判定 | 伺服器排程在兩市場整批收盤對齊後凍結快照，之後以官方認定的實際下一交易日對答案；成績單以開盤／收盤價格觀察的淨獲利率為主，附以日為叢集的信賴區間與大盤季線上／下分層 |
+| **波段選股雷達 (Swing Strategy)** | 全市場日量 ≥500 張的普通股取前 240 檔，掃中軌攻防與上軌續攻；每檔附進場（當日收盤）、結構停損、目標與扣成本後的淨盈虧比（≥1 才上榜），價位套台股升降單位 | 最多追蹤 15 個實際交易日：開盤價優先，同日雙觸保守記停損，跌停鎖死順延出場。除權息有可用官方基準即調整，未解決或缺日 K 則停等。主比較限訊號日後滿 15 個官方交易日的成熟連續競價觀察，各欄滿 20 筆有效值才顯示比例；淨獲利率與達標率分開，次開觀察與分盤樣本另列 |
 | **盤中選股** | 只篩選目前載入的觀察池（自選、搜尋與已載入訊號等）；盤中每 10 秒輪詢更新 | 是本機即時粗估，不是全市場收盤策略或前向驗證 |
 | **注意/處置股票看板** | 即將處置、處置中、即將出關、鉅額、注意、全額交割六分頁 | 以本機每日快照比對「新進／連 N 天／出關」，比不了時明講判定中而非印 0 |
 
@@ -128,13 +128,19 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 
 評估 metadata 分為 `selectionVersion`、`evaluationVersion`、`costModelVersion`、`cohortPolicyVersion`、`entryModel`、`returnBasis`（schema 2），另保留 `formulaVersion` 相容。此次沿用的價格觀察算式為 `overnight-price-observation-v1`／`swing-price-observation-v1`，成本為固定扣 0.471 個百分點的 `flat-round-trip-0.471pct-v1`，母體政策為 `first-canonical-publication-v1`。這些仍是收盤基準的還原座標價格觀察，並非成交或帳戶含息實績。
 
-成績單的 `modelGroups`／`selectedModelKey` 分開完整模型，headline 不混算新版與舊版。缺少舊 metadata 標 `legacy-unknown`，未知成本不補算淨值。已有 final 觀察保留；舊訊號補算另存 `observationRevisions`，標記事後觀察與本次實際模型，不能補成當時正式發布。舊波段 pending 的 `evaluationApplied` 只證明本次補驗套用的模型，不回填原始進場或當時可得時間。
+成績單的 `modelGroups`／`selectedModelKey` 保留各原觀察模型，主卡使用 `cohort.headline`／`cohort.selectedModelKey` 的正式母體比較，不混算新版與舊版。缺少舊 metadata 標 `legacy-unknown`，未知成本不補算淨值。已有 final 觀察保留；舊訊號補算另存 `observationRevisions`，標記事後觀察與本次實際模型，不能補成當時正式發布。舊波段 pending 的 `evaluationApplied` 只證明本次補驗套用的模型，不回填原始進場或當時可得時間。
+
+成績單逐欄提供 `metricCoverage`：`value`、`validCount`、`totalCount`、`missingCount`、`reason` 與有效日期數 `validDays`；合法 0 保留，空值不當 0 或虧損。開盤缺值不借用收盤筆數或日期計算平均、淨獲利率、最低樣本門檻或日叢集 CI。完整零訊號日算採集成功，不進收益 CI；區間仍受日間相依限制，不能視為精度保證。
+
+波段主比較採 `mature-issued-15-official-sessions-v1`：首次正式訊號日之後已滿 15 個官方交易日的同批訊號，無論快速達標、停損或超時，一起到期才納入。日曆使用有界月份的 TWSE FMTQIK 官方日期；不足時成熟狀態未知；若只能證明至少 15 日，成熟可確定但精確 `ageSessions` 為 null。成熟仍可能有缺 K／公司行動待補，平均只代表有效部分的條件式價格觀察。達標率、淨獲利率與歷史平均淨報酬分開；超時淨正也屬淨獲利，分盤撮合另列。隔日沖主比較為 `complete-issued-next-session-v1`，限完整正式下一交易日觀察。這些是摘要投影的母體版本，不改寫保存的發布身份。
+
+兩套主卡保留最近結案／逐日觀察，並在「分母、模型與來源」展開區揭露完整紀錄起點、缺覆蓋、模型及原結案口徑。舊 `totals`／`scenarios` API 欄位相容保留並修正缺值分母，不補造歷史 issued。觀察值不代表可成交回測、含現金流持有報酬或帳戶收益。
 
 單日隔日驗證與歷史成績單同日優先使用首次正式 capture；無正式發布才顯示標示身份的 legacy 觀察，兩者共用完整觀察 memo。已知不支援的波段 evaluation／entry／return 模型保留原證據，以 `evaluationUnavailable` 與摘要 `unavailableCount` 揭露停等，不借用目前算式結案。隔日逐檔 `sourceEvidence` 分開官方成功、確認空資料及失敗，連同備援狀態判定採集完整性；已確認空資料不等於來源故障。
 
 完整枚舉並保留每個候選終端結果後，已有可評估結果的掃描可正式發布並揭露 degraded／coverage；不要求逐檔來源成功率100%。全部候選僅有來源失敗仍不能發布。TWSE STOCK_DAY 已證明的無資料回應（精確中文 stat、numeric total=0、無 data）可確認空月份；超出查詢範圍或未知錯誤不算空資料，這個形狀不外推至 TPEx。
 
-主 DB 的 `verificationCaptures` 與發布共用 captureId、同次提交，保存真正 preselection 當下的候選順位、原價與來源，以及逐檔終端結果和 issued 清單。完整零訊號、未完成、來源失敗與事後發現缺採集分開記錄；候選池不是畫面切片，也不代表全市場。兩套成績單 API 新增 `captureCoverage`／`population`，既有畫面與統計保留。`fullRecordStartDate` 只表示完整格式開始日；覆蓋僅以取得的官方交易日與已有正式紀錄核對，後續缺口仍列出。`not-captured` 保存本次發現時間，不能證明當天伺服器一定沒開；舊 capture 沒有候選證據時維持未知。
+主 DB 的 `verificationCaptures` 與發布共用 captureId、同次提交，保存真正 preselection 當下的候選順位、原價與來源，以及逐檔終端結果和 issued 清單。完整零訊號、未完成、來源失敗與事後發現缺採集分開記錄；候選池不是畫面切片，也不代表全市場。兩套成績單 API 提供 `captureCoverage`／`population`，主卡以 `cohort` 接正式成熟比較，舊欄位保留。`fullRecordStartDate` 只表示完整格式開始日；覆蓋僅以取得的官方交易日與已有正式紀錄核對，後續缺口仍列出。`not-captured` 保存本次發現時間，不能證明當天伺服器一定沒開；舊 capture 沒有候選證據時維持未知。
 
 排程的 `captureStatus` 優先保留首次正式採集，沒有正式清單才讀當日該策略最後的實際嘗試；內容去重的重試另記 `lastAttemptedAt`／`lastAttemptSequence`，不改原採集與發布時間。共用來源尚未齊全另回 `inputStatus`；其失敗或未完成保存為 `strategy: null`／`stage: "reference"`／`canonical: false`，不表示兩策略已開始掃描。只有真的開始且失敗的策略才記採集失敗；驗證推進、尚未開始或已完成的其他策略不受牽連。
 

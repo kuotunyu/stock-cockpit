@@ -8361,6 +8361,80 @@ function dayClusterCi(records, countField, denomField = "verified") {
   };
 }
 
+// 不做 Number coercion：空字串、null、布林值不是數值觀察，合法0保留。
+function summarizeFiniteMetric(values) {
+  const valid = values.filter(Number.isFinite);
+  return { value: valid.length ? valid.reduce((sum, value) => sum + value, 0) / valid.length : null,
+    validCount: valid.length, totalCount: values.length, missingCount: values.length - valid.length,
+    reason: !valid.length ? 'no-valid-values' : valid.length < values.length ? 'partial-field-coverage' : null };
+}
+
+function datedMetric(rows, read, dateField = 'tradeDate') {
+  const metric = summarizeFiniteMetric(rows.map(read));
+  return { ...metric, validDays: new Set(rows.filter(row => Number.isFinite(read(row))).map(row => row[dateField]).filter(Boolean)).size };
+}
+
+function classifyCohort(capture, { asOf, tradingDates, maxSessions = 15 }) {
+  const start = toCompactDate(capture.tradeDate || capture.asOf || '');
+  const end = toCompactDate(asOf || '');
+  const array = Array.isArray(tradingDates);
+  const days = unique((array ? tradingDates : tradingDates?.tradingDays || []).map(toCompactDate).filter(isValidCompactCalendarDate)).sort();
+  const knownSessions = days.filter(day => day > start && day <= end).length;
+  const unknown = { mature: null, ageSessions: null, reason: 'official-calendar-coverage-unknown' };
+  const lowerBound = { mature: true, ageSessions: null, reason: 'known-sessions-lower-bound', knownSessions };
+  if (!isValidCompactCalendarDate(start) || !isValidCompactCalendarDate(end) || end < start) return unknown;
+  if (array) return knownSessions >= maxSessions
+    ? { mature: true, ageSessions: null, reason: 'known-sessions-lower-bound', knownSessions } : unknown;
+  const covered = new Set(tradingDates?.coveredMonths || []);
+  for (let month = start.slice(0,6); month <= end.slice(0,6); month = addMonthsCompact(`${month}01`, 1).slice(0,6)) {
+    if (!covered.has(month)) return knownSessions >= maxSessions ? lowerBound : unknown;
+  }
+  if (!days.includes(start) || toCompactDate(tradingDates?.through || '') < end) return knownSessions >= maxSessions
+    ? { mature: true, ageSessions: null, reason: 'known-sessions-lower-bound', knownSessions } : unknown;
+  return { mature: knownSessions >= maxSessions, ageSessions: knownSessions, reason: knownSessions >= maxSessions ? null : 'window-not-complete' };
+}
+
+function overnightMetricCoverage(rows, knownCost = true) {
+  const price = (row, field) => Number.isFinite(row[field]) ? row[field] : null;
+  const event = (row, field, evidence) => Number.isFinite(price(row, evidence)) && typeof row[field] === 'boolean' ? Number(row[field]) : null;
+  return Object.fromEntries(Object.entries({
+    avgOpenReturn: row => price(row, 'openReturn'), avgCloseReturn: row => price(row, 'currentReturn'),
+    avgHighReturn: row => price(row, 'highReturn'),
+    hitPlus2: row => event(row, 'hitPlus2', 'highReturn'), brokeMinus2: row => event(row, 'brokeMinus2', 'lowReturn'),
+    // 保留舊已存布林作原證據；沒有相應價格仍不能把false當有效虧損。
+    winAtOpen: row => event(row, 'winAtOpen', 'openReturn'), winAtClose: row => event(row, 'winAtClose', 'currentReturn'),
+    avgOpenReturnNet: row => knownCost ? netReturnPct(price(row, 'openReturn')) : null,
+    avgCloseReturnNet: row => knownCost ? netReturnPct(price(row, 'currentReturn')) : null,
+  }).map(([key, read]) => [key, datedMetric(rows, read, 'observationDate')]));
+}
+
+function aggregateOvernightRecords(records) {
+  const coverage = Object.fromEntries(['avgOpenReturn','avgCloseReturn','avgHighReturn','avgOpenReturnNet','avgCloseReturnNet','hitPlus2','brokeMinus2','winAtOpen','winAtClose'].map(field => {
+    const parts = records.map(record => record.metricCoverage[field]);
+    const validCount = parts.reduce((sum, part) => sum + part.validCount, 0);
+    const totalCount = parts.reduce((sum, part) => sum + part.totalCount, 0);
+    return [field, { value: validCount ? parts.reduce((sum, part) => sum + (part.value ?? 0) * part.validCount, 0) / validCount : null,
+      validCount, totalCount, missingCount: totalCount - validCount,
+      validDays: new Set(records.filter(record => record.metricCoverage[field].validCount > 0).map(record => record.observationDate)).size,
+      reason: !validCount ? 'no-valid-values' : validCount < totalCount ? 'partial-field-coverage' : null }];
+  }));
+  const ci = field => {
+    const days = new Map();
+    for (const record of records) {
+      const metric = record.metricCoverage[field];
+      const day = days.get(record.observationDate) || { n: 0, x: 0 };
+      day.n += metric.validCount; day.x += (metric.value ?? 0) * metric.validCount;
+      days.set(record.observationDate, day);
+    }
+    return dayClusterCi([...days.values()], 'x', 'n');
+  };
+  return { days: records.length, signals: records.reduce((sum, record) => sum + record.verified, 0),
+    ...Object.fromEntries(['hitPlus2','brokeMinus2','winAtOpen','winAtClose'].map(field => [field, (coverage[field].value ?? 0) * coverage[field].validCount])),
+    ...Object.fromEntries(['avgOpenReturn','avgCloseReturn','avgOpenReturnNet','avgCloseReturnNet'].map(field => [field, coverage[field].value])),
+    metricCoverage: coverage, minDays: OVERNIGHT_MIN_DAYS,
+    ci: Object.fromEntries(['hitPlus2','winAtOpen','winAtClose'].map(field => [field, ci(field)])) };
+}
+
 function overnightSnapshotFormulaVersion(snapshot) {
   return String(snapshot?.formulaVersion || LEGACY_OVERNIGHT_FORMULA_VERSION);
 }
@@ -8799,6 +8873,121 @@ function summarizeVerificationPopulation(db, strategy, { asOf = toTaipeiCompactD
   const legacy = strategy === 'swing' ? Object.values(db.swingVerification || {}).flat() : db.signalSnapshots || [];
   return { models: [...models.values()], legacy: { samples: legacy.filter(item => !db.verificationCaptures?.[item.captureId]?.fullRecord).length,
     reason: 'issued-and-no-entry-not-recorded' } };
+}
+
+function swingMetricCoverage(rows, identity) {
+  const knownCost = identity.costModelVersion === currentVerificationIdentity('swing').costModelVersion;
+  const gross = row => row.status === 'resolved' && Number.isFinite(row.resultPct) ? row.resultPct : null;
+  const net = row => knownCost ? netReturnPct(gross(row)) : null;
+  return Object.fromEntries(Object.entries({ avgResultPct: gross, avgResultPctNet: net,
+    netProfitRate: row => Number.isFinite(net(row)) ? (net(row) > 0 ? 100 : 0) : null,
+    targetHitRate: row => row.status === 'resolved' && ['win','loss','expired'].includes(row.exitReason) ? (row.exitReason === 'win' ? 100 : 0) : null,
+    avgDaysHeld: row => row.status === 'resolved' && Number.isFinite(row.daysHeld) ? row.daysHeld : null,
+  }).map(([key, read]) => [key, datedMetric(rows, read)]));
+}
+
+function summarizeSwingCohortRows(rows, identity) {
+  const mature = rows.filter(row => row.cohort.mature === true);
+  const eligible = mature.filter(row => row.status !== 'noEntry' && !row.periodic);
+  const metricCoverage = swingMetricCoverage(eligible, identity);
+  const profit = metricCoverage.netProfitRate;
+  const target = metricCoverage.targetHitRate;
+  const valued = eligible.filter(row => row.status === 'resolved' && Number.isFinite(row.resultPct));
+  const net = valued.map(row => identity.costModelVersion === currentVerificationIdentity('swing').costModelVersion ? netReturnPct(row.resultPct) : null).filter(Number.isFinite);
+  const up = net.filter(value => value > 0).reduce((sum,value) => sum + value,0);
+  const down = net.filter(value => value < 0).reduce((sum,value) => sum - value,0);
+  return { issued: rows.length, samples: rows.length, signalDays: new Set(rows.map(row => row.tradeDate)).size,
+    matureCount: mature.length, immatureCount: rows.filter(row => row.cohort.mature === false).length,
+    unknownCount: rows.filter(row => row.cohort.mature === null).length, eligibleCount: eligible.length,
+    ...Object.fromEntries(['noEntry','pending','resolved','unresolved'].map(status => [status, rows.filter(row => row.status === status).length])),
+    maturePopulation: Object.fromEntries(['noEntry','pending','resolved','unresolved'].map(status => [status, mature.filter(row => row.status === status).length])),
+    wins: valued.filter(row => row.exitReason === 'win').length, losses: valued.filter(row => row.exitReason === 'loss').length,
+    expired: valued.filter(row => row.exitReason === 'expired').length, continuousResolved: valued.length,
+    stalled: mature.filter(row => row.stalled).length, periodicCallSamples: mature.filter(row => row.periodic).length,
+    netProfits: net.filter(value => value > 0).length,
+    netProfitRate: profit.validCount >= WIN_RATE_MIN_SAMPLES ? roundTo(profit.value) : null,
+    targetHitRate: target.validCount >= WIN_RATE_MIN_SAMPLES ? roundTo(target.value) : null,
+    // winRate只作相容alias，明示它是達標率；新UI使用netProfitRate。
+    winRate: target.validCount >= WIN_RATE_MIN_SAMPLES ? roundTo(target.value) : null,
+    winRateMinSamples: WIN_RATE_MIN_SAMPLES,
+    avgResultPct: metricCoverage.avgResultPct.value, avgResultPctNet: metricCoverage.avgResultPctNet.value,
+    avgDaysHeld: metricCoverage.avgDaysHeld.value, profitFactorNet: down > 0 ? roundTo(up/down) : null,
+    medianResultPctNet: median(net), metricCoverage,
+    missingReasons: Object.fromEntries([...new Set(mature.filter(row => row.reason).map(row => row.reason))].map(reason => [reason, mature.filter(row => row.reason === reason).length])),
+  };
+}
+
+// 正式母體/數值只讀同一份已提交snapshot；不回傳DB，也不回建舊issued。
+function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, population = null } = {}) {
+  const fromDate = strategy === 'swing' ? addDaysCompact(toCompactDate(asOf), -90) : '';
+  const source = population || summarizeVerificationPopulation(db, strategy, { asOf, fromDate });
+  const policy = strategy === 'swing' ? 'mature-issued-15-official-sessions-v1' : 'complete-issued-next-session-v1';
+  const current = { ...currentVerificationIdentity(strategy), cohortPolicyVersion: policy };
+  const selectedModelKey = verificationModelKey(current);
+  const declarations = [...source.models];
+  if (!declarations.some(model => verificationModelKey({ ...model.identity, cohortPolicyVersion: policy }) === selectedModelKey)) {
+    declarations.push({ identity: current, modelKey: null, rows: [] });
+  }
+  const models = declarations.map(model => {
+    const identity = { ...model.identity, cohortPolicyVersion: policy };
+    const rows = model.rows.map(row => {
+      const entry = (db.swingVerification?.[toCompactDate(row.tradeDate)] || []).find(item => item.signalId === row.signalId && item.captureId === row.captureId);
+      const snapshot = (db.signalSnapshots || []).find(item => item.captureId === row.captureId);
+      const observed = snapshot ? storedObservationFor(snapshot) : null;
+      const perf = observed?.rows?.find(item => item.code === row.code);
+      const nextOpen = identity.entryModel === 'next-open-price-observation';
+      const cohort = strategy === 'swing' ? classifyCohort(row, { asOf, tradingDates: calendar, maxSessions: SWING_VERIFY_MAX_DAYS })
+        : { mature: Boolean(observed?.status === 'final' && observed.complete), ageSessions: null, reason: observed?.complete ? null : 'observation-day-incomplete' };
+      return { ...row, cohort, regime: regimeBucket(entry?.regime || snapshot?.regime),
+        periodic: Boolean(entry?.fillModel && entry.fillModel !== 'continuous'),
+        exitReason: entry?.status || null, resultPct: nextOpen ? entry?.resultPctNextOpen ?? null : entry?.resultPct ?? null,
+        daysHeld: entry?.daysHeld ?? null,
+        ...(strategy === 'overnight' ? { performance: perf || null, observationDate: observed?.observationDate || null } : {}) };
+    });
+    if (strategy === 'swing') {
+      const summary = summarizeSwingCohortRows(rows, identity);
+      const scenarios = [...new Set(rows.map(row => row.scenario))].map(scenario => {
+        const subset = rows.filter(row => row.scenario === scenario);
+        return { scenario, ...summarizeSwingCohortRows(subset, identity),
+          byRegime: Object.fromEntries(['aboveMa60','belowMa60','unknown'].map(bucket => [bucket,
+            summarizeSwingCohortRows(subset.filter(row => row.regime === bucket), identity)])),
+          withPeriodicCall: summarizeSwingCohortRows(subset.map(row => ({ ...row, periodic: false })), identity) };
+      });
+      return { ...summary, identity, modelKey: verificationModelKey(identity), populationModelKey: model.modelKey,
+        resultBasis: model.resultBasis || 'signal-close-price-observation', rows, scenarios };
+    }
+    const matured = rows.filter(row => row.cohort.mature);
+    const mature = matured.filter(row => row.status === 'resolved');
+    const records = [...new Set(mature.map(row => row.captureId))].map(captureId => {
+      const subset = mature.filter(row => row.captureId === captureId);
+      return { observationDate: subset[0].observationDate, regime: subset[0].regime, verified: subset.length,
+        metricCoverage: overnightMetricCoverage(subset.map(row => ({ ...row.performance, observationDate: row.observationDate })), identity.costModelVersion === current.costModelVersion) };
+    });
+    const total = aggregateOvernightRecords(records);
+    return { ...total, identity, modelKey: verificationModelKey(identity), populationModelKey: model.modelKey,
+      issued: rows.length, matureCount: matured.length, immatureCount: rows.length - matured.length, unknownCount: 0,
+      ...Object.fromEntries(['noEntry','pending','resolved','unresolved'].map(status => [status, rows.filter(row => row.status === status).length])),
+      signalDays: new Set(rows.map(row => row.tradeDate)).size, rows,
+      byRegime: Object.fromEntries(['aboveMa60','belowMa60','unknown'].map(bucket => [bucket, aggregateOvernightRecords(records.filter(record => record.regime === bucket))])) };
+  });
+  return { policy, asOf: compactToIsoDate(toCompactDate(asOf)), maxSessions: strategy === 'swing' ? SWING_VERIFY_MAX_DAYS : 1,
+    selectedModelKey, models, headline: models.find(model => model.modelKey === selectedModelKey),
+    inference: 'conditional-price-observations-not-account-returns', calendarReason: calendar.reason || null,
+    calendar: { source: calendar.source || null, through: calendar.through || null, coveredMonths: calendar.coveredMonths || [],
+      knownTradingDates: calendar.tradingDays || [] } };
+}
+
+async function getMaturityCalendar(from, through) {
+  const tradingDays = []; const coveredMonths = [];
+  for (let month = from.slice(0,6); month <= through.slice(0,6); month = addMonthsCompact(`${month}01`, 1).slice(0,6)) {
+    try {
+      const evidence = await getSwingHistoricalCalendar(`${month}01`, `${month}01`);
+      tradingDays.push(...evidence.tradingDays.filter(day => day <= through)); coveredMonths.push(month);
+    } catch { /* 日曆不足保留unknown，不改用平日或個股K推算。 */ }
+  }
+  const confirmedThrough = tradingDays.sort().at(-1) || '';
+  return { tradingDays: unique(tradingDays).sort(), coveredMonths, through: confirmedThrough, source: 'TWSE-FMTQIK-official-monthly-sessions',
+    reason: coveredMonths.includes(from.slice(0,6)) && coveredMonths.includes(through.slice(0,6)) ? null : 'official-calendar-coverage-unknown' };
 }
 
 // 必須在 commitDbMutation 的最新 draft 內呼叫；網路工作在 queue 外完成。
@@ -9607,9 +9796,9 @@ function resetHistoryCacheForTest() {
 
 async function buildVerificationHistory() {
   const now = Date.now();
-  const db = await loadDb();
+  let db = await loadDb();
   await confirmVerificationCaptures((db.signalSnapshots || []).slice(-OVERNIGHT_SNAPSHOT_LIMIT).map(snapshot => snapshot.captureId));
-  const cacheKey = stableJson({day: toTaipeiCompactDate(), model: currentVerificationIdentity('overnight'), snapshots: db.signalSnapshots || []});
+  const cacheKey = stableJson({day: toTaipeiCompactDate(), model: currentVerificationIdentity('overnight'), snapshots: db.signalSnapshots || [], captures: db.verificationCaptures});
   if (verifyHistoryCache.value && verifyHistoryCache.expiresAt > now && verifyHistoryCache.key === cacheKey) return verifyHistoryCache.value;
   const generatedAt = new Date().toISOString();
   const allSnapshots = (Array.isArray(db.signalSnapshots) ? db.signalSnapshots : [])
@@ -9621,8 +9810,10 @@ async function buildVerificationHistory() {
     formulaVersions[version] = (formulaVersions[version] || 0) + 1;
   }
   // 成績單只統計畫面目前使用的公式；舊版保留計數但不可混入分母。
-  const snapshots = authoritativeOvernightSnapshots(db).slice(-OVERNIGHT_SNAPSHOT_LIMIT);
+  let snapshots = authoritativeOvernightSnapshots(db).slice(-OVERNIGHT_SNAPSHOT_LIMIT);
   if (!snapshots.length) {
+    const measurement = await verificationMeasurementSummary('overnight');
+    const cohort = summarizeMatureVerification(measurement.db, 'overnight', { asOf: toTaipeiCompactDate(), population: measurement.population });
     return {
       ok: true,
       generatedAt,
@@ -9631,7 +9822,8 @@ async function buildVerificationHistory() {
       formulaVersion: OVERNIGHT_FORMULA_VERSION,
       formulaVersions,
       modelGroups: [], selectedModelKey: verificationModelKey(currentVerificationIdentity("overnight")),
-      ...(({ captureCoverage, population }) => ({ captureCoverage, population }))(await verificationMeasurementSummary('overnight')),
+      captureCoverage: measurement.captureCoverage, population: measurement.population,
+      cohort, metricCoverage: cohort.headline.metricCoverage,
       message: "尚未累積訊號快照，每天看一次隔日沖清單就會自動記錄。",
     };
   }
@@ -9639,7 +9831,7 @@ async function buildVerificationHistory() {
   // final 且 complete 的觀察結果不會再變：用快照裡落盤的那份，只重觀察 pending／partial 的日子。
   // 以前每次重建都重觀察全部（260 份 ≈ 5,000 個 code:month 鍵 > historyCache 4,096），冷重建
   // 要抓十幾分鐘，而且哪一天上游抓失敗、那一天就從分母消失——分母損耗跟市場無關、跟伺服器狀態有關。
-  const observations = [];
+  let observations = [];
   const finalized = [];
   for (const snapshot of snapshots) {
     const observed = await verificationObservation(snapshot, { allowIntraday: false, reference, calendar });
@@ -9651,9 +9843,19 @@ async function buildVerificationHistory() {
       console.warn("[Stock1] 成績單觀察結果落盤失敗（下次重建再試）：", error?.message || error);
     });
   }
+  const measurement = await verificationMeasurementSummary('overnight', calendar);
+  db = measurement.db;
+  const previousObservations = new Map(snapshots.map((snapshot,index) => [observationInputFingerprint(snapshot), observations[index]]));
+  snapshots = authoritativeOvernightSnapshots(db).slice(-OVERNIGHT_SNAPSHOT_LIMIT);
+  observations = snapshots.map(snapshot => storedObservationFor(snapshot) || previousObservations.get(observationInputFingerprint(snapshot))
+    || { rows: [], complete: false, status: 'pending', warnings: [] });
+  const cohort = summarizeMatureVerification(db, 'overnight', { asOf: toTaipeiCompactDate(), population: measurement.population });
   const records = observations.map((observed, index) => {
     const snapshot = snapshots[index];
     const perfs = observed.rows.filter((row) => row.verified);
+    const metricCoverage = overnightMetricCoverage(perfs.map(row => ({ ...row, observationDate: observed.observationDate })),
+      (observed.identity || verificationIdentity(snapshot)).costModelVersion === currentVerificationIdentity('overnight').costModelVersion);
+    const count = field => (metricCoverage[field].value ?? 0) * metricCoverage[field].validCount;
     return {
       asOf: snapshot.asOf,
       formulaVersion: overnightSnapshotFormulaVersion(snapshot),
@@ -9669,13 +9871,12 @@ async function buildVerificationHistory() {
       unverified: Math.max(0, snapshot.picks.length - perfs.length),
       complete: observed.status === "final" && observed.complete,
       pending: observed.status !== "final",
-      hitPlus2: perfs.filter((item) => item.hitPlus2).length,
-      brokeMinus2: perfs.filter((item) => item.brokeMinus2).length,
-      winAtOpen: perfs.filter((item) => item.winAtOpen).length,
-      winAtClose: perfs.filter((item) => item.winAtClose).length,
+      hitPlus2: count('hitPlus2'), brokeMinus2: count('brokeMinus2'),
+      winAtOpen: count('winAtOpen'), winAtClose: count('winAtClose'),
       avgOpenReturn: average(perfs.map((item) => item.openReturn)),
       avgHighReturn: average(perfs.map((item) => item.highReturn)),
       avgCloseReturn: average(perfs.map((item) => item.currentReturn)),
+      metricCoverage,
       warnings: observed.warnings,
     };
   });
@@ -9689,46 +9890,19 @@ async function buildVerificationHistory() {
     completeDays: records.filter(record => record.modelKey === modelKey && record.complete).length }));
   const done = records.filter((record) => record.complete && record.modelKey === selectedModelKey);
   const knownCost = records.find(record => record.modelKey === selectedModelKey)?.identity.costModelVersion === currentVerificationIdentity('overnight').costModelVersion;
-  const verifiedTotal = done.reduce((sum, record) => sum + record.verified, 0);
-  const weightedAvg = (field) => (verifiedTotal
-    ? done.reduce((sum, record) => sum + (record[field] || 0) * record.verified, 0) / verifiedTotal
-    : null);
   const totals = done.length
     ? {
-        days: done.length,
-        signals: verifiedTotal,
-        hitPlus2: done.reduce((sum, record) => sum + record.hitPlus2, 0),
-        brokeMinus2: done.reduce((sum, record) => sum + record.brokeMinus2, 0),
-        winAtOpen: done.reduce((sum, record) => sum + record.winAtOpen, 0),
-        winAtClose: done.reduce((sum, record) => sum + record.winAtClose, 0),
-        avgOpenReturn: weightedAvg("avgOpenReturn"),
-        avgOpenReturnNet: knownCost ? netReturnPct(weightedAvg("avgOpenReturn")) : null,
-        avgCloseReturn: weightedAvg("avgCloseReturn"),
-        avgCloseReturnNet: knownCost ? netReturnPct(weightedAvg("avgCloseReturn")) : null,
+        ...aggregateOvernightRecords(done),
         netUnavailableReason: knownCost ? null : "legacy-unknown-cost-model",
         // 低於 minDays 前端不染色；達到後附以「日」為叢集的 95% 信賴區間，染色看下界。
         minDays: OVERNIGHT_MIN_DAYS,
-        ci: {
-          hitPlus2: dayClusterCi(done, "hitPlus2"),
-          winAtOpen: dayClusterCi(done, "winAtOpen"),
-          winAtClose: dayClusterCi(done, "winAtClose"),
-        },
         // 依「快照建立當天大盤在季線上／下」分層——同一批紀錄拆兩欄，不改任何選股。
         byRegime: Object.fromEntries(["aboveMa60", "belowMa60", "unknown"].map((bucket) => {
           const subset = done.filter((record) => record.regime === bucket);
-          const signals = subset.reduce((sum, record) => sum + record.verified, 0);
           return [bucket, {
-            days: subset.length,
-            signals,
-            hitPlus2: subset.reduce((sum, record) => sum + record.hitPlus2, 0),
-            winAtOpen: subset.reduce((sum, record) => sum + record.winAtOpen, 0),
-            winAtClose: subset.reduce((sum, record) => sum + record.winAtClose, 0),
-            avgCloseReturn: signals
-              ? subset.reduce((sum, record) => sum + (record.avgCloseReturn || 0) * record.verified, 0) / signals
-              : null,
+            ...aggregateOvernightRecords(subset),
             // 分層也套同一個最小天數與區間——否則會出現「季線下 1 天：開盤賣 60%」，與同一面板的門檻矛盾。
             minDays: OVERNIGHT_MIN_DAYS,
-            ci: { winAtOpen: dayClusterCi(subset, "winAtOpen"), winAtClose: dayClusterCi(subset, "winAtClose") },
           }];
         })),
       }
@@ -9739,7 +9913,8 @@ async function buildVerificationHistory() {
     generatedAt,
     formulaVersion: OVERNIGHT_FORMULA_VERSION,
     formulaVersions,
-    ...(({ captureCoverage, population }) => ({ captureCoverage, population }))(await verificationMeasurementSummary('overnight', calendar)),
+    captureCoverage: measurement.captureCoverage, population: measurement.population,
+    cohort, metricCoverage: cohort.headline.metricCoverage,
     records: [...records].reverse(),
     modelGroups, selectedModelKey,
     totals,
@@ -9751,7 +9926,7 @@ async function buildVerificationHistory() {
     },
     notes: [
       "觀察日依證交所實際交易日／開休市表判定，且只接受日期完全相等的官方 OHLC。",
-      "基準＝訊號日收盤。「曾達 +2%／曾破 −2%」看觀察日最高／最低，是盤中曾觸及、不是可實現損益，兩者可同時成立；可執行勝率看「開盤賣／收盤賣」的淨報酬是否 > 0。partial 不納入長期正式統計。",
+      "基準＝訊號日收盤。「曾達 +2%／曾破 −2%」看觀察日最高／最低，是盤中曾觸及、不是可實現損益，兩者可同時成立；觀察淨獲利率看「開盤賣／收盤賣」的淨報酬是否 > 0。partial 不納入長期正式統計。",
       `百分比附的 ± 是以「日」為叢集的 95% 信賴區間（同一天的訊號共享大盤走勢，有效樣本≈天數）；累計未滿 ${OVERNIGHT_MIN_DAYS} 天不當結論呈現。`,
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
@@ -12251,6 +12426,11 @@ async function buildSwingVerificationSummary() {
   const modelGroups = [...new Set(modelEntries.map(entry => verificationModelKey(entry)))].map(modelKey => ({modelKey,
     identity: verificationIdentity(modelEntries.find(entry => verificationModelKey(entry) === modelKey)),
     samples: modelEntries.filter(entry => verificationModelKey(entry) === modelKey).length}));
+  const taipeiNow = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  const lastClosed = taipeiNow.getUTCHours() * 60 + taipeiNow.getUTCMinutes() >= 13 * 60 + 35 ? summaryToday : addDaysCompact(summaryToday, -1);
+  const firstSignal = measurement.population.models.flatMap(model => model.rows.map(row => toCompactDate(row.tradeDate))).sort()[0];
+  const maturityCalendar = firstSignal ? await getMaturityCalendar(firstSignal, lastClosed) : {};
+  const cohort = summarizeMatureVerification(db, 'swing', { asOf: lastClosed, calendar: maturityCalendar, population: measurement.population });
   const byScenario = new Map();
   const all = [];
     const versionCounts = new Map();
@@ -12304,11 +12484,12 @@ async function buildSwingVerificationSummary() {
         if (entry.status === "win") bucket.wins += 1;
         s.results.push({
           code: entry.code,
+          tradeDate: day, regime: regimeBucket(entry.regime),
           status: entry.status,
-          resultPct: Number.isFinite(entry.resultPct) ? entry.resultPct : 0,
+          resultPct: Number.isFinite(entry.resultPct) ? entry.resultPct : null,
           resultPctNextOpen: Number.isFinite(entry.resultPctNextOpen) ? entry.resultPctNextOpen : null,
           nextOpenSkipped: entry.nextOpenSkipped || "",
-          daysHeld: Number(entry.daysHeld) || 0,
+          daysHeld: Number.isFinite(entry.daysHeld) ? entry.daysHeld : null,
           resolvedAt: entry.resolvedAt || day,
           periodic: Boolean(entry.fillModel && entry.fillModel !== "continuous"),
         });
@@ -12323,9 +12504,8 @@ async function buildSwingVerificationSummary() {
     // 「觸價」判定的前提在那些樣本上不成立，而且處置股要預收款券、觀察用的散戶多半不會做。
     // 計數（resolved／wins／losses／expired）仍是全部，另回 withPeriodicCall 讓含處置股的口徑也看得到。
     const continuous = s.results.filter((item) => !item.periodic);
-    const cWins = continuous.filter((item) => item.status === "win").length;
-    const cSum = continuous.reduce((sum, item) => sum + item.resultPct, 0);
-    const cDays = continuous.reduce((sum, item) => sum + item.daysHeld, 0);
+    const valid = continuous.filter(item => Number.isFinite(item.resultPct));
+    const cWins = valid.filter((item) => item.status === "win").length;
     const gains = continuous.filter((item) => item.resultPct > 0).reduce((sum, item) => sum + item.resultPct, 0);
     const lossesAbs = continuous.filter((item) => item.resultPct < 0).reduce((sum, item) => sum + Math.abs(item.resultPct), 0);
     const allWins = s.results.filter((item) => item.status === "win").length;
@@ -12340,12 +12520,13 @@ async function buildSwingVerificationSummary() {
       resolved: s.resolved,
       continuousResolved: continuous.length,
       // 低於最小樣本時回 null——不是「沒有資料」，而是「還不足以當成結論」。
-      winRate: continuous.length >= WIN_RATE_MIN_SAMPLES ? Math.round((cWins / continuous.length) * 1000) / 10 : null,
+      winRate: valid.length >= WIN_RATE_MIN_SAMPLES ? Math.round((cWins / valid.length) * 1000) / 10 : null,
       winRateMinSamples: WIN_RATE_MIN_SAMPLES,
-      avgResultPct: continuous.length ? Math.round((cSum / continuous.length) * 100) / 100 : null,
-      avgResultPctNet: knownCost && continuous.length ? netReturnPct(cSum / continuous.length) : null,
+      avgResultPct: roundTo(summarizeFiniteMetric(continuous.map(item => item.resultPct)).value),
+      avgResultPctNet: knownCost ? netReturnPct(summarizeFiniteMetric(continuous.map(item => item.resultPct)).value) : null,
+      metricCoverage: swingMetricCoverage(continuous.map(item => ({ ...item, status: 'resolved', exitReason: item.status, tradeDate: item.tradeDate })), verificationIdentity(modelEntries.find(entry => verificationModelKey(entry) === selectedModelKey) || {})),
       netUnavailableReason: knownCost ? null : "legacy-unknown-cost-model",
-      avgDaysHeld: continuous.length ? Math.round((cDays / continuous.length) * 10) / 10 : null,
+      avgDaysHeld: roundTo(summarizeFiniteMetric(continuous.map(item => item.daysHeld)).value, 1),
       // 分佈指標：等權平均會把「一週內 75/88 筆停損」和「平穩小虧」混成同一個數字。
       profitFactor: lossesAbs > 0 ? roundTo(gains / lossesAbs) : null,
       // 淨口徑：勝率用 status（淨）、PF 卻用毛正負分是同一批樣本兩種定義。淨 PF 與淨中位數並列，毛值仍保留。
@@ -12358,14 +12539,15 @@ async function buildSwingVerificationSummary() {
       medianResultPct: median(continuous.map((item) => item.resultPct)),
       medianResultPctNet: knownCost ? median(continuous.map((item) => netReturnPct(item.resultPct))) : null,
       maxConsecutiveLossDays: knownCost ? maxConsecutiveLossDays(continuous) : null,
-      worstDay: worstResolvedDay(continuous),
+      worstDay: worstResolvedDay(valid),
       // 分盤撮合（處置期間）的樣本數：不進 headline 分母，但要能單獨看見（含處置股的口徑另列）。
       periodicCallSamples: s.periodicCallSamples,
       periodicCallResolved: s.periodicCallResolved,
       withPeriodicCall: {
         resolved: s.resolved,
         wins: allWins,
-        winRate: s.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((allWins / s.resolved) * 1000) / 10 : null,
+        winRate: s.results.filter(item => Number.isFinite(item.resultPct)).length >= WIN_RATE_MIN_SAMPLES
+          ? roundTo(s.results.filter(item => Number.isFinite(item.resultPct) && item.status === 'win').length / s.results.filter(item => Number.isFinite(item.resultPct)).length * 100, 1) : null,
       },
       // 口徑並陳：「次日開盤進場」——訊號要等收盤後才算得出，真實進場多半是次日開盤。
       // 只有 2026-09-05 之後推進過的單有 nextOpen；勝負以該口徑的淨報酬 > 0 判定，同樣套最小樣本。
@@ -12385,7 +12567,9 @@ async function buildSwingVerificationSummary() {
       byRegime: Object.fromEntries(Object.entries(s.regimes).map(([bucket, value]) => [bucket, {
         resolved: value.resolved,
         wins: value.wins,
-        winRate: value.resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((value.wins / value.resolved) * 1000) / 10 : null,
+        winRate: valid.filter(item => item.regime === bucket).length >= WIN_RATE_MIN_SAMPLES
+          ? roundTo(valid.filter(item => item.regime === bucket && item.status === 'win').length / valid.filter(item => item.regime === bucket).length * 100, 1) : null,
+        metricCoverage: swingMetricCoverage(continuous.filter(item => item.regime === bucket).map(item => ({ ...item, exitReason:item.status, status:'resolved' })), verificationIdentity(modelEntries.find(entry => verificationModelKey(entry) === selectedModelKey) || {})),
       }])),
     };
   });
@@ -12395,6 +12579,7 @@ async function buildSwingVerificationSummary() {
     generatedAt: new Date().toISOString(),
     currentFormulaVersion: SWING_FORMULA_VERSION,
     captureCoverage: measurement.captureCoverage, population: measurement.population,
+    cohort, metricCoverage: cohort.headline.metricCoverage,
     modelGroups, selectedModelKey, unavailableCount,
     formulaVersions: [...versionCounts.values()].sort((a, b) => b.formulaVersion.localeCompare(a.formulaVersion)),
     // 版本作為分層而非排除：headline 只用現版，這裡另給「全版本合併」讓改版不會把累積歸零。
@@ -12429,7 +12614,7 @@ async function buildSwingVerificationSummary() {
     notes: [
       "驗證規則：進場＝訊號日收盤，之後每個交易日用官方日K高低價判定「先碰目標＝達標、先碰停損（結構停損）＝停損」；同一天兩邊都碰到，保守記停損。",
       `${SWING_VERIFY_MAX_DAYS} 個實際交易日內都沒碰到 → 以第 ${SWING_VERIFY_MAX_DAYS} 日收盤結案（超時）。漏開 App 會用官方日K依日期補判；若中間日K缺漏就停在缺口前並排除結案統計。`,
-      `勝率需累積 ${WIN_RATE_MIN_SAMPLES} 筆結案才顯示：分母只含已結案，而達標／停損常 1~3 天就結案、超時要等第 ${SWING_VERIFY_MAX_DAYS} 個交易日，初期分母偏向快速觸價的極端樣本。同一天選出的標的也高度共享大盤走勢，有效樣本數遠小於檔數。`,
+      `主要比較限正式訊號日已過 ${SWING_VERIFY_MAX_DAYS} 個官方交易日的成熟 cohort，快速達標、停損與超時共用窗口；日曆不足保留未知。淨獲利率與達標率分開，各欄至少 ${WIN_RATE_MIN_SAMPLES} 筆有效觀察才顯示。這只是呈現門檻，同日訊號共振及跨日持有重疊仍限制推論。`,
       `因官方日 K 缺漏而停在缺口前超過 ${SWING_VERIFY_STALLED_DAYS} 天的驗證單會標為「卡住」：它們不會自行結案，也永遠不會進入勝率分母，因此分母會比實際發出的訊號數少。`,
       "除權息／減資當天，若交易所公告說有事件但官方比率還沒發布（計算結果表約次一營業日才有），該張驗證單會暫停推進而不是拿事件前的進場／停損／目標去比事件後的價格——否則除息當天必然被記成假停損。等比率到齊後會自動接著判，觀察天數不會被停等吃掉。",
       "處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到。這些樣本不進主要勝率的分母，改在「含處置股」另列；2026-07-27 之前建立的驗證單沒有記錄撮合方式，一律當成連續競價。",
@@ -15122,6 +15307,7 @@ export {
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
   verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
+  summarizeFiniteMetric, classifyCohort, summarizeMatureVerification,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
   holidayCalendarCoversYear,
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,

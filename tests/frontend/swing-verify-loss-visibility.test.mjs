@@ -20,6 +20,25 @@ const SCENARIO = {
   stalled: 0, resolved: 20, winRate: 70, winRateMinSamples: 20, avgResultPct: 1.2, avgDaysHeld: 4,
 };
 
+test('成熟但無可估值結果：保留issued與缺口，主卡不出現0%或綠燈', () => {
+  app.evalIn(`state.screen='strategy'; swingVerifyState.data={cohort:{models:[],headline:{issued:2,matureCount:2,signalDays:1,
+    scenarios:[{scenario:'midBandDefense',samples:2,matureCount:2,pending:2,netProfitRate:null,avgResultPctNet:null,
+      metricCoverage:{avgResultPctNet:{value:null,validCount:0,totalCount:2,missingCount:2,validDays:0},netProfitRate:{value:null,validCount:0,totalCount:2,missingCount:2,validDays:0}}}]}},
+    population:{legacy:{samples:0}},scenarios:[],recent:[]}; renderSwingVerifyPanel();`);
+  const panel=app.doc.getElementById('swingVerify');
+  assert.match(panel.textContent,/已發 2 筆/);
+  assert.match(panel.textContent,/有效 0\/2・缺 2/);
+  assert.doesNotMatch(panel.querySelector('.sv-chips').textContent,/0%/);
+  assert.equal(panel.querySelectorAll('.sv-rate.is-up,.sv-rate.is-down').length,0);
+});
+
+test('未成熟快結案不能由resolved差值被誤標成含處置股', () => {
+  app.evalIn(`state.screen='strategy'; swingVerifyState.data={cohort:{models:[],headline:{issued:1,matureCount:0,
+    scenarios:[{scenario:'midBandDefense',samples:1,matureCount:0,immatureCount:1,resolved:1,continuousResolved:0,
+      periodicCallSamples:0,withPeriodicCall:{resolved:1,wins:0},netProfitRate:null,metricCoverage:{}}]}},scenarios:[],recent:[]}; renderSwingVerifyPanel();`);
+  assert.doesNotMatch(app.doc.getElementById('swingVerify').querySelector('.sv-chips').textContent,/含處置股/);
+});
+
 const render = (over = {}, scenarioOver = {}) => JSON.parse(app.evalIn(`JSON.stringify((() => {
   swingVerifyState.data = {
     ok: true,

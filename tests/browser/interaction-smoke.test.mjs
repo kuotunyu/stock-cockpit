@@ -39,6 +39,18 @@ test("populated：Tab/Enter/Escape 操作真按鈕、內層提醒不誤開明細
     await visibleNav(page, "strategy").click();
     await page.locator(".swing-card").waitFor();
 
+    const denominators = page.locator('#swingVerify .verification-denominators > summary');
+    await denominators.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await denominators.evaluate(node => node.parentElement.open), true, '正式cohort分母可用鍵盤展開');
+    await page.locator('#swingVerify .verification-denominators').getByText(/次開價格觀察沿用原收盤退出與窗口/).waitFor();
+    assert.match(await page.locator('#swingVerify .verification-denominators').textContent(), /舊紀錄 12 筆驗證單/);
+    assert.match(await page.locator('#swingVerify .verification-denominators').textContent(), /有效 0\/38・缺 38/);
+    await fixture.captureSnapshot('measurement-denominators-375');
+    await page.keyboard.press('Enter');
+    assert.equal(await denominators.evaluate(node => node.parentElement.open), false);
+    assert.equal(await denominators.evaluate(node => node === document.activeElement), true, '收合後精確保留在原summary');
+
     const alertButton = page.locator(".swing-plan-alerts").first();
     await alertButton.click();
     assert.equal(await page.locator("#detailPanel.is-open").count(), 0, "卡片內提醒按鈕不可誤開明細");

@@ -66,6 +66,24 @@ const swingVerification = {
   notes: ["固定瀏覽器 fixture，只驗 UI 消費契約"],
 };
 
+const metric = (value, validCount, totalCount, validDays) => ({ value, validCount, totalCount, missingCount: totalCount-validCount, validDays,
+  reason: validCount === totalCount ? null : validCount ? 'partial-field-coverage' : 'no-valid-values' });
+const measuredIdentity = { snapshotSchemaVersion:2,selectionVersion:'browser-fixture-v1',evaluationVersion:'swing-price-observation-v1',
+  costModelVersion:'flat-round-trip-0.471pct-v1',cohortPolicyVersion:'mature-issued-15-official-sessions-v1',entryModel:'signal-close-observation',returnBasis:'adjusted-reference-price' };
+const measuredScenarios = swingVerification.scenarios.map(s => ({ ...s, issued:s.samples,matureCount:s.resolved,immatureCount:s.pending,unknownCount:0,
+  netProfitRate:s.winRate,targetHitRate:s.winRate,avgResultPctNet:s.avgResultPct-0.471,
+  metricCoverage:{ netProfitRate:metric(s.winRate,s.resolved,s.resolved,8),avgResultPctNet:metric(s.avgResultPct-0.471,s.resolved,s.resolved,8) } }));
+const measuredHeadline = { identity:measuredIdentity,modelKey:JSON.stringify(measuredIdentity),issued:44,matureCount:38,immatureCount:6,unknownCount:0,
+  signalDays:10,noEntry:0,pending:0,resolved:38,unresolved:0,scenarios:measuredScenarios,
+  metricCoverage:{avgResultPctNet:metric(0.7,38,38,8),netProfitRate:metric(58,38,38,8)},missingReasons:{} };
+const measuredSwingVerification = { ...swingVerification,
+  captureCoverage:{fullRecordStartDate:'2026-08-01',expectedCount:26,completeCount:25,expectedDateReason:'official-session-dates-only'},
+  population:{legacy:{samples:12,reason:'issued-and-no-entry-not-recorded'},models:[]},
+  modelGroups:[{identity:measuredIdentity,samples:44}],metricCoverage:measuredHeadline.metricCoverage,
+  cohort:{policy:measuredIdentity.cohortPolicyVersion,selectedModelKey:measuredHeadline.modelKey,headline:measuredHeadline,
+    models:[measuredHeadline,{...measuredHeadline,identity:{...measuredIdentity,entryModel:'next-open-price-observation',evaluationVersion:'swing-next-open-price-observation-v1'},
+      resultBasis:'original-close-observation-exit-and-window',pending:38,resolved:0,metricCoverage:{avgResultPctNet:metric(null,0,38,0)},missingReasons:{'timing-uncertain':38}}] } };
+
 function swingPayload(scenario, kind) {
   const pick = scenario === "strongContinuation" ? strongPick : midPick;
   const picks = kind === "empty" ? [] : [pick];
@@ -187,7 +205,8 @@ function apiResponse(url, method, scenario) {
   if (path === "/api/backtest/overnight") return { body: { ok: true, available: false, groups: {} } };
   if (path === "/api/market/breadth") return { body: { ok: true, asOf: AS_OF, stance: "neutral", summary: {}, warnings: [] } };
   if (path === "/api/swing") return { body: swingPayload(url.searchParams.get("scenario") || "midBandDefense", kind) };
-  if (path === "/api/swing/verify") return { body: kind === "empty" ? { ...swingVerification, scenarios: [], recent: [], pendingCount: 0 } : swingVerification };
+  if (path === "/api/swing/verify") return { body: kind === "empty" ? { ...swingVerification, scenarios: [], recent: [], pendingCount: 0 }
+    : kind === 'partial' ? swingVerification : measuredSwingVerification };
   if (path === "/api/surveillance-board") return { body: surveillancePayload(kind) };
   if (path === "/api/institutional") {
     const records = supplementalRecords(url, "institutional");

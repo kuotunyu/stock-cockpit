@@ -11,6 +11,26 @@ after(() => app.cleanup());
 
 const normalized = (html) => String(html).replace(/\s+/g, " ").trim();
 
+test('開盤有效一天不得借20個收盤日顯示CI或綠燈，缺欄不是0%', () => {
+  const metric={value:null,validCount:0,totalCount:20,missingCount:20,validDays:0};
+  const html=normalized(app.evalIn(`(() => {
+    verifyHistoryState.data={ records:[{asOf:'2026-09-01',status:'final',complete:true,verified:1,signals:1}],
+      totals:{days:20,signals:20,winAtOpen:0,ci:{winAtOpen:{low:0.9,high:1}},metricCoverage:{winAtOpen:${JSON.stringify(metric)}}} };
+    return renderVerifyHistory(); })()`));
+  assert.doesNotMatch(html,/positive/);
+  assert.doesNotMatch(html,/區間 90/);
+  assert.doesNotMatch(html,/淨獲利率[^<]*0%/);
+});
+
+test('新正式母體只提供帶限制的區間，採集覆蓋未知不亮確定性綠燈', () => {
+  const html=normalized(app.evalIn(`(() => {
+    const headline={days:20,signals:20,winAtOpen:20,metricCoverage:{winAtOpen:{value:1,validCount:20,totalCount:20,missingCount:0,validDays:20}},ci:{winAtOpen:{low:0.9,high:1}}};
+    verifyHistoryState.data={records:[{status:'final',complete:true,signals:1,verified:1}],cohort:{headline,models:[]},captureCoverage:{expectedDateReason:'official-session-dates-only'}};
+    return renderVerifyHistory(); })()`));
+  assert.match(html,/區間 90～100%/);
+  assert.doesNotMatch(html,/class="positive"/);
+});
+
 test("單日驗證顯示訊號日到實際下一交易日、完成比例與正式／盤中語意", () => {
   const finalHtml = normalized(app.evalIn(`(() => {
     verifyState.data = {
@@ -135,13 +155,13 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
     ci: { hitPlus2: { n: 25, mean: 0.66, low: 0.45, high: 0.87 }, winAtOpen: { n: 25, mean: 0.75, low: 0.6, high: 0.9 }, winAtClose: null } });
   // 括號要有「區間」標籤：散戶第一眼會把「75%（60～90%）」讀成範圍勝率或某種區間報酬。
   const enoughText = enough.replace(/<[^>]+>/g, "");
-  assert.match(enoughText, /開盤賣勝率 75%（區間 60～90%）/);
+  assert.match(enoughText, /開盤觀察淨獲利率 75%（區間 60～90%）/);
   assert.match(enoughText, /曾達\+2% 67%（區間 45～87%）/);
   assert.match(enough, /data-glossary-term="開盤賣勝率"/, "標籤要能點開名詞解釋");
   host = app.doc.createElement("div");
   host.innerHTML = enough;
   const chips = [...host.querySelectorAll(".verify-stats span")];
-  assert.ok(chips.find((c) => c.textContent.includes("開盤賣勝率")).classList.contains("positive"), "下界 60% ≥ 50% 染色");
+  assert.ok(chips.find((c) => c.textContent.includes("開盤觀察淨獲利率")).classList.contains("positive"), "下界 60% ≥ 50% 染色");
   assert.equal(chips.find((c) => c.textContent.includes("曾達+2%")).classList.contains("positive"), false, "點估計 67% 但下界 45% 不染");
   assert.match(enough, /開盤賣勝率.*曾達\+2%.*曾破−2%.*平均開盤.*平均收盤/, "表頭七欄");
   assert.match(enough, /100%/, "該日 winAtOpen 2/2");

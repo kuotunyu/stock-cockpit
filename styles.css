@@ -9623,11 +9623,12 @@ body.is-locked .app-shell {
   flex-wrap: wrap;
   gap: 4px 20px;
 }
-.sv-head strong { color: #e8eef5; font-size: 17px; font-weight: 900; white-space: nowrap; }
+.sv-head strong { color: #e8eef5; font-size: 17px; font-weight: 900; white-space: normal; }
 .sv-head small { color: var(--muted-2); font-size: 15px; line-height: 1.5; cursor: help; }
-.sv-chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+.sv-chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 10px; min-width: 0; }
 .sv-chip {
   display: grid;
+  min-width: 0;
   gap: 6px;
   padding: 11px 14px 12px;
   border: 1px solid #242a30;
@@ -9635,6 +9636,7 @@ body.is-locked .app-shell {
 }
 .sv-chip-top {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
@@ -9646,7 +9648,8 @@ body.is-locked .app-shell {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   color: #dde5ec;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .sv-rate.is-up { color: var(--up-text); }
 .sv-rate.is-down { color: var(--down-text); }
@@ -9786,3 +9789,10 @@ body.is-locked .app-shell {
   min-height: 44px;
   font-size: var(--fs-body);
 }
+/* 成績單只漸進揭露分母與版本，沿用面板字型與語意色。 */
+.verification-measurement { font-size: var(--fs-body); line-height: 1.6; }
+.verification-measurement p { margin: 0.4em 0; }
+.verification-denominators summary { cursor: pointer; padding-block: 0.5em; }
+.verification-denominators summary:focus-visible { outline: 2px solid var(--info-text); outline-offset: 2px; }
+.verification-model { margin-block: 0.65em; overflow-wrap: anywhere; }
+.verification-denominators { min-width: 0; }

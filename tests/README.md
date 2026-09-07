@@ -115,6 +115,9 @@ tests/
 
 ## Mock 與驗證範圍
 
+- `verification-metric-coverage` 以合法已保存 final 觀察驗證逐欄分母，涵蓋 0、全缺、不同日有效筆數、開盤缺值的 CI 日期，以及真 history API 的正式母體和零訊號採集。`verification-cohort` 釘官方 15 交易日窗口、休市日、證據不足／下界、快贏快輸超時、缺 K 補齊、版本與分盤／regime 分層，並走真 summary 的日曆失敗及補齊路徑。固定日期案例均傳明確 asOf，涉及 builder 時局部設定測試時鐘。
+- Chromium 的 populated／expired-session fixture 使用 `cohort`／`metricCoverage`／`captureCoverage` 新回應，partial 保留舊 payload 相容測試。分母區須能以鍵盤展開及收合，並驗證次開口徑與缺值文字；原四尺寸、200% 字體、精確回焦、登入失效及草稿保護斷言保留。
+
 - `verification-retention` 驗證儲存保留與查詢窗口分離、16／4 組有界補判、歷史月份與跨年日曆、未知市場、來源失敗、已封月但被歸檔上限淘汰的公司行動，以及 copy-on-write 證據／游標回滾。`verification-retention-restart` 使用 1040 日純合成資料，經每日備份與真正 `scripts/backup.mjs` 還原至新臨時目錄，再以獨立程序在埠 0 啟動／關閉並比對 SHA-256；不讀正式資料或 `.env`。
 - `node --expose-gc tests/helpers/verification-retention-bench.mjs 260`（或 `1040`）是手動同機量測，不是效能 CI 門檻。量實際冷 load、save、read/parse、summary 冷重建、暖機後函式與 JSON 序列化延遲，以及離線上游呼叫數與 GC 後記憶體；報告需保留同一 fixture 的前後值與量測方法。不要把函式快取命中時間當成完整 HTTP 延遲。
 
