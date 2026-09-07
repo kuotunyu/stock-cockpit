@@ -2718,7 +2718,7 @@ function renderTradePlanEditor() {
   const final = ['closed','cancelled'].includes(plan.status);
   for (const key of TRADE_PLAN_FORM_FIELDS) {
     const input = form.elements.namedItem(key);
-    input.value = plan[key] ?? '';
+    if (input.value !== String(plan[key] ?? '')) input.value = plan[key] ?? '';
     input.disabled = final || Boolean(tradePlansState.base && ['code','exchange','strategy'].includes(key)) || Boolean(plan.signalId && ['code','exchange','strategy'].includes(key));
   }
   for(const option of form.elements.status.options) option.disabled = tradePlansState.base?.status === 'active' && option.value === 'draft';
@@ -2789,13 +2789,24 @@ async function submitTradePlan(event) {
     await putTradePlanIntent({planId:draft.planId,isNew:!base,changes});
     if(!isCurrentAuthScope(scope))return;
     const canonical=tradePlansState.plans.find(plan=>plan.planId===draft.planId);
+    let hasUnsentChanges=editorSeq!==tradePlansState.editorSeq;
     if(editorSeq===tradePlansState.editorSeq){
       tradePlanDrafts.delete(authState.user.id);
       tradePlansState.editor=canonical;tradePlansState.base=canonical;
     }else if(tradePlansState.editor?.planId===draft.planId){
-      tradePlansState.base=canonical;rememberTradePlanDraft();
+      // 409 可能合併其他分頁的新欄位。只重放送出後新增的編輯，不能把舊表單
+      // 整包掛到新 base，否則下次保存會將未碰過的舊值當成使用者修改。
+      rememberTradePlanDraft();
+      const laterChanges=Object.fromEntries(TRADE_PLAN_FORM_FIELDS
+        .filter(key=>JSON.stringify(tradePlansState.editor[key])!==JSON.stringify(draft[key]))
+        .map(key=>[key,tradePlansState.editor[key]]));
+      hasUnsentChanges=Object.keys(laterChanges).length>0;
+      tradePlansState.base=canonical;
+      tradePlansState.editor=hasUnsentChanges?{...canonical,...laterChanges}:canonical;
+      renderTradePlanEditor();
+      rememberTradePlanDraft();
     }
-    showToast(editorSeq===tradePlansState.editorSeq ? '交易計畫已保存，原始意圖與首次啟用基準均保留' : '送出的版本已保存，後續修改尚未保存');
+    showToast(hasUnsentChanges ? '送出的版本已保存，後續修改尚未保存' : '交易計畫已保存，原始意圖與首次啟用基準均保留');
     renderTradePlanList();
   }catch(error){
     if(!isCurrentAuthScope(scope))return;

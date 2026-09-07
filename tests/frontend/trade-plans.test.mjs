@@ -71,3 +71,43 @@ test('older GET failure after close/reopen cannot replace the new editor or show
   rejectOld(new Error('OLD_GET_FAILURE'));await first;assert.equal(app.doc.querySelector('[name=code]').value,'1101');assert.doesNotMatch(app.doc.querySelector('#tradePlanError').textContent,/OLD_GET_FAILURE/);
  }finally{app.cleanup();}
 });
+for (const mode of ['later-input', 'close-reopen']) {
+ test(`409 canonical merge ${mode}: second save contains only post-submit edits, never stale untouched fields`, async()=>{
+  const old={planId:'merge-target',code:'2330',exchange:'TWSE',strategy:'swing',scenario:'midBandDefense',signalId:'a'.repeat(64),sourceCaptureId:'b'.repeat(64),
+   status:'draft',entryPrice:100,stopPrice:95,targetPrice:120,quantity:1000,expiresOn:null,entryLow:null,entryHigh:null,riskBudgetCash:5000,invalidationReason:'original condition',reason:'old',revisions:[],source:{verification:'verified-local'}};
+  const latest={...old,reason:'other tab',riskBudgetCash:6000,invalidationReason:'other condition',revisions:[{revision:1,recordedAt:new Date().toISOString(),intent:{reason:'other tab',stopPrice:95}}]};
+  let current={ok:true,rev:1,schemaVersion:1,plans:[old]}, release, firstStarted;
+  const started=new Promise(resolve=>firstStarted=resolve), gate=new Promise(resolve=>release=resolve), puts=[];
+  const app=await createAppWindow({fetchRoutes:{'/api/trade-plans':()=>current}});
+  try{
+   await app.evalIn('openTradePlans(null,false)');
+   app.evalIn('tradePlansState.editor=JSON.parse(JSON.stringify(tradePlansState.plans[0]));tradePlansState.base=tradePlansState.plans[0];renderTradePlanEditor()');
+   const originalFetch=app.win.fetch;
+   app.win.fetch=async(url,init)=>{
+    if(url!=='/api/trade-plans')return originalFetch(url,init);
+    if(init?.method==='PUT'){
+     const sent=JSON.parse(init.body);puts.push(sent);
+     if(puts.length===1){firstStarted();await gate;current={ok:true,rev:2,schemaVersion:1,plans:[latest]};return {ok:false,status:409,json:async()=>({ok:false,error:'conflict'}),headers:{get:()=> 'application/json'}};}
+     current={ok:true,rev:current.rev+1,schemaVersion:1,plans:sent.plans};
+    }
+    return {ok:true,status:200,json:async()=>current,headers:{get:()=> 'application/json'}};
+   };
+   const input=(name,value)=>{const node=app.doc.querySelector(`#tradePlanForm [name=${name}]`);node.value=value;node.dispatchEvent(new app.win.Event('input',{bubbles:true}));return node;};
+   input('stopPrice','96');const pending=app.evalIn('submitTradePlan({preventDefault(){}})');await started;
+   if(mode==='later-input')input('quantity','2000');
+   else {app.evalIn('closeTradePlans()');await app.evalIn('openTradePlans(null,false)');}
+   release();await pending;
+   assert.equal(puts[1].plans[0].reason,'other tab','first 409 replay kept remote intent');
+   assert.equal(app.evalIn('tradePlansState.editor.reason'),'other tab');
+   assert.equal(app.doc.querySelector('#tradePlanForm [name=reason]').value,'other tab');
+   assert.equal(app.doc.querySelector('#tradePlanForm [name=riskBudgetCash]').value,'6000');
+   assert.equal(app.doc.querySelector('#tradePlanForm [name=invalidationReason]').value,'other condition');
+   assert.equal(app.evalIn('tradePlansState.editor.quantity'),mode==='later-input'?2000:1000);
+   if(mode==='close-reopen')assert.equal(app.evalIn('tradePlanDrafts.has(authState.user.id)'),false);
+   await app.evalIn('submitTradePlan({preventDefault(){}})');
+   assert.equal(puts.length,3);assert.equal(puts[2].plans[0].reason,'other tab');assert.equal(puts[2].plans[0].riskBudgetCash,6000);
+   assert.equal(puts[2].plans[0].invalidationReason,'other condition');assert.equal(puts[2].plans[0].quantity,mode==='later-input'?2000:1000);
+   assert.deepEqual(puts[2].plans[0].revisions,latest.revisions);assert.deepEqual(puts[2].plans[0].source,old.source);assert.equal(puts[2].plans[0].signalId,old.signalId);
+  }finally{release();app.cleanup();}
+ });
+}
