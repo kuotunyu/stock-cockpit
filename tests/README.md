@@ -2,11 +2,11 @@
 
 持股情境風險的 `portfolio-plan-risk` 後端／前端測試涵蓋目前停損、部分計畫股數、到達／跌破、過期／多計畫衝突、缺行情與市場衝突、日期／來源有效性及集中度未知分母。共用 `portfolio-risk.js` 由 server 與 classic browser 載入同一份公式；以明確 `asOf` 驗盤中 120 秒產品容忍值與歷史官方收盤參考，不用星期推定最新交易日。可先跑 `node --test tests/backend/portfolio-plan-risk.test.mjs tests/frontend/portfolio-plan-risk.test.mjs tests/frontend/holdings-render.test.mjs`。
 
-新單部位測試驗風險預算與明確投入金額雙上限、買費四捨五入／最低額及整張／零股。`capital` 為本機偏好，`availableCash` 只存本頁 RAM、切帳號清空；未提供則顯示資金未檢查。Chromium 同名案例在 375／768／1280／1440 px 與 100%／200% 文字驗資金欄位、持股風險、原生 details、計畫連結與更新後回焦，產物為 `test-results/browser/portfolio-{size,risk}-*`。此範圍不表示全站 200% 完成；固定底部導覽互疊仍待 T11。
+新單部位測試驗風險預算與明確投入金額雙上限、買費四捨五入／最低額及整張／零股。`capital` 為本機偏好，`availableCash` 只存本頁 RAM、切帳號清空；未提供則顯示資金未檢查。Chromium 同名案例在 375／768／1280／1440 px 與 100%／200% 文字驗資金欄位、持股風險、原生 details、計畫連結與更新後回焦，產物為 `test-results/browser/portfolio-{size,risk}-*`。此範圍不表示全站 200% 完成；固定底部導覽已由 T11 修正並驗證，詳見下方 T11 範圍。
 
 個人交易計畫的 `trade-plans`、`api-trade-plans`、`trade-plans-portability` 與前端同名測試涵蓋初始草稿／首次啟用、上移停損、100 次修改上限、權限及 409 重放、雙擊、儲存途中輸入、帳號隔離、寫入失敗回滾、v1 保留／v2 匯入未驗證、還原點與隔離冷啟動。可先執行 `node --test tests/backend/trade-plans*.test.mjs tests/backend/api-trade-plans.test.mjs tests/frontend/trade-plans.test.mjs`，再跑完整套件。
 
-Chromium 的 `trade-plans.test.mjs` 以真表單驗保存、上移停損、輪詢草稿、Escape 回焦、切帳號與 session 到期；375／768／1280／1440 px 各驗 100%／實際 200% 文字。使用隔離臨時埠，產物在 `test-results/browser/trade-plans-*`。此範圍不代表全站 200% 完成，既有固定底部導覽互疊仍待後续手機可及性工作。
+Chromium 的 `trade-plans.test.mjs` 以真表單驗保存、上移停損、輪詢草稿、Escape 回焦、切帳號與 session 到期；375／768／1280／1440 px 各驗 100%／實際 200% 文字。使用隔離臨時埠，產物在 `test-results/browser/trade-plans-*`。此範圍不代表全站 200% 完成，固定底部導覽已由 T11 修正，覆蓋界線見下方 T11 範圍。
 
 Node 內建 `node --test`＋ `jsdom`（前端 DOM 測試）。使用 **Node 22.22.2 以上的 22.x、24.15.0 以上的 24.x，或 ≥26**；精確範圍為 jsdom 30 的 `^22.22.2 || ^24.15.0 || >=26.0.0`，比 App 本身的 `engines` 嚴格。CI 目前測 Node 22.x／24.x。
 
@@ -191,13 +191,13 @@ T03 修正回歸另走真實隔日 builder 的 HTTP200 未成功／TPEx 缺表�
 node --test tests/backend/verification-publication.test.mjs tests/backend/verification-model-version.test.mjs tests/backend/verify-history-memo.test.mjs
 ```
 
-T05 成績單瀏覽器覆蓋包含隔日新 `cohort`／`captureCoverage`：375／768／1280／1440 px 各測原字體及 200% 文字放大，釘開盤僅 1 有效日、收盤 20 日、觸及 19 日及全缺欄位的不同門檻。主摘要與分母區需在 viewport 內，只有逐日明細獨立橫捲；原生 details 以 Enter 展開／收合並精確保留 summary 焦點。fixture 自驗每模型 issued 四狀態等式、完整 modelKey、raw metric 與顯示門檻分離；保留既有現代波段與 legacy fallback、登入失效、refresh 草稿檢查。這是成績單範圍驗證；375 px／200% 固定底部導覽文字互疊已移交後續手機可及性工作，不能宣稱全站控制項皆已通過 200%。
+T05 成績單瀏覽器覆蓋包含隔日新 `cohort`／`captureCoverage`：375／768／1280／1440 px 各測原字體及 200% 文字放大，釘開盤僅 1 有效日、收盤 20 日、觸及 19 日及全缺欄位的不同門檻。主摘要與分母區需在 viewport 內，只有逐日明細獨立橫捲；原生 details 以 Enter 展開／收合並精確保留 summary 焦點。fixture 自驗每模型 issued 四狀態等式、完整 modelKey、raw metric 與顯示門檻分離；保留既有現代波段與 legacy fallback、登入失效、refresh 草稿檢查。這是成績單範圍驗證；當時發現的 375 px／200% 固定底部導覽文字互疊，後續已由 T11 修正並驗證；仍不能宣稱全站控制項皆已通過 200%。
 
 ### T06 假設含息持有
 
 `verification-holding-return` 手算現金股利與兩個成本分母，涵蓋不再投入、配股／零碎結算、明確交付日期、現增、同事件重跑、應收轉支付、未知股數及事件coverage。`verification-holding-source` 驗 TPEx exDailyQ 的 schema／date／count／成功空清單、每仟股單位及有界single-flight。既有 corporate-actions／swing-verify 增加新舊模型與不可變原始部位的真接線，T05 合成 final fixture 明確提供含息證據。
 
-新 cash identity：`swing-hypothetical-holding-v1`／`overnight-hypothetical-holding-v1`、`initial-notional-flat-0.471pct-v1`、`cash-holding-return`。原價格欄位保留；cash 欄位缺失不能套價格公式補造。`holding-return-render` 驗未知／零／負與模型文字；Chromium `holding-return` 在兩頁四尺寸、100%／200%字體驗模型區域與原生details鍵盤，保留既有價格fixture回歸。固定底部導覽200%重疊仍屬後續手機可及性工作。
+新 cash identity：`swing-hypothetical-holding-v1`／`overnight-hypothetical-holding-v1`、`initial-notional-flat-0.471pct-v1`、`cash-holding-return`。原價格欄位保留；cash 欄位缺失不能套價格公式補造。`holding-return-render` 驗未知／零／負與模型文字；Chromium `holding-return` 在兩頁四尺寸、100%／200%字體驗模型區域與原生details鍵盤，保留既有價格fixture回歸。當時的固定底部導覽 200% 重疊已由 T11 修正並驗證，仍不代表全站 200% 認證。
 
 `verification-holding-review` 覆蓋 TWSE 貨幣來源的缺表、完整 schema、查詢日期、畸形／重複列、已知截斷及完整空表；原價格月可用章不能替代 `monetaryCoverage`。同時測真 replay／隔日 observe 的不完整公告、重複公告歸檔，以及新 cash entries 保存的價格身份供尾部／次開摘要使用。TWSE 原回應無總筆數欄，無法偵測未宣告的合法 JSON 漏列；已有 sealed 月若缺新完整章會維持 cash unknown，歷史批次重新查詢可取得獨立證據，已結案結果不自動重算。
 

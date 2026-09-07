@@ -2,7 +2,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
-import { compactTradingDay, rocCompact, fundamentalsRoutes } from '../helpers/fixtures.mjs';
+import { compactTradingDay, rocCompact, fundamentalsRoutes, stockDayAllRow } from '../helpers/fixtures.mjs';
 import { importServer } from '../helpers/test-server.mjs';
 const {mod,mock,dataDir} = await importServer();
 after(async()=>{await mod.flushPersistence();mock.restore(); await rm(dataDir,{recursive:true,force:true});});
@@ -54,10 +54,16 @@ test('legacy 未知成本只保留毛結果，不能套今日成本補出淨值�
  assert.equal(s.netUnavailableReason,'legacy-unknown-cost-model');
 });
 
-test('I2：相同selection但不支援evaluation/entry/return的現代pending不被current evaluator推進',async()=>{
+test('I2：相同selection但不支援evaluation/entry/return的現代pending不被current evaluator推進',async t=>{
  const today=compactTradingDay(0), yesterday=compactTradingDay(-1);
+ // 此正向控制提供官方「收盤」OHLC；同交易日須已收盤才能證明本月覆蓋。
+ // 保留 sweep 的交易日期（包括跨年），不讓盤中時間與收盤 fixture 自相矛盾。
+ t.mock.timers.enable({apis:['Date'],now:Date.parse(`${today.slice(0,4)}-${today.slice(4,6)}-${today.slice(6,8)}T14:00:00+08:00`)});
  const removers=[...fundamentalsRoutes({}),
    {match:/exchangeReport\/FMTQIK/,reply:[{Date:rocCompact(yesterday)},{Date:rocCompact(today)}]},
+   {match:/rwd\/zh\/afterTrading\/FMTQIK/,reply:url=>({stat:'OK',data:[yesterday,today]
+     .filter(day=>day.slice(0,6)===url.searchParams.get('date')?.slice(0,6))
+     .map(day=>[`${Number(day.slice(0,4))-1911}/${day.slice(4,6)}/${day.slice(6,8)}`])})},
    {match:/holidaySchedule/,reply:[]}].map(route=>mock.override(route));
  try {
   const db=await mod.loadDb();const identity=mod.currentVerificationIdentity('swing');
@@ -66,7 +72,7 @@ test('I2：相同selection但不支援evaluation/entry/return的現代pending不
   const entries=variants.map(over=>({...base,identity:{...identity,...over}}));
   db.swingVerification={[yesterday]:[...structuredClone(entries),{...base}]}; db.swingVerificationRetry={};
   await mod.saveDb(db);mod.resetSwingAdvanceKeyForTest();
-  const quote={code:'2330',exchange:'TWSE',rawDate:today,price:111,open:100,high:112,low:99};
+  const quote=mod.normalizeDailyTwse({...stockDayAllRow({code:'2330',close:111}),Date:rocCompact(today),OpeningPrice:'100',HighestPrice:'112',LowestPrice:'99'});
   await mod.advanceSwingVerification({coverageComplete:true,byCode:new Map([['2330',quote]])},today,{riskSets:null});
   const actual=db.swingVerification[yesterday];
   for(let i=0;i<3;i++) {
@@ -76,6 +82,11 @@ test('I2：相同selection但不支援evaluation/entry/return的現代pending不
   }
   assert.equal(actual[3].status,'win','legacy補驗例外仍能用目前觀察算式');
   assert.equal(actual[3].evaluationApplied.kind,'retrospective-legacy-evidence');
+  if(yesterday.slice(0,6)!==today.slice(0,6)) {
+   const evidence=actual[3].evaluationApplied.calendarEvidence;
+   assert.deepEqual(evidence.coveredMonths,[yesterday.slice(0,6),today.slice(0,6)]);
+   assert.equal(evidence.monthEvidence[today.slice(0,6)].coveredThrough,today);
+  }
   const summary=await mod.buildSwingVerificationSummary();
   assert.equal(summary.unavailableCount,3);
   db.swingVerification={[yesterday]:structuredClone(entries)};
@@ -88,5 +99,5 @@ test('I2：相同selection但不支援evaluation/entry/return的現代pending不
   const first=structuredClone(db.swingVerification);
   await mod.advanceSwingVerification({coverageComplete:true,byCode:new Map()},today,{riskSets:null});
   assert.deepEqual(db.swingVerification,first,'重試不改來源證據或新增時間戳');
- } finally {removers.forEach(remove=>remove());}
+ } finally {removers.forEach(remove=>remove());t.mock.timers.reset();}
 });

@@ -1,10 +1,19 @@
 // 上櫃官方歷史除權息表：完整回應、空事件、單位與失敗隔離。
-import test, { before } from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { rm } from 'node:fs/promises';
+import { dirname, basename, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { importServer } from '../helpers/test-server.mjs';
 import { compactTradingDay } from '../helpers/fixtures.mjs';
-let mod, mock;
-before(async () => { ({mod,mock} = await importServer({ routes:[] })); });
+let mod, mock, dataDir;
+before(async () => { ({mod,mock,dataDir} = await importServer({ routes:[] })); });
+after(async () => {
+ await mod.shutdownServer(); mock.restore();
+ assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));
+ assert.ok(basename(dataDir).startsWith('stock1-test-'));
+ await rm(dataDir,{recursive:true,force:true});
+});
 const day = compactTradingDay(-1), from = day.slice(0,6)+'01';
 const fields = ['除權息日期','代號','名稱','除權息前收盤價','除權息參考價','權值','息值','權值+息值','權/息','漲停價','跌停價','開始交易基準價','減除股利參考價','現金股利','每仟股無償配股','現金增資股數','現金增資認購價','公開承銷股數','員工認購股數','原股東認購股數','按持股比例仟股認購'];
 const row = [day,'5488','測試','100','95','0','5','5','除息','104.5','85.5','95','95','5','0','0','0','0','0','0','0'];

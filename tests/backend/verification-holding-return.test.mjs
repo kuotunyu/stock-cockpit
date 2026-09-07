@@ -1,10 +1,19 @@
 // 含息持有貨幣計算：保存原始投入、顯式成本、事件資格與零碎股證據。
-import test, { before } from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { rm } from 'node:fs/promises';
+import { dirname, basename, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { importServer } from '../helpers/test-server.mjs';
 import { compactTradingDay } from '../helpers/fixtures.mjs';
-let mod;
-before(async () => { ({ mod } = await importServer({ routes: [] })); });
+let mod, mock, dataDir;
+before(async () => { ({ mod, mock, dataDir } = await importServer({ routes: [] })); });
+after(async () => {
+ await mod.shutdownServer(); mock.restore();
+ assert.equal(dirname(resolve(dataDir)),resolve(tmpdir()));
+ assert.ok(basename(dataDir).startsWith('stock1-test-'));
+ await rm(dataDir,{recursive:true,force:true});
+});
 const D0 = compactTradingDay(-3), D1 = compactTradingDay(-2), D2 = compactTradingDay(-1), D3 = compactTradingDay(0);
 const initialPosition = { date: D0, price: 100, shares: 1, source: 'explicit-fixture', originalStop: 95 };
 const zero = { model: 'explicit-cash-fees-v1', buyFee: 0, sellFee: 0, tax: 0, source: 'explicit-fixture' };
