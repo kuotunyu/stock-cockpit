@@ -18,6 +18,10 @@ after(async () => {
 });
 
 test("certPath 只接受 certs 目錄內的檔案，DB 只存檔名", async () => {
+  const absent = await srv.api('/api/broker/settings', {method:'POST',body:payload('missing.pfx')});
+  assert.equal(absent.status,400);const absentBody=await absent.json();
+  assert.equal(absentBody.code,'BROKER_CERT_PATH_INVALID');assert.equal(absentBody.error.includes(srv.dataDir),false);
+  assert.match(absentBody.error,/certs/);
   const certs = join(srv.dataDir, "certs");
   await mkdir(certs, { recursive: true });
   await writeFile(join(certs, "me.pfx"), "x");
@@ -37,6 +41,7 @@ test("certPath 只接受 certs 目錄內的檔案，DB 只存檔名", async () =
     assert.equal(res.status, 400, `${JSON.stringify(certPath)} 應 400`);
     const body = await res.json();
     assert.equal(body.code, "BROKER_CERT_PATH_INVALID", `${JSON.stringify(certPath)} 要帶 code，實際：${body.code} ${body.error}`);
+    assert.equal(body.error.includes(srv.dataDir), false, '對外不回絕對資料路徑');
   }
   const status0 = await (await srv.api("/api/broker/settings")).json();
   assert.equal(status0.configured, false, "全部被擋 → 仍未設定");
@@ -53,4 +58,17 @@ test("certPath 只接受 certs 目錄內的檔案，DB 只存檔名", async () =
   const saved = Object.values(db.brokerCredentials)[0];
   const plain = srv.mod.decryptJson(saved.encrypted);
   assert.equal(plain.certPath, "me.pfx", "DB 只存檔名，不存路徑");
+});
+
+test('非預期API錯誤不洩漏路徑或秘密，內部保留安全診斷碼',async()=>{
+  const db=await srv.mod.loadDb(),notes=db.stockNotes;
+  const logs=[],original=console.error;
+  console.error=(...args)=>logs.push(args);
+  db.stockNotes=new Proxy({}, {get(){throw Object.assign(new Error('C:/private/account/cert.pfx password=synthetic-secret'),{code:'EACCES'});}});
+  try {
+    const response=await srv.api('/api/notes?code=2330');const body=await response.json();
+    assert.equal(response.status,500);assert.equal(body.code,'INTERNAL_ERROR');
+    assert.match(body.error,/重試|稍後/);assert.doesNotMatch(JSON.stringify(body),/private|synthetic-secret|EACCES/);
+    assert.equal(logs.length,1);assert.match(JSON.stringify(logs),/EACCES/);assert.doesNotMatch(JSON.stringify(logs),/private|synthetic-secret/);
+  }finally{db.stockNotes=notes;console.error=original;}
 });

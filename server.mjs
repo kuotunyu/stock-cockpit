@@ -1900,17 +1900,17 @@ async function resolveBrokerCertPath(input) {
   try {
     certDirReal = await realpath(brokerCertDir);
   } catch {
-    return { error: `找不到憑證資料夾 ${brokerCertDir}：請建立它、把 .pfx 放進去，再填檔名。` };
+    return { error: "找不到憑證資料夾 .data/certs/：請在伺服器資料目錄建立 certs，把 .pfx 放進去，再填檔名。" };
   }
   let fileReal;
   try {
     fileReal = await realpath(candidate);
   } catch {
-    return { error: `在 ${brokerCertDir} 裡找不到 ${basename(candidate)}。憑證檔必須放在這個資料夾，欄位填檔名即可。` };
+    return { error: "在 .data/certs/ 裡找不到憑證檔。請確認檔案已放到伺服器資料目錄的 certs 資料夾，欄位填檔名即可。" };
   }
   const rel = relative(certDirReal, fileReal);
   if (!rel || rel.startsWith("..") || isAbsolute(rel) || rel.includes(sep) || rel.includes("/")) {
-    return { error: `憑證檔必須直接放在 ${brokerCertDir} 裡（不可在子資料夾或其他位置）。` };
+    return { error: "憑證檔必須直接放在 .data/certs/ 裡（不可在子資料夾或其他位置）。" };
   }
   return { fileName: basename(fileReal) };
 }
@@ -3357,6 +3357,12 @@ function rejectStaleRev(db, userId, key, inputRev, response) {
 
 // 路由用：統一的失敗回應（502=上游抓不到、4xx=客戶端問題）。
 function apiFailure(response, status, error) {
+  if (status === 500) {
+    console.error('[Stock1] API 非預期錯誤', { code: coarsePersistenceErrorCode(error),
+      type: ['Error','TypeError','RangeError','SyntaxError'].includes(error?.name) ? error.name : 'Error' });
+    jsonResponse(response, 500, { ok: false, code: 'INTERNAL_ERROR', error: '服務暫時無法完成請求，請稍後重試；若持續發生，請查看伺服器診斷記錄。' });
+    return;
+  }
   jsonResponse(response, status, {
     ok: false,
     generatedAt: new Date().toISOString(),
@@ -15756,10 +15762,7 @@ const server = createServer(async (request, response) => {
       mutationErrorResponse(response, error, 500);
     }
     else {
-      jsonResponse(response, 500, {
-        ok: false,
-        error: error.message,
-      });
+      apiFailure(response, 500, error);
     }
   }
 });
