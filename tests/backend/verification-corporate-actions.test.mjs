@@ -433,7 +433,8 @@ test("隔日沖驗證：歸檔沒有事件時，價差再大也不可自作主�
 });
 test('隔日新cash模型：手算含息與價格座標並列，未知事件不抹掉其他完整持有結果',async()=>{
   const history=await mod.loadFundamentalsHistory();
-  history.corporateActionResultMonths[D1.slice(0,6)]={status:'ok',rows:2,codes:2,observedAt:new Date().toISOString(),sealed:true};
+  history.corporateActionResultMonths[D1.slice(0,6)]={status:'ok',rows:2,codes:2,observedAt:new Date().toISOString(),sealed:true,
+    monetaryCoverage:{schemaVersion:1,status:'complete',coveredFrom:D0,coveredThrough:D1}};
   const picks=['2882','6488'].map(code=>({code,exchange:'TWSE',price:100,holdingPosition:{date:D0,price:100,shares:1,quantitySource:'normalized-one-share-assumption-v1'}}));
   try {
     const result=await mod.observeSignalSnapshot({asOf:D0,identity:mod.currentVerificationIdentity('overnight'),picks},{

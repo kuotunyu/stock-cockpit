@@ -188,6 +188,8 @@ T05 成績單瀏覽器覆蓋包含隔日新 `cohort`／`captureCoverage`：375�
 
 新 cash identity：`swing-hypothetical-holding-v1`／`overnight-hypothetical-holding-v1`、`initial-notional-flat-0.471pct-v1`、`cash-holding-return`。原價格欄位保留；cash 欄位缺失不能套價格公式補造。`holding-return-render` 驗未知／零／負與模型文字；Chromium `holding-return` 在兩頁四尺寸、100%／200%字體驗模型區域與原生details鍵盤，保留既有價格fixture回歸。固定底部導覽200%重疊仍屬後續手機可及性工作。
 
+`verification-holding-review` 覆蓋 TWSE 貨幣來源的缺表、完整 schema、查詢日期、畸形／重複列、已知截斷及完整空表；原價格月可用章不能替代 `monetaryCoverage`。同時測真 replay／隔日 observe 的不完整公告、重複公告歸檔，以及新 cash entries 保存的價格身份供尾部／次開摘要使用。TWSE 原回應無總筆數欄，無法偵測未宣告的合法 JSON 漏列；已有 sealed 月若缺新完整章會維持 cash unknown，歷史批次重新查詢可取得獨立證據，已結案結果不自動重算。
+
 ```powershell
 node --test tests/backend/verification-holding-return.test.mjs tests/backend/verification-holding-source.test.mjs tests/backend/verification-corporate-actions.test.mjs tests/backend/swing-verify.test.mjs
 ```

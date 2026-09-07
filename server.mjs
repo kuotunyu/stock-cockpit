@@ -5585,6 +5585,39 @@ function corporateActionResultPayloadRows(payload) {
   return Array.isArray(payload?.data) ? payload.data : [];
 }
 
+// 價格來源的舊 usable 章不保證完整負向事件證據；貨幣估值另驗原始回應。
+// TWT49U 無總筆數/分頁欄，無法偵測合法 JSON 中上游未宣告的漏列。
+const TWSE_HOLDING_FIELDS = ['資料日期','股票代號','股票名稱','除權息前收盤價','除權息參考價','權值+息值','權/息','漲停價格','跌停價格','開盤競價基準','減除股利參考價','詳細資料','最近一次申報資料 季別/日期','最近一次申報每股 (單位)淨值','最近一次申報每股 (單位)盈餘'];
+function twseHoldingCoverage(payload, from, through) {
+  const unknown = { status: 'unknown', reason: 'twse-response-incomplete', schemaVersion: 1 };
+  if (String(payload?.stat || '').trim().toUpperCase() !== 'OK' || !Array.isArray(payload.data)
+    || stableJson(payload.fields) !== stableJson(TWSE_HOLDING_FIELDS)
+    || payload.strDate !== from || payload.endDate !== through
+    || payload.partial === true || payload.hasMore === true || payload.nextPage || payload.nextCursor
+    || ['page','pageSize','totalPages','pages'].some(key => key in payload)
+    || ['total','totalCount'].some(key => key in payload && (payload[key] == null || String(payload[key]).trim() === ''
+      || !['number','string'].includes(typeof payload[key]) || Number(payload[key]) !== payload.data.length))) return unknown;
+  const seen = new Set();
+  for (const row of payload.data) {
+    if (!Array.isArray(row) || row.length !== TWSE_HOLDING_FIELDS.length) return unknown;
+    const date = row[0] == null || row[0] === '' ? '' : toCompactDate(row[0]), code = cleanCode(row[1]), key = `${code}:${date}`;
+    if (!isValidCompactCalendarDate(date) || date < from || date > through || !SECURITY_CODE_PATTERN.test(code)
+      || parsePositivePrice(row[3]) === null || parsePositivePrice(row[4]) === null || parseNumber(row[5]) === null
+      || !['除息','除權','除權息'].includes(normalizeDividendKind(row[6])) || seen.has(key)) return unknown;
+    seen.add(key);
+  }
+  return { status: 'complete', schemaVersion: 1, coveredFrom: from,
+    coveredThrough: [through, toTaipeiCompactDate()].sort()[0], rows: payload.data.length,
+    scope: 'official-ex-right-dividend-only', source: 'TWSE-TWT49U', observedAt: new Date().toISOString() };
+}
+function twseHoldingDateCovered(date, batchCoverage = null) {
+  const state = corporateActionResultMonthState(date.slice(0,6));
+  const evidence = batchCoverage ? batchCoverage.get(date.slice(0,6))
+    : corporateActionResultMonthUsable(state) ? state?.monetaryCoverage : null;
+  return evidence?.schemaVersion === 1 && evidence.status === 'complete'
+    && evidence.coveredFrom <= date && date <= evidence.coveredThrough;
+}
+
 async function loadCorporateActionResultMonth(monthCompact) {
   const month = String(monthCompact || "").slice(0, 6);
   if (!/^\d{6}$/.test(month)) return { status: "skipped", rows: 0 };
@@ -5631,6 +5664,7 @@ async function loadCorporateActionResultMonth(monthCompact) {
       }
       history.corporateActionResultMonths[month] = {
         status: "ok",
+        monetaryCoverage: twseHoldingCoverage(payload, start, addDaysCompact(addMonthsCompact(start, 1), -1)),
         rows: rows.length,
         codes: byCode.size,
         observedAt: new Date().toISOString(),
@@ -8681,6 +8715,7 @@ function calculateHoldingOutcome({ initialPosition = {}, exit = {}, events = [],
     const day = holdingDate(event.exDate);
     if (!day || !event.source) { missingReasons.push('event-evidence-missing'); continue; }
     if (event.status === 'withdrawn' || day <= start || day > end) continue;
+    if (event.formulaComplete === false) { missingReasons.push('event-announcement-incomplete'); continue; }
     for (const credit of pendingShares) if (!credit.applied && credit.date < day) { shares += credit.shares; credit.applied = true; }
     if (pendingShares.some(credit => !credit.applied) && !Number.isFinite(event.eligibleShares)) missingReasons.push('event-eligibility-unproven');
     const eligibleShares = Number.isFinite(event.eligibleShares) && event.eligibleShares >= 0 ? event.eligibleShares : shares;
@@ -9803,7 +9838,7 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
         ? tpexHoldingMonth.events.filter(event => event.code === pick.code && event.exDate === observationCompact)
         : holdingActionEvidence(pick.code, observationCompact, Boolean(action));
       const covered = exchange === 'TPEx' ? tpexHoldingMonth?.status === 'complete' && observationCompact <= tpexHoldingMonth.coveredThrough
-        : exchange === 'TWSE' && corporateActionResultMonthCovered(observationCompact);
+        : exchange === 'TWSE' && twseHoldingDateCovered(observationCompact);
       const coverage = evidence.phase !== 'intraday' && covered ? 'complete' : 'unknown';
       holdingOutcomes = Object.fromEntries([['open',bar.open],['close',closeValue]].map(([key,price]) => [key,
         modelHoldingOutcome(pick.holdingPosition, { date: observationCompact, price, source: evidence.source }, events, coverage, verificationIdentity(snapshot).costModelVersion)]));
@@ -12239,7 +12274,7 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
         }
         entry.holdingCoverage ||= [];
         const covered = entry.exchange === 'TPEx' ? monthEvidence?.status === 'complete' && expected <= monthEvidence.coveredThrough
-          : entry.exchange === 'TWSE' && (Boolean(calendar.actionResults) || corporateActionResultMonthCovered(expected));
+          : entry.exchange === 'TWSE' && twseHoldingDateCovered(expected, calendar.actionHoldingCoverage);
         entry.holdingCoverage = entry.holdingCoverage.filter(item => item.date !== expected);
         entry.holdingCoverage.push({ date: expected, status: !row.fromYahoo && covered ? 'complete' : 'unknown',
           scope: 'official-ex-right-dividend-only', source: entry.exchange === 'TPEx' ? 'TPEx-exDailyQ' : 'TWSE-TWT49U-month-coverage',
@@ -12447,6 +12482,7 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
     }
     const riskSets = "riskSets" in options ? options.riskSets : await getRiskSets(targetDate).catch(() => null);
     const actionMonths = new Map();
+    const actionHoldingCoverage = new Map();
     const historicalActions = async (from, through) => {
       const results = new Map();
       for (const month of unique([from.slice(0, 6), through.slice(0, 6)])) {
@@ -12456,6 +12492,7 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
           const payload = await fetchJson(`${CORPORATE_ACTION_RESULT_URL}?startDate=${start}&endDate=${end}&response=json`);
           const rows = corporateActionResultPayloadRows(payload);
           if (rows === null) throw new Error("歷史公司行動來源無法確認");
+          actionHoldingCoverage.set(month, twseHoldingCoverage(payload, start, end));
           return normalizeCorporateActionResultRows(rows);
         })());
         for (const [code, slot] of await actionMonths.get(month)) results.set(code, { ...results.get(code), ...slot });
@@ -12508,6 +12545,7 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
           // 全域歸檔每代號有 40 筆上限；sealed 月份不代表舊事件仍在。
           // 舊月份重查的結果只屬本批，直接傳給 replay，不寫 capped archive、不覆蓋全域快取。
           replayCalendar.actionResults = await historicalActions(from, through);
+          replayCalendar.actionHoldingCoverage = actionHoldingCoverage;
         } catch {
           retry("corporate-action-source-unavailable");
           historyUnavailable += 1;
@@ -12717,6 +12755,7 @@ async function buildSwingVerificationSummary() {
         if (entry.status === "win") bucket.wins += 1;
         s.results.push({
           code: entry.code,
+          priceObservationIdentity: entry.priceObservationIdentity || (isHoldingIdentity(entry) ? null : verificationIdentity(entry)),
           tradeDate: day, regime: regimeBucket(entry.regime),
           status: entry.status,
           resultPct: Number.isFinite(entry.resultPct) ? entry.resultPct : null,
@@ -12731,12 +12770,16 @@ async function buildSwingVerificationSummary() {
       all.push({ day, ...entry });
     }
   }
-  const knownCost = knownPriceCost(modelGroups.find(group => group.modelKey === selectedModelKey)?.identity || {});
   const scenarios = [...byScenario.values()].map((s) => {
     // headline 的分母只算連續競價：處置期間是分盤集合競價，日 K 高低價只是幾十次撮合的極值，
     // 「觸價」判定的前提在那些樣本上不成立，而且處置股要預收款券、觀察用的散戶多半不會做。
     // 計數（resolved／wins／losses／expired）仍是全部，另回 withPeriodicCall 讓含處置股的口徑也看得到。
     const continuous = s.results.filter((item) => !item.periodic);
+    // 這裡只投影保存的價格結果；cash cohort 的身份與費用不適用。
+    const priceIdentities = unique(continuous.map(item => stableJson(item.priceObservationIdentity)));
+    const priceIdentity = priceIdentities.length === 1 && continuous[0]?.priceObservationIdentity
+      ? continuous[0].priceObservationIdentity : verificationIdentity({});
+    const knownCost = knownPriceCost(priceIdentity);
     const valid = continuous.filter(item => Number.isFinite(item.resultPct));
     const cWins = valid.filter((item) => item.status === "win").length;
     const gains = continuous.filter((item) => item.resultPct > 0).reduce((sum, item) => sum + item.resultPct, 0);
@@ -12744,6 +12787,7 @@ async function buildSwingVerificationSummary() {
     const allWins = s.results.filter((item) => item.status === "win").length;
     return {
       scenario: s.scenario,
+      priceObservationIdentity: priceIdentity,
       samples: s.samples,
       wins: s.wins,
       losses: s.losses,
@@ -12757,7 +12801,7 @@ async function buildSwingVerificationSummary() {
       winRateMinSamples: WIN_RATE_MIN_SAMPLES,
       avgResultPct: roundTo(summarizeFiniteMetric(continuous.map(item => item.resultPct)).value),
       avgResultPctNet: knownCost ? netReturnPct(summarizeFiniteMetric(continuous.map(item => item.resultPct)).value) : null,
-      metricCoverage: swingMetricCoverage(continuous.map(item => ({ ...item, status: 'resolved', exitReason: item.status, tradeDate: item.tradeDate })), verificationIdentity(modelEntries.find(entry => verificationModelKey(entry) === selectedModelKey) || {})),
+      metricCoverage: swingMetricCoverage(continuous.map(item => ({ ...item, status: 'resolved', exitReason: item.status, tradeDate: item.tradeDate })), priceIdentity),
       netUnavailableReason: knownCost ? null : "legacy-unknown-cost-model",
       avgDaysHeld: roundTo(summarizeFiniteMetric(continuous.map(item => item.daysHeld)).value, 1),
       // 分佈指標：等權平均會把「一週內 75/88 筆停損」和「平穩小虧」混成同一個數字。
@@ -12802,7 +12846,7 @@ async function buildSwingVerificationSummary() {
         wins: value.wins,
         winRate: valid.filter(item => item.regime === bucket).length >= WIN_RATE_MIN_SAMPLES
           ? roundTo(valid.filter(item => item.regime === bucket && item.status === 'win').length / valid.filter(item => item.regime === bucket).length * 100, 1) : null,
-        metricCoverage: swingMetricCoverage(continuous.filter(item => item.regime === bucket).map(item => ({ ...item, exitReason:item.status, status:'resolved' })), verificationIdentity(modelEntries.find(entry => verificationModelKey(entry) === selectedModelKey) || {})),
+        metricCoverage: swingMetricCoverage(continuous.filter(item => item.regime === bucket).map(item => ({ ...item, exitReason:item.status, status:'resolved' })), priceIdentity),
       }])),
     };
   });
