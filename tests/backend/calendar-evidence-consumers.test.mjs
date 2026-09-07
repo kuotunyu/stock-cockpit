@@ -78,7 +78,7 @@ test('隔日真observation遇到排休衝突，補原月份證據後恢復較早
   recovered=true;t.mock.timers.setTime(Date.now()+6*60*1000);
   const before=mock.calls.length,done=await mod.observeSignalSnapshot(snapshot,{calendar:cal,reference});
   assert.equal(done.observationDate,'2026-10-06');assert.equal(done.complete,true);assert.equal(done.rows[0].currentReturn,-4);
-  assert.equal(done.evidence.calendarEvidencePolicyVersion,'official-session-interval-v1');
+  assert.equal(done.evidence.calendarEvidencePolicyVersion,'official-session-interval-v1');assert.deepEqual(done.evidence.priceSources,['TWSE STOCK_DAY']);
   const months=mock.calls.slice(before).filter(c=>c.url.includes('FMTQIK')).map(c=>new URL(c.url).searchParams.get('date').slice(0,6));assert.deepEqual(months,['202610']);
  }finally{remove();t.mock.timers.reset();}
 });

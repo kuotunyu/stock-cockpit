@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {packCompletedBenchmark,readBenchmarkEvidence} from '../verification-evidence.mjs';
+import {prepareCompletedBenchmark,readBenchmarkEvidence,summarizeBenchmarkCompression} from '../verification-evidence.mjs';
 import {createHash} from 'node:crypto';
 import {readFile,rm} from 'node:fs/promises';
 import {resolve,dirname,basename,join} from 'node:path';
@@ -46,11 +46,11 @@ try {
   const cow=await timed(()=>m.commitDbMutation(draft=>{draft.verificationBenchmarks.cursor='synthetic-diagnostic';}));
   const cold=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',`const t=performance.now();const m=await import(${JSON.stringify(pathToFileURL(SERVER_PATH).href)});const db=await m.loadDb();console.log(JSON.stringify({loadWithImportMs:performance.now()-t,memos:Object.keys(db.verificationBenchmarks.memos).length}));`],{encoding:'utf8',env:{...process.env,PORT:'0',STOCK1_SKIP_LISTEN:'1',DATA_DIR:srv.dataDir}}).trim().split('\n').at(-1));
   const first=await timed(summary),hot=await timed(summary);assert.equal(first.value.flatMap(s=>s.cohorts).length,days*2);
-  return {format,diskBytes:(await readFile(join(srv.dataDir,'stock1-db.json'))).length,resources:Object.fromEntries(['verificationPublications','verificationCaptures','verificationBenchmarks','signalSnapshots','swingVerification'].map(k=>[k,bytes(db[k])])),saveMs:save.ms,cowAtomicMs:cow.ms,...cold,summaryFirstMs:first.ms,summaryRepeatMs:hot.ms};
+  return {format,compression:summarizeBenchmarkCompression(Object.values(db.verificationBenchmarks.memos)),diskBytes:(await readFile(join(srv.dataDir,'stock1-db.json'))).length,resources:Object.fromEntries(['verificationPublications','verificationCaptures','verificationBenchmarks','signalSnapshots','swingVerification'].map(k=>[k,bytes(db[k])])),saveMs:save.ms,cowAtomicMs:cow.ms,...cold,summaryFirstMs:first.ms,summaryRepeatMs:hot.ms};
  }
  const beforeSummary=JSON.stringify(summary()),before=await measure('raw-completed-memos');
  const compression=await timed(()=>{for(const [key,memo]of Object.entries(db.verificationBenchmarks.memos)){
-  const packed=packCompletedBenchmark(memo);assert.deepEqual(readBenchmarkEvidence(packed),readBenchmarkEvidence(memo));
+  const packed=prepareCompletedBenchmark(memo);assert.deepEqual(readBenchmarkEvidence(packed),readBenchmarkEvidence(memo));
   db.verificationBenchmarks.memos[key]=packed;
  }});
  assert.equal(JSON.stringify(summary()),beforeSummary);

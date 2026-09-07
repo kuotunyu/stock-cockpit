@@ -31,6 +31,8 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 
 `verificationBenchmarks` 保存每版完整模型、原 capture/input 指紋、逐檔來源／時間／公司行動與進度，已完成證據不因來源修訂或快取淘汰重算；舊池不回填。成績單先讀已保存進度：隔日視圖最多回傳截至當日最新 260 份正式採集，波段先限制近 90 個日曆日再取最新 260 份，均跨模型選取但按完整模型分組。`benchmarks.window` 明列截止日、實際日期範圍與回傳／可用筆數；窗口外資料仍保留。背景每輪最多一組採集、四檔、三個月，沿用既有月快取與收盤排程續跑；最多 30 次來源呼叫（含逐檔月 K 的一次重試），來源不足保留原因並於 10 分鐘後可再試，不保證短時間補齊所有歷史。指定期間缺 K、官方日曆覆蓋不足、凍結價無法證明官方收盤或與後來月 K 不一致時保持未知，不順延退出日。這套獨立價格觀察不建立同時段指數開盤、含息候選池或完整成交模擬。
 
+新完成 benchmark 經 `prepareCompletedBenchmark` 保存：可壓縮者保留唯一 evidenceBlob；原 evidence 超過 32 MiB 時保留完整 raw/status=complete，另存 `evidenceCompression={status:'skipped-size',codecVersion:1,rawBytes}`。這是 codec 診斷章，不屬財務 identity。舊 raw 不遷移，也不補造略過原因。`summarizeBenchmarkCompression` 只讀 envelope：計數 pending（含尚未完成的 unavailable）、legacyOrUnclassifiedRaw、packed、skippedSize；rawEvidenceBytes 的 knownBytes／knownCount 僅合計已有長度章的資料，unknownCount 明示其餘未量測紀錄，不把未知當成精確總量。packed 讀 blob.rawBytes 而不解壓；格式分類不是來源或 codec 完整性認證，查原證據仍須通過 reader 驗證。32 MiB 是解壓保護，不是保留上限。
+
 官方日曆 v2 保留每月請求起點、取得時間及原始涵蓋上界；跨月前置月份未完整時保持待補，失敗後的舊快取不以本輪時間補蓋完整章。慢請求跨月底以請求起點判定封月，來源時鐘倒退亦不採信。舊版 memo 仍保存但不作 v2 結果，需足夠新證據才完成；既有 24 小時月快取與來源中斷可能延後恢復。明細另顯示原採集模型 identity，跨模型視圖不混淆選股／評估版本。
 
 排程的 `captureStatus` 優先保留首次正式採集，沒有正式清單才讀當日該策略最後的實際嘗試；內容去重的重試另記 `lastAttemptedAt`／`lastAttemptSequence`，不改原採集與發布時間。共用來源尚未齊全另回 `inputStatus`；其失敗或未完成保存為 `strategy: null`／`stage: "reference"`／`canonical: false`，不表示兩策略已開始掃描。只有真的開始且失敗的策略才記採集失敗；驗證推進、尚未開始或已完成的其他策略不受牽連。
@@ -47,3 +49,5 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 缺章保留 `calendarEvidencePending`／`calendar-coverage-unknown`，不跳過交易日；近期跨月和舊 pending 會在既有有界批次內補查原月份，同日恢復不被一次收盤節流鎖住。近期與歷史每組最多核對停住月及下一月；隔日觀察最多同樣兩月，超出範圍保持待補。月快取的失敗重試沿用 5 分鐘，成熟摘要沿既有 90 日視窗逐月取證；不足時精確日數未知，至少 15 個真正官方日期僅證明成熟下界。
 
 此修正維持已知價格／含息 v1 的財務評估、進出場、公司行動與成本定義。已知舊 pending 仍可續驗，未知身份保留原限制，既有 final 不重算。實際波段 advance 的 `evaluationApplied` 記錄來源政策版本、原月份證據與 inputFingerprint，`scope=this-advance-only`，不聲稱過去每一步都已通過新檢查。固定期間 benchmark 的獨立 calendarVersion v2 保持原樣。
+
+隔日 evidence adapter 的 `officialDays` 保留已讀官方月 K 裡、訊號日之後的合格正價格日期集，與精確觀察日 bar 分開；較早日期即使不在稀疏市場日曆內，也不能被排定日成功 bar 蓋掉。direct quote 驗原 TWSE/TPEx OpenAPI 或官方月 K 來源及實際使用的正 OHLC／price，保留原 source；Yahoo 或未具名 fallback 不能重貼成官方 final。MIS 使用獨立、同日且正值的官方 intraday 欄位，仍明示盤中。缺足夠官方來源時待補，恢復後才完成。

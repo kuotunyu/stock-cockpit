@@ -236,7 +236,11 @@ npm run test:browser
 
 `node scripts/verification-diagnostics.mjs 5`（最大 20 日）只建立隔離的離線合成 DB，不讀正式資料、不啟 HTTP。每天 260／240 候選、20／40 訊號，含真 publication、inputEvidence、manifest、issued、完成的隔日 2 列與波段 15 列 benchmark memo；報告各資源與樣本 cohort 大小、相同資料 raw／壓縮後原子保存、COW、真正冷行程載入、摘要重算及官方日曆 loader 冷熱呼叫數。延遲是單次本機量測，不是 SLA；簡化 pick 與固定合成價格不能代表實際策略表現。
 
-`verification-evidence-codec`／`verification-evidence-persistence` 驗 UTF8 無損、SHA256、未知 codec／損壞拒絕、32 MiB 解壓限制、完成 transition 的失敗回滾、queue／epoch、冷啟動與完整 DB 備份還原。只有新完成 memo 自動壓縮；舊 raw memo 不遷移。超過 codec 上限仍完整保留 raw，32 MiB 不是歷史或 cohort 上限。摘要與完成 worker 不需解壓；需查原證據時使用 `readBenchmarkEvidence`，錯誤不能當作缺資料而重算。
+`verification-evidence-codec`／`verification-evidence-persistence`／`verification-compression-diagnostics` 驗 UTF8 無損、SHA256、未知 codec／損壞拒絕、32 MiB 解壓限制、完成 transition 的失敗回滾、queue／epoch、冷啟動與完整 DB 備份還原。只有新完成 memo 自動壓縮；舊 raw memo 不遷移。超過 codec 上限仍完整保留 raw，32 MiB 不是歷史或 cohort 上限。摘要與完成 worker 不需解壓；需查原證據時使用 `readBenchmarkEvidence`，錯誤不能當作缺資料而重算。
 
 `swing-cache-bounds` 驗實際研究 scope 增長、LRU／TTL及場景共用；`notes-ownership` 的 backend／frontend 各驗 A/B/admin 作者與管理權；`broker-settings-guard` 驗對外訊息不洩漏绝對路徑、非預期錯誤安全診斷。鍵盤修改仍需完整 Chromium；DOM 不能代替真實原生按鈕與回焦驗證。
 `calendar-evidence-consumers` 與 `calendar-recent-recovery` 驗不完整跨月的停損／達標差異、相互衝突的官方正證據、完整 stale 月份休市、成熟日期覆蓋、已知 v1 與 unknown/final 邊界；包括真正近期／歷史 runner 及隔日 observation 的缺章→恢復。近期案例不重設 advance key，以同一收盤日第二次 tick 確認可補驗。`getSwingHistoricalCalendar` 仍預設回三欄；需要原章的 consumers 明示 `includeSourceEvidence:true`。日期相關修改另跑受影響測試在跨年與跨月情境，無 UI 變更不需重複 Chromium。
+
+`verification-compression-diagnostics` 另驗真實 >32 MiB 完成 raw、純 pack 原物件不變、完成狀態章 COW 與冷讀 hash，以及公開 1 日診斷的 before/after 聚合。新完成超限保存 skipped-size 章；舊 raw 為 legacy-or-unclassified，不自動遷移。knownBytes／knownCount 與 unknownCount 分開，packed 不 inflate，舊 raw 不為統計序列化。
+
+`observation-source-provenance` 驗較早日僅存在官方月 K 的缺章→恢復、direct quote 原來源與正值、close-only 不冒充 price，以及真 getQuotes 的 Yahoo fallback 不變正式 final；原官方整批恢復與 MIS intraday 各有來源／phase 斷言。

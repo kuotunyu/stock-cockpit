@@ -311,6 +311,7 @@ test("D-01：比率已套用但推進失敗，重跑不可把同一筆事件乘�
 // 現在改由計算結果表的比率（上市）或逐檔月歷史的官方參考價（上櫃）解基準。
 // 觀察日那一列刻意帶 previousClose: 95.5（＝當日收盤），複製上市整批端點的 "0.0000" 哨兵行為。
 // 舊寫法會拿它當基準 → currentReturn 恆為 0；正確答案要來自計算結果表的比率 0.95。
+// byCode fixtures使用normalizeDailyTwse/Tpex的原source/sourceKind；金額與除權息哨兵不變。
 const observeWithMonthSealed = async (picks, byCode) => {
   const history = await mod.loadFundamentalsHistory();
   history.corporateActionResultMonths ||= {};
@@ -336,7 +337,7 @@ test("隔日沖驗證：觀察日是除權息日時，用官方計算結果表�
   const withEvent = await observeWithMonthSealed(
     [{ code: "2882", name: "國泰金", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
     [["2882", {
-      code: "2882", name: "國泰金", exchange: "TWSE", rawDate: D1,
+      code: "2882", name: "國泰金", exchange: "TWSE", source: "TWSE OpenAPI", sourceKind: "daily-close", rawDate: D1,
       // 哨兵：上市整批端點在事件日的 Change 是 "0.0000"，於是 previousClose 等於當日收盤。
       open: 95, high: 96, low: 94.5, price: 95.5, previousClose: 95.5,
     }]],
@@ -358,7 +359,7 @@ test("隔日沖驗證：上櫃走官方逐檔月歷史的參考價換基準價",
   const result = await observeWithMonthSealed(
     [{ code: "5488", name: "松普", exchange: "TPEx", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
     [["5488", {
-      code: "5488", name: "松普", exchange: "TPEx", rawDate: D1,
+      code: "5488", name: "松普", exchange: "TPEx", source: "TPEx OpenAPI", sourceKind: "daily-close", rawDate: D1,
       // 整批端點的哨兵：漲跌欄是中文字串 → parseNumber 回 null → previousClose 也是 null。
       open: 95, high: 96, low: 94.5, price: 95.5, previousClose: null,
     }]],
@@ -378,7 +379,7 @@ test("隔日沖驗證：歸檔漏了但計算結果表有登記，仍要換基�
   const result = await observeWithMonthSealed(
     [{ code: "6488", name: "環球晶", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
     [["6488", {
-      code: "6488", name: "環球晶", exchange: "TWSE", rawDate: D1,
+      code: "6488", name: "環球晶", exchange: "TWSE", source: "TWSE OpenAPI", sourceKind: "daily-close", rawDate: D1,
       open: 95, high: 96, low: 94.5, price: 95.5, previousClose: 95.5,
     }]],
   );
@@ -396,7 +397,7 @@ test("隔日沖驗證：偵測到除權息卻解不出官方比率時，不給�
   const result = await observeWithMonthSealed(
     [{ code: "2412", name: "中華電", exchange: "TWSE", group: "strongContinuation", groupName: "強勢續攻", price: 100 }],
     [["2412", {
-      code: "2412", name: "中華電", exchange: "TWSE", rawDate: D1,
+      code: "2412", name: "中華電", exchange: "TWSE", source: "TWSE OpenAPI", sourceKind: "daily-close", rawDate: D1,
       open: 95, high: 96, low: 94.5, price: 95.5, previousClose: 95.5,
     }]],
   );
@@ -417,7 +418,7 @@ test("隔日沖驗證：歸檔沒有事件時，價差再大也不可自作主�
   }, {
     reference: {
       byCode: new Map([["9999", {
-        code: "9999", name: "測試股", exchange: "TWSE", rawDate: D1,
+        code: "9999", name: "測試股", exchange: "TWSE", source: "TWSE OpenAPI", sourceKind: "daily-close", rawDate: D1,
         open: 103, high: 104, low: 97, price: 102, previousClose: 101,
       }]]),
       warnings: [],
@@ -438,7 +439,7 @@ test('隔日新cash模型：手算含息與價格座標並列，未知事件不�
   const picks=['2882','6488'].map(code=>({code,exchange:'TWSE',price:100,holdingPosition:{date:D0,price:100,shares:1,quantitySource:'normalized-one-share-assumption-v1'}}));
   try {
     const result=await mod.observeSignalSnapshot({asOf:D0,identity:mod.currentVerificationIdentity('overnight'),picks},{
-      reference:{byCode:new Map(picks.map(p=>[p.code,{...p,rawDate:D1,open:100,high:104.5,low:96,price:104.5}])),warnings:[]},calendar});
+      reference:{byCode:new Map(picks.map(p=>[p.code,{...p,source:"TWSE OpenAPI",sourceKind:"daily-close",rawDate:D1,open:100,high:104.5,low:96,price:104.5}])),warnings:[]},calendar});
     assert.equal(result.complete,true);assert.equal(result.rows[0].currentReturn,10);
     assert.equal(result.rows[0].holdingOutcomes.close.netPnl,9.029);
     assert.equal(result.rows[0].holdingOutcomes.open.netPnl,4.529);

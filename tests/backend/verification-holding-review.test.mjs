@@ -77,7 +77,7 @@ test('I1/I2 隔日沖真 observe 共用严格 TWSE 覆蓋與公告完整性，�
     const restore=mock.override({match:/exRight\/TWT49U/,reply:p});await mod.loadCorporateActionResultMonth(month);restore();
     history.dividends['2882'][D1]={kind:'除息',cashDividend:5,stockRatio:0,subscriptionRatio:0,source:'TWSE',formulaComplete};
     const result=await mod.observeSignalSnapshot({asOf:D0,identity:mod.currentVerificationIdentity('overnight'),picks:[pick]},
-      {reference:{byCode:new Map([['2882',{...pick,rawDate:D1,open:100,high:105,low:99,price:104.5}]]),warnings:[]},calendar:{tradingDays:[D0,D1],holidayRows:[],warnings:[]}});
+      {reference:{byCode:new Map([['2882',{...pick,source:"TWSE OpenAPI",sourceKind:"daily-close",rawDate:D1,open:100,high:105,low:99,price:104.5}]]),warnings:[]},calendar:{tradingDays:[D0,D1],holidayRows:[],warnings:[]}});
     assert.equal(result.rows[0].verified,true);assert.equal(result.rows[0].currentReturn,10);
     assert.equal(result.rows[0].holdingOutcomes.close.netPnl,expected);
   }

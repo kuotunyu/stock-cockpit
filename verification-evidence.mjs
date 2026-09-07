@@ -32,3 +32,30 @@ export function readBenchmarkEvidence(memo) {
   return decoded;
  }catch{throw invalid();}
 }
+
+// 只供新完成transition呼叫；舊raw的load/summary不自動套用。
+export function prepareCompletedBenchmark(memo) {
+ if(memo.status!=='complete'||memo.evidenceBlob||isSkippedSize(memo.evidenceCompression))return memo;
+ const packed=packCompletedBenchmark(memo);
+ if(packed!==memo)return packed;
+ return {...memo,evidenceCompression:{status:'skipped-size',codecVersion:1,
+  rawBytes:Buffer.byteLength(JSON.stringify(evidenceOf(memo)),'utf8')}};
+}
+function isSkippedSize(marker) {
+ return marker?.status==='skipped-size'&&marker.codecVersion===1&&Number.isSafeInteger(marker.rawBytes)&&marker.rawBytes>BENCHMARK_EVIDENCE_MAX_BYTES;
+}
+// storage分類不是codec完整性驗證；只讀已保存長度，不inflate或序列化未分類raw。
+export function summarizeBenchmarkCompression(memos) {
+ const counts={pending:0,legacyOrUnclassifiedRaw:0,packed:0,skippedSize:0};
+ const rawEvidenceBytes={knownBytes:0,knownCount:0,unknownCount:0};
+ for(const memo of memos) {
+  let rawBytes=null;
+  if(memo.status!=='complete')counts.pending++;
+  else if(memo.evidenceBlob){counts.packed++;rawBytes=memo.evidenceBlob.rawBytes;}
+  else if(isSkippedSize(memo.evidenceCompression)){counts.skippedSize++;rawBytes=memo.evidenceCompression.rawBytes;}
+  else counts.legacyOrUnclassifiedRaw++;
+  if(Number.isSafeInteger(rawBytes)&&rawBytes>0){rawEvidenceBytes.knownBytes+=rawBytes;rawEvidenceBytes.knownCount++;}
+  else rawEvidenceBytes.unknownCount++;
+ }
+ return {counts,rawEvidenceBytes};
+}

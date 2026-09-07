@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import './portfolio-risk.js';
-import { packCompletedBenchmark } from './verification-evidence.mjs';
+import { prepareCompletedBenchmark } from './verification-evidence.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
@@ -9497,7 +9497,7 @@ async function runVerificationBenchmarkBatch() {
     memo.result=buildMatchedBenchmark({capture:frozen,observations:memo.observations,benchmarkSpec:spec});
   }
   memo.updatedAt=at.toISOString();
-  const storedMemo=packCompletedBenchmark(memo);
+  const storedMemo=prepareCompletedBenchmark(memo);
   const committed = await commitDbMutation(draft=>{
     const current=authoritativeBenchmarkCaptures(draft).find(c=>benchmarkMemoKey(c)===key);
     if(!current || stableJson(draft.verificationBenchmarks?.memos?.[key] || null)!==stableJson(prior || null))return skipDbMutation(false);
@@ -10269,7 +10269,7 @@ async function getOfficialObservationEvidence(quote, signalDate, observationDate
   const observation = toCompactDate(observationDate);
   if (!quote || !signal || !observation) return { status: "missing", bar: null, nextDate: "", source: "" };
   const quoteDate = toCompactDate(quote.rawDate || quote.asOf);
-  if (quoteDate === observation && [quote.open, quote.high, quote.low, quote.price].every(Number.isFinite)) {
+  if (quoteDate === observation && Number.isFinite(quote.price) && quote.price > 0 && officialSessionCandidates([quote]).length) {
     return {
       status: "ok",
       bar: {
@@ -10278,17 +10278,19 @@ async function getOfficialObservationEvidence(quote, signalDate, observationDate
         previousClose: quote.previousClose ?? null,
       },
       nextDate: observation,
-      source: "TWSE/TPEx official daily close",
+      source: quote.source,
+      officialDays: officialSessionCandidates([quote]),
       phase: "final",
     };
   }
   if (!quote.exchange) return { status: "missing", bar: null, nextDate: "", source: "" };
   try {
     const rows = await fetchStockHistoryMonth(quote.code, quote.exchange, addMonthsCompact(observation, 0), quote.name);
+    const officialDays = officialSessionCandidates(rows).filter(row => row.date > signal);
     const next = rows.find((row) => toCompactDate(row.date) > signal);
     const exact = rows.find((row) => toCompactDate(row.date) === observation);
-    if (!exact || ![exact.open, exact.high, exact.low, exact.close].every(Number.isFinite)) {
-      return { status: "missing", bar: null, nextDate: next ? toCompactDate(next.date) : "", source: "official monthly history" };
+    if (!exact || !officialSessionCandidates([exact]).length) {
+      return { status: "missing", bar: null, nextDate: next ? toCompactDate(next.date) : "", officialDays, source: "official monthly history" };
     }
     return {
       status: "ok",
@@ -10297,6 +10299,7 @@ async function getOfficialObservationEvidence(quote, signalDate, observationDate
         previousClose: exact.previousClose ?? null,
       },
       nextDate: observation,
+      officialDays,
       source: exact.source || "official monthly history",
       phase: "final",
     };
@@ -10413,7 +10416,8 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
       const finalExpected = dateCompact < todayCompact || calendar.tradingDays.includes(dateCompact);
       if (!finalExpected && allowIntraday) {
         const intraday = live?.officialIntraday;
-        if (intraday && toCompactDate(intraday.date) === dateCompact) {
+        if (intraday && toCompactDate(intraday.date) === dateCompact
+          && [intraday.open, intraday.high, intraday.low, intraday.current].every(value => Number.isFinite(value) && value > 0)) {
           evidenceByCode.set(code, {
             status: "ok",
             bar: {
@@ -10437,8 +10441,8 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
   };
 
   let evidenceByCode = await collectEvidence(observationCompact);
-  const verifiedOfficialDays = [...evidenceByCode.values()].filter(e=>e.status==='ok' && e.bar?.date===e.nextDate)
-    .map(e=>({date:e.nextDate,source:e.source,status:'ok'}));
+  const verifiedOfficialDays = [...evidenceByCode.values()].flatMap(e=>e.officialDays
+    || (e.status==='ok' && e.bar?.date===e.nextDate ? [{date:e.nextDate,source:e.source,status:'ok'}] : []));
   let refined = resolveNextTradingDate(signalCompact, { ...calendar, verifiedOfficialDays, requireObservedSessions:true });
   if (!refined.date && observationCompact <= todayCompact) {
     // 最多訊號月及下一月；需要更遠期間時保留pending，不一次補抓全部歷史。
