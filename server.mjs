@@ -8383,7 +8383,8 @@ async function buildOvernightSignalsUncached({
     .filter(([, date]) => date < latestDate)
     .map(([exchange]) => (exchange === "TWSE" ? "上市" : "上櫃"));
 
-  const candidates = preselectQuotes(reference, riskSets, latestDate, maxCandidates);
+  const candidates = preselectQuotes(reference, riskSets, latestDate, maxCandidates).map(quote => ({ ...quote }));
+  const candidatePool = freezeVerificationCandidates(candidates, reference);
   const companyDirectory = await getCompanyDirectory();
   const issuedShares = companyDirectory.issuedShares;
   // 卡片旁的「近 30 日回測」是歷史統計，必須跑在還原權息後的序列上，
@@ -8395,7 +8396,7 @@ async function buildOvernightSignalsUncached({
   ]);
   const unresolvedToday = [];
   const inputEvidence = [];
-  const enriched = await mapLimit(candidates, 3, async (quote) => {
+  const enriched = await mapLimit(candidates, 3, async (quote, index) => {
     const failedMonths = [];
     const sourceEvidence = {};
     let history = await getStockHistory(quote, latestDate, 4, {
@@ -8405,7 +8406,7 @@ async function buildOvernightSignalsUncached({
       fallbackRange: "1y",
     });
     history = appendTodayCloseBar(history, quote, latestDate);
-    const evidence = { code: quote.code, exchange: quote.exchange, price: quote.price, sourceEvidence,
+    const evidence = { ...candidatePool[index], sourceEvidence,
       sourceAsOf: quote.asOf || null, outcome: 'data-insufficient', failedMonths: failedMonths.map(item => item.month),
       historyFingerprint: createHash('sha256').update(stableJson(history.map(({observedAt,...row}) => row))).digest('hex'),
       observedAt: history.map(row => row.observedAt).filter(Boolean).sort().at(-1) || null };
@@ -8432,7 +8433,10 @@ async function buildOvernightSignalsUncached({
     }
     const adjustedHistory = backAdjustForCorporateActions(history, officialActions, adjustOptions);
     const metrics = computeMetrics(adjustedHistory);
-    if (!metrics || toCompactDate(metrics.date) !== latestDate) return [];
+    if (!metrics || toCompactDate(metrics.date) !== latestDate) {
+      evidence.reason = metrics ? 'history-stale' : 'history-insufficient';
+      return [];
+    }
     evidence.outcome = "condition-not-met";
     metrics.turnover = computeTurnoverPct(metrics.volumeLots, issuedShares.get(metrics.code) ?? NaN);
     // 訊號日本身就是事件日時，畫面上的漲跌幅是相對參考價算的，要說出來——
@@ -8482,7 +8486,7 @@ async function buildOvernightSignalsUncached({
     candidateCount: candidates.length,
     surveillanceCount: picks.filter((p) => p.surveillance).length,
     provisional: !reference.coverageComplete || !scanQuality.reliable,
-    requestScope: { maxCandidates, maxPerGroup }, sourceTimes: sourceTimesFor(reference), inputEvidence, scanQuality,
+    requestScope: { maxCandidates, maxPerGroup }, sourceTimes: sourceTimesFor(reference), candidatePool, inputEvidence, scanQuality,
     coverage: {
       complete: Boolean(reference.coverageComplete),
       markets: reference.markets,
@@ -8595,6 +8599,193 @@ function sourceTimesFor(reference) {
   }]));
 }
 
+// 在 preselection 當下固定來源、原價與順位，不能從非同步完成次序或顯示榜單重建。
+function freezeVerificationCandidates(candidates, reference) {
+  return candidates.map((quote, index) => Object.freeze({
+    code: quote.code, exchange: quote.exchange, candidateRank: index + 1,
+    price: Number.isFinite(quote.price) ? quote.price : null,
+    source: quote.source || null, sourceAsOf: quote.asOf || null,
+    observedAt: reference.markets?.[quote.exchange === 'TWSE' ? 'twse' : 'tpex']?.fetchedAt || null,
+  }));
+}
+
+function verificationScanAccounting(body, tradeDate) {
+  const candidates = body.candidatePool || null;
+  const outcomes = body.inputEvidence || [];
+  const keys = candidates?.map(item => `${item.exchange}:${item.code}`) || [];
+  const terminal = candidates !== null && candidates.length === body.scanQuality?.candidateCount
+    && new Set(keys).size === keys.length && candidates.every((item, index) => item.candidateRank === index + 1
+      && Number.isFinite(item.price) && item.price > 0 && item.source && toCompactDate(item.sourceAsOf || '') === toCompactDate(tradeDate))
+    && outcomes.length === candidates.length && outcomes.every(item => keys.includes(`${item.exchange}:${item.code}`)
+      && item.outcome && item.outcome !== 'scan-incomplete')
+    && new Set(outcomes.map(item => `${item.exchange}:${item.code}`)).size === keys.length;
+  const markets = body.coverage?.markets || {};
+  const marketsComplete = ['twse', 'tpex'].every(key => toCompactDate(markets[key]?.asOf || '') === toCompactDate(tradeDate));
+  const allFailed = outcomes.length > 0 && outcomes.every(item => item.outcome === 'source-error'
+    || (item.sourceEvidence?.official?.length > 0 && item.sourceEvidence.official.every(source => source.status === 'failed')
+      && !['success', 'confirmed-empty'].includes(item.sourceEvidence.fallback?.status)));
+  return { terminal, marketsComplete, allFailed };
+}
+
+function buildCaptureManifest({ capture, body }) {
+  const candidates = cloneJson(body.candidatePool || null);
+  const outcomes = cloneJson(body.inputEvidence || []);
+  const { terminal, marketsComplete, allFailed } = verificationScanAccounting(body, capture.tradeDate);
+  const complete = capture.complete && terminal && marketsComplete && !allFailed;
+  return {
+    manifestVersion: 1, captureId: capture.captureId, strategy: capture.strategy, tradeDate: capture.tradeDate,
+    kind: capture.kind, identity: cloneJson(capture.identity), revision: capture.revision,
+    requestScope: cloneJson(capture.requestScope), canonical: stableJson(capture.requestScope) === stableJson(canonicalVerificationScope(capture.strategy)),
+    inputFingerprint: capture.inputFingerprint, capturedAt: body.generatedAt || null,
+    publicationStartedAt: capture.publicationStartedAt, publishedAt: capture.publishedAt,
+    sourceTimes: cloneJson(capture.sourceTimes), coverage: cloneJson(capture.coverage), scanQuality: cloneJson(capture.scanQuality),
+    status: allFailed ? 'failed' : complete ? (capture.signals.length ? 'complete' : 'complete-zero') : 'incomplete',
+    fullRecord: complete, degraded: capture.degraded, candidates, outcomes,
+    populationModels: (capture.strategy === 'swing' ? [false, true] : [false]).map(nextOpen => {
+      const identity = issuedVerificationIdentity(capture, nextOpen);
+      return { identity, modelKey: verificationModelKey(identity), ...(nextOpen ? { resultBasis: 'original-close-observation-exit-and-window' } : {}) };
+    }),
+    missingReasons: [...(!candidates ? ['candidate-pool-not-recorded'] : []), ...(!terminal ? ['terminal-accounting-incomplete'] : []), ...(!marketsComplete ? ['market-dates-incomplete'] : [])],
+    // 訊號與驗證單分層：即使鎖死無法建立驗證單，issued identity 仍先保留。
+    issued: capture.kind === 'formal' && complete ? [...new Map(capture.signals.map(signal => [signal.signalId, {
+      signalId: signal.signalId, code: signal.code, exchange: signal.exchange || null,
+      scenario: signal.group || signal.scenario?.key || 'unknown', fillRisk: signal.fillRisk || null,
+    }])).values()] : [],
+  };
+}
+
+function summarizeCaptureCoverage(manifests, expectedDates = [], { fromDate = '', asOf = '' } = {}) {
+  const canonical = manifests.filter(item => item.canonical);
+  const fullRecordStartDate = canonical.filter(item => item.fullRecord && item.kind === 'formal').map(item => item.tradeDate).sort()[0] || null;
+  const dates = unique([...expectedDates.map(day => compactToIsoDate(toCompactDate(day))),
+    ...canonical.filter(item => item.kind === 'formal' || item.status === 'not-captured').map(item => item.tradeDate)])
+    .filter(day => fullRecordStartDate && day >= fullRecordStartDate && (!fromDate || toCompactDate(day) >= toCompactDate(fromDate))
+      && (!asOf || toCompactDate(day) <= toCompactDate(asOf))).sort();
+  const days = dates.map(tradeDate => {
+    const matches = canonical.filter(item => item.tradeDate === tradeDate);
+    const item = matches.find(m => m.kind === 'formal') || matches.filter(m => m.status !== 'not-captured')
+      .sort((a,b) => String(b.capturedAt || '').localeCompare(String(a.capturedAt || '')) || (b.revision || 0) - (a.revision || 0))[0] || matches[0];
+    return { tradeDate, status: item?.status || 'not-captured', captureId: item?.captureId || null,
+      capturedAt: item?.capturedAt || null, discoveredAt: item?.discoveredAt || null, degraded: item?.degraded || false };
+  });
+  const completeCount = days.filter(day => ['complete', 'complete-zero'].includes(day.status)).length;
+  return { fullRecordStartDate, expectedCount: dates.length, completeCount,
+    coverageRate: dates.length ? roundTo(completeCount / dates.length * 100) : null,
+    days, attempts: canonical.filter(item => item.kind !== 'formal' && item.status !== 'not-captured')
+      .map(item => ({ tradeDate: item.tradeDate, status: item.status, capturedAt: item.capturedAt || null, captureId: item.captureId || null })),
+    reason: fullRecordStartDate ? null : 'full-record-not-started' };
+}
+
+function recordCaptureGaps(db, strategy, expectedDates, discoveredAt = new Date().toISOString()) {
+  const manifests = Object.values(db.verificationCaptures || {}).filter(item => item.strategy === strategy);
+  const start = summarizeCaptureCoverage(manifests).fullRecordStartDate;
+  if (!start) return false;
+  let changed = false;
+  for (const value of expectedDates) {
+    const tradeDate = compactToIsoDate(toCompactDate(value));
+    if (tradeDate < start || manifests.some(item => item.canonical && item.tradeDate === tradeDate)) continue;
+    // T03已有發布但欠完整manifest，不能說當日沒採集，也不能補建舊候選池。
+    if (Object.values(db.verificationPublications?.captures || {}).some(item => item.strategy === strategy && item.tradeDate === tradeDate && item.kind === 'formal')) continue;
+    const key = `not-captured:${strategy}:${tradeDate}`;
+    if (db.verificationCaptures[key]) continue;
+    db.verificationCaptures[key] = { captureId: null, strategy, tradeDate, status: 'not-captured',
+      canonical: true, fullRecord: false, capturedAt: null, discoveredAt, revision: 0 };
+    changed = true;
+  }
+  return changed;
+}
+
+function recordCaptureAttempt(db, strategy, day, { status, reason, coverage = null, attemptedAt = new Date().toISOString() }) {
+  const tradeDate = compactToIsoDate(toCompactDate(day));
+  const attemptId = createHash('sha256').update(stableJson({ strategy, tradeDate, status, reason, coverage: verificationInputContent(coverage) })).digest('hex');
+  db.verificationCaptures ||= {};
+  if (db.verificationCaptures[attemptId]) return false;
+  db.verificationCaptures[attemptId] = { attemptId, captureId: null, strategy, tradeDate, status, reason, coverage: cloneJson(coverage),
+    canonical: true, fullRecord: false, capturedAt: attemptedAt, revision: 0 };
+  return true;
+}
+
+async function verificationMeasurementSummary(strategy, calendar = null) {
+  let db = await loadDb();
+  const now = new Date(); const today = toTaipeiCompactDate(now);
+  const taipei = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  const lastClosed = taipei.getUTCHours() * 60 + taipei.getUTCMinutes() >= 13 * 60 + 35 ? today : addDaysCompact(today, -1);
+  const fromDate = strategy === 'swing' ? addDaysCompact(today, -90)
+    : toCompactDate(authoritativeOvernightSnapshots(db).slice(-OVERNIGHT_SNAPSHOT_LIMIT)[0]?.asOf || today);
+  const started = Object.values(db.verificationCaptures || {}).some(m => m.strategy === strategy && m.kind === 'formal' && m.fullRecord);
+  if (!calendar && started) calendar = await getTradingCalendarEvidence();
+  // 僅使用已確認的官方交易日；不以週一至週五或今天候選池回建未採集日。
+  const expectedDates = (calendar?.tradingDays || []).filter(day => day >= fromDate && day <= lastClosed);
+  if (started && expectedDates.length) await commitDbMutation(draft => recordCaptureGaps(draft, strategy, expectedDates) ? true : skipDbMutation(false));
+  db = cloneJson(await loadDb());
+  const manifests = Object.values(db.verificationCaptures || {}).filter(m => m.strategy === strategy);
+  for (const capture of Object.values(db.verificationPublications?.captures || {})) {
+    if (capture.strategy === strategy && capture.kind === 'formal' && !db.verificationCaptures?.[capture.captureId]) {
+      manifests.push({ captureId: capture.captureId, tradeDate: capture.tradeDate, canonical: true, kind: 'formal', status: 'legacy-unknown', fullRecord: false });
+    }
+  }
+  return { db, captureCoverage: { ...summarizeCaptureCoverage(manifests, expectedDates, { fromDate, asOf: lastClosed }),
+    expectedDateSource: calendar?.sources?.sessions?.status || 'unavailable',
+    expectedDateReason: calendar?.tradingDays?.length ? 'official-session-dates-only' : 'expected-trading-dates-unavailable' },
+    population: summarizeVerificationPopulation(db, strategy, { asOf: today, fromDate }) };
+}
+
+function issuedVerificationIdentity(capture, nextOpen = false) {
+  return { ...verificationIdentity(capture), cohortPolicyVersion: 'first-canonical-issued-manifest-v1',
+    ...(nextOpen ? { entryModel: 'next-open-price-observation', evaluationVersion: 'swing-next-open-price-observation-v1' } : {}) };
+}
+
+// 只投影同一份已提交DB；沒有另一套狀態寫入器，時間補證與T02補驗不會互相覆蓋。
+function summarizeVerificationPopulation(db, strategy, { asOf = toTaipeiCompactDate(), fromDate = '' } = {}) {
+  const models = new Map();
+  const manifests = Object.values(db.verificationCaptures || {}).filter(m => m.strategy === strategy && m.kind === 'formal' && m.fullRecord
+    && (!fromDate || toCompactDate(m.tradeDate) >= toCompactDate(fromDate)) && toCompactDate(m.tradeDate) <= toCompactDate(asOf));
+  for (const manifest of manifests) {
+    const capture = db.verificationPublications?.captures?.[manifest.captureId];
+    if (!capture || db.verificationPublications.current[capture.publicationKey] !== capture.captureId) continue;
+    for (const declaration of manifest.populationModels || []) {
+      const { identity, modelKey } = declaration;
+      const nextOpen = identity.entryModel === 'next-open-price-observation';
+      if (!models.has(modelKey)) models.set(modelKey, { modelKey, identity, issued: 0, noEntry: 0, pending: 0, resolved: 0, unresolved: 0, rows: [],
+        ...(declaration.resultBasis ? { resultBasis: declaration.resultBasis } : {}) });
+      const model = models.get(modelKey);
+      for (const issued of manifest.issued) {
+        if (model.rows.some(row => row.signalId === issued.signalId)) continue;
+        const entry = strategy === 'swing' ? (db.swingVerification?.[toCompactDate(capture.tradeDate)] || []).find(e => e.signalId === issued.signalId && e.captureId === capture.captureId) : null;
+        const snapshot = strategy === 'overnight' ? (db.signalSnapshots || []).find(s => s.captureId === capture.captureId) : null;
+        const observation = snapshot ? storedObservationFor(snapshot) : null;
+        let status = 'pending'; let reason = 'verification-evidence-pending';
+        if (issued.fillRisk === 'limit-up-locked') { status = 'noEntry'; reason = 'limit-up-locked'; }
+        else if (nextOpen) {
+          const first = entry?.firstObservationDate;
+          const openAt = first ? Date.parse(`${compactToIsoDate(first)}T09:00:00+08:00`) : NaN;
+          const lower = Date.parse(capture.publicationStartedAt); const upper = Date.parse(capture.availableConfirmedAt);
+          if (Number.isFinite(openAt) && lower >= openAt) { status = 'noEntry'; reason = 'late-publication'; }
+          else if (!Number.isFinite(openAt) || !Number.isFinite(upper) || upper >= openAt) reason = 'timing-uncertain';
+          else if (entry.nextOpenSkipped === 'gap') { status = 'noEntry'; reason = 'gap'; }
+          else if (!(Number.isFinite(entry.nextOpen) && entry.nextOpen > 0)) reason = 'next-open-price-missing';
+          else if (entry.status === 'unresolved') { status = 'unresolved'; reason = entry.unresolvedReason || 'administratively-closed'; }
+          else if (['win','loss','expired'].includes(entry.status) && Number.isFinite(entry.resultPctNextOpen)) { status = 'resolved'; reason = null; }
+          else reason = entry.evaluationUnavailable?.reason || entry.verificationRetry?.reason || (entry.dataGap ? 'data-gap' : entry.corporateActionPending ? 'corporate-action-pending' : 'observing');
+        } else if (entry) {
+          if (entry.status === 'unresolved') { status = 'unresolved'; reason = entry.unresolvedReason || 'administratively-closed'; }
+          else if (['win','loss','expired'].includes(entry.status) && Number.isFinite(entry.resultPct)) { status = 'resolved'; reason = null; }
+          else reason = entry.evaluationUnavailable?.reason || entry.verificationRetry?.reason || (entry.dataGap ? 'data-gap' : entry.corporateActionPending ? 'corporate-action-pending' : 'observing');
+        } else if (observation?.rows?.some(row => row.code === issued.code && row.verified) && observation.complete && observation.status === 'final') { status = 'resolved'; reason = null; }
+        model.issued++; model[status]++;
+        model.rows.push({ ...issued, captureId: capture.captureId, tradeDate: capture.tradeDate, status, reason,
+          stalled: status === 'pending' && Boolean(entry && isStalledVerificationEntry(entry, toCompactDate(asOf))),
+          dataGap: status === 'pending' ? entry?.dataGap || null : null,
+          ...(nextOpen ? { priceObservation: { value: Number.isFinite(entry?.resultPctNextOpen) ? entry.resultPctNextOpen : null,
+            reason: Number.isFinite(entry?.resultPctNextOpen) ? null : 'price-observation-pending' } } : {}) });
+      }
+    }
+  }
+  const legacy = strategy === 'swing' ? Object.values(db.swingVerification || {}).flat() : db.signalSnapshots || [];
+  return { models: [...models.values()], legacy: { samples: legacy.filter(item => !db.verificationCaptures?.[item.captureId]?.fullRecord).length,
+    reason: 'issued-and-no-entry-not-recorded' } };
+}
+
 // 必須在 commitDbMutation 的最新 draft 內呼叫；網路工作在 queue 外完成。
 function verificationInputContent(value) {
   if (Array.isArray(value)) return value.map(verificationInputContent);
@@ -8612,7 +8803,8 @@ function publishVerification(db, strategy, body) {
   const key = verificationPublicationKey(strategy, body.asOf, identity.selectionVersion);
   const complete = !body.provisional && body.coverage?.complete === true && body.scanQuality?.reliable === true
     && Number.isInteger(body.scanQuality.candidateCount) && body.scanQuality.candidateCount >= 0
-    && body.scanQuality.completedCount === body.scanQuality.candidateCount && identity.selectionVersion !== 'legacy-unknown';
+    && body.scanQuality.completedCount === body.scanQuality.candidateCount && identity.selectionVersion !== 'legacy-unknown'
+    && (!body.candidatePool || (() => { const a = verificationScanAccounting(body, tradeDate); return a.terminal && a.marketsComplete && !a.allFailed; })());
   const picks = strategy === 'swing' ? (body.picks || []).filter((pick, index, all) =>
     all.slice(0, index).filter(other => other.scenario?.key === pick.scenario?.key).length < 40)
     : Object.values(body.groups || {}).flatMap(group => canonical ? group.slice(0, 20) : group);
@@ -8620,7 +8812,7 @@ function publishVerification(db, strategy, body) {
   const inputFingerprint = createHash('sha256').update(stableJson(verificationInputContent({
     identity, scope, picks, coverage: body.coverage, scanQuality: body.scanQuality,
     warnings: body.warnings || [], regime: body.regime || null,
-    inputEvidence: body.inputEvidence || null,
+    candidatePool: body.candidatePool || null, inputEvidence: body.inputEvidence || null,
   }))).digest('hex');
   db.verificationPublications ||= { captures: {}, current: {} };
   const store = db.verificationPublications;
@@ -8647,6 +8839,8 @@ function publishVerification(db, strategy, body) {
     })).digest('hex') })),
   };
   store.captures[captureId] = capture;
+  db.verificationCaptures ||= {};
+  db.verificationCaptures[captureId] = buildCaptureManifest({ capture, body });
   if (kind === 'formal') {
     store.current[key] = captureId;
     if (strategy === 'swing') {
@@ -8688,6 +8882,7 @@ async function confirmVerificationPublication(publication) {
         }
       };
       fillTiming(capture);
+      if (db.verificationCaptures?.[capture.captureId]) fillTiming(db.verificationCaptures[capture.captureId]);
       for (const signal of capture.signals || []) fillTiming(signal);
       for (const snapshot of db.signalSnapshots || []) {
         if (snapshot.captureId !== capture.captureId) continue;
@@ -9416,6 +9611,7 @@ async function buildVerificationHistory() {
       formulaVersion: OVERNIGHT_FORMULA_VERSION,
       formulaVersions,
       modelGroups: [], selectedModelKey: verificationModelKey(currentVerificationIdentity("overnight")),
+      ...(({ captureCoverage, population }) => ({ captureCoverage, population }))(await verificationMeasurementSummary('overnight')),
       message: "尚未累積訊號快照，每天看一次隔日沖清單就會自動記錄。",
     };
   }
@@ -9523,6 +9719,7 @@ async function buildVerificationHistory() {
     generatedAt,
     formulaVersion: OVERNIGHT_FORMULA_VERSION,
     formulaVersions,
+    ...(({ captureCoverage, population }) => ({ captureCoverage, population }))(await verificationMeasurementSummary('overnight', calendar)),
     records: [...records].reverse(),
     modelGroups, selectedModelKey,
     totals,
@@ -11398,6 +11595,7 @@ function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
   if (!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close) || high <= 0 || low <= 0) return false;
   entry.lastChecked = day;
   entry.daysHeld += 1;
+  if (entry.daysHeld === 1 && entry.captureId) entry.firstObservationDate = day;
   delete entry.dataGap;
   // 「進場＝當日收盤」是刻意的型態邏輯，但訊號要等 13:30 後的整批收盤才算得出來，真實進場多半是
   // 次日開盤。第一根推進時把開盤價記下來，結案時並陳「次日開盤進場」的結果（口徑並陳，不改判定）。
@@ -12016,11 +12214,13 @@ function worstResolvedDay(results) {
 }
 
 async function buildSwingVerificationSummary() {
-  const db = await loadDb();
+  let db = await loadDb();
   const summaryToday = toTaipeiCompactDate();
   await confirmVerificationCaptures(Object.values(selectSwingVerificationWindow(db.swingVerification, { asOf: summaryToday, keepDays: 90 })).flat().map(entry => entry.captureId));
+  const measurement = await verificationMeasurementSummary('swing');
+  db = measurement.db;
   const store = selectSwingVerificationWindow(db.swingVerification, { asOf: summaryToday, keepDays: 90 });
-  const cacheKey = stableJson({ summaryToday, store, model: currentVerificationIdentity('swing') });
+  const cacheKey = stableJson({ summaryToday, store, captures: db.verificationCaptures, model: currentVerificationIdentity('swing') });
   if (swingVerifySummaryCache.value && swingVerifySummaryCache.expiresAt > Date.now() && swingVerifySummaryCache.key === cacheKey) return swingVerifySummaryCache.value;
   const modelEntries = Object.values(store).flat();
   const unavailableCount = modelEntries.filter(entry => entry.status === 'pending' && !supportsSwingEvaluation(entry)).length;
@@ -12174,6 +12374,7 @@ async function buildSwingVerificationSummary() {
     ok: true,
     generatedAt: new Date().toISOString(),
     currentFormulaVersion: SWING_FORMULA_VERSION,
+    captureCoverage: measurement.captureCoverage, population: measurement.population,
     modelGroups, selectedModelKey, unavailableCount,
     formulaVersions: [...versionCounts.values()].sort((a, b) => b.formulaVersion.localeCompare(a.formulaVersion)),
     // 版本作為分層而非排除：headline 只用現版，這裡另給「全版本合併」讓改版不會把累積歸零。
@@ -12232,8 +12433,9 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     getDividendSchedule(),
     loadFundamentalsHistory().then(() => ensureCorporateActionResults(scanFromDate, latestDate)),
   ]);
-  const candidates = preselectSwingQuotes(reference, riskSets, latestDate, maxCandidates);
-  const inputEvidence = candidates.map(quote => ({ code:quote.code,exchange:quote.exchange,price:quote.price,sourceAsOf:quote.asOf || null }));
+  const candidates = preselectSwingQuotes(reference, riskSets, latestDate, maxCandidates).map(quote => ({ ...quote }));
+  const candidatePool = freezeVerificationCandidates(candidates, reference);
+  const inputEvidence = candidatePool.map(item => ({ ...item }));
   // 同時抓取數再調低（5→3）：當月逐檔 K 在高並發下最容易被證交所限流而退回前一交易日，
   // 降併發讓更多檔能抓到「當日」官方收盤（配合上面的嚴格新鮮度過濾，過期的會被剔除而非用錯價）。
   const enriched = await mapLimit(candidates, 3, async (quote,index) => {
@@ -12241,6 +12443,7 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
       // 6 個月歷史：MACD(8,17,9)約 3~4 個月就收斂，6 個月足夠且與技術分析頁一致；
       // 比 9 個月少抓 1/3 的月份端點，明顯降低被證交所限流而漏抓 → 命中更完整、掃描間更穩定。
       let history = await getStockHistory(quote, latestDate, 6, {
+        sourceEvidence: (inputEvidence[index].sourceEvidence = {}), requireSourceSuccess: true,
         allowExternalFallback: true,  // 當月被限流/漏抓時改用 Yahoo 補齊，避免拿到過期歷史
         fallbackMinRows: 60,
         fallbackRange: "1y",
@@ -12380,6 +12583,7 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     formulaVersion: SWING_FORMULA_VERSION,
     requestScope: { maxCandidates, scenarioKey, limit: 40 },
     sourceTimes: sourceTimesFor(reference),
+    candidatePool,
     inputEvidence: inputEvidence.map((evidence,index) => ({ ...evidence, outcome: enriched[index]?.outcome || "scan-incomplete" })),
     scenarios: SWING_SCENARIOS.map((detector) => ({
       key: detector.key,
@@ -12446,6 +12650,9 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
 
   // 半市場或歷史覆蓋不足：可以讓使用者看 provisional 結果，但絕不寫 DB／建立不可回溯的驗證單。
   if (body.provisional || body.coverage?.complete === false) {
+    // 未完成掃描也保存實際嘗試證據；不建立正式訊號或替換current。
+    try { body.publication = await commitDbMutation(db => publishVerification(db, 'swing', body)); }
+    catch { body.publication = { kind: 'not-persisted' }; }
     try {
       const db = await loadDb();
       const existing = db.swingSnapshots?.[snapshotKey];
@@ -14625,17 +14832,30 @@ async function runScheduledCloseTasks(deps = {}) {
   }
   const lastRunDay = useModuleState ? lastScheduledRunDay : deps.lastRunDay;
   const loadDbFn = deps.loadDb || loadDb;
+  const saveAttempt = deps.recordCaptureAttempt || (deps.loadDb ? async () => {} : async (strategy, day, evidence) =>
+    commitDbMutation(db => recordCaptureAttempt(db, strategy, day, evidence) ? true : skipDbMutation(false)));
+  const captureStatusFor = db => Object.fromEntries(['overnight','swing'].map(strategy => {
+    const key = verificationPublicationKey(strategy, today, currentVerificationIdentity(strategy).selectionVersion);
+    const id = db.verificationPublications?.current?.[key];
+    const manifest = db.verificationCaptures?.[id];
+    return [strategy, manifest?.status || (id ? 'legacy-unknown' : 'incomplete')];
+  }));
   try {
     const reference = await (deps.getReferenceData || getReferenceData)();
     const db = await loadDbFn();
     const decision = closeTasksDue({ today, reference, db, lastRunDay });
     const ran = [];
     if (!decision.due) {
+      if (decision.reason === 'reference-not-today') for (const strategy of ['overnight','swing']) {
+        await saveAttempt(strategy, today, { status: 'incomplete', reason: decision.reason,
+          coverage: { complete: Boolean(reference.coverageComplete), markets: reference.markets || {} }, attemptedAt: now.toISOString() });
+      }
       if (useModuleState) {
         schedulerFailures = 0;
         schedulerRetryAt = 0;
       }
-      return { ran, skipped: decision.reason, persisted: false };
+      return { ran, skipped: decision.reason, persisted: false,
+        ...(decision.reason === 'reference-not-today' ? { captureStatus: { overnight: 'incomplete', swing: 'incomplete' } } : {}) };
     }
     if (decision.needOvernight) {
       await (deps.buildOvernightSignals || buildOvernightSignals)({ persistSnapshot: true });
@@ -14652,15 +14872,19 @@ async function runScheduledCloseTasks(deps = {}) {
     }
     // 跑完再看一次 DB：builder 在歷史覆蓋不足時只回 provisional、絕不落盤，這種日子不可標記「今天已跑」，
     // 否則 README 說的「每日收盤後自動凍結」會靜默失敗、當天不再重試。
-    const after = closeTasksDue({ today, reference, db: await loadDbFn(), lastRunDay: "" });
+    const afterDb = await loadDbFn();
+    const after = closeTasksDue({ today, reference, db: afterDb, lastRunDay: "" });
     const persisted = after.due && !after.needOvernight && !after.needSwing;
     if (useModuleState) {
       if (persisted) lastScheduledRunDay = today;
       schedulerFailures = 0;
       schedulerRetryAt = 0;
     }
-    return { ran, skipped: "", persisted };
+    return { ran, skipped: "", persisted, captureStatus: captureStatusFor(afterDb) };
   } catch (error) {
+    // 實際嘗試與正式發布分開保存；失敗紀錄本身落盤失敗不遮蔽原始錯誤。
+    for (const strategy of ['overnight','swing']) await saveAttempt(strategy, today,
+      { status: 'failed', reason: error?.code || 'capture-source-unavailable', attemptedAt: now.toISOString() }).catch(() => {});
     if (useModuleState) {
       schedulerFailures += 1;
       schedulerFailureDay = today;
@@ -14868,6 +15092,7 @@ export {
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
   verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
+  buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
   holidayCalendarCoversYear,
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,

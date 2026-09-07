@@ -134,6 +134,10 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 
 完整枚舉並保留每個候選終端結果後，已有可評估結果的掃描可正式發布並揭露 degraded／coverage；不要求逐檔來源成功率100%。全部候選僅有來源失敗仍不能發布。TWSE STOCK_DAY 已證明的無資料回應（精確中文 stat、numeric total=0、無 data）可確認空月份；超出查詢範圍或未知錯誤不算空資料，這個形狀不外推至 TPEx。
 
+主 DB 的 `verificationCaptures` 與發布共用 captureId、同次提交，保存真正 preselection 當下的候選順位、原價與來源，以及逐檔終端結果和 issued 清單。完整零訊號、未完成、來源失敗與事後發現缺採集分開記錄；候選池不是畫面切片，也不代表全市場。兩套成績單 API 新增 `captureCoverage`／`population`，既有畫面與統計保留。`fullRecordStartDate` 只表示完整格式開始日；覆蓋僅以取得的官方交易日與已有正式紀錄核對，後續缺口仍列出。`not-captured` 保存本次發現時間，不能證明當天伺服器一定沒開；舊 capture 沒有候選證據時維持未知。
+
+新 issued 母體版本為 `first-canonical-issued-manifest-v1`，逐模型滿足 `issued = noEntry + pending + resolved + unresolved`；鎖死與跳空放棄仍保留訊號，缺 K／卡住是 pending 的原因。波段另有 `next-open-price-observation`／`swing-next-open-price-observation-v1`：沿用原收盤觀察的退出事件與窗口，並非獨立交易模擬。提交開始已晚於次一實際交易日開盤才可判晚發布；可讀確認上界在開盤前才可確認時間來得及，跨開盤或未知時間保持 pending。價格觀察值可另列，不能將時間不明的資料算成可進場樣本。過去未記 noEntry 的紀錄不補建新母體。
+
 漏開程式留下的波段 pending 會分批補判：每輪最多 16 組近期與 4 組歷史標的，舊單每次核對停住月份及下一月份的官方交易日、日 K 與公司行動。無法確認市場或來源時保留原因，歷史重試至少間隔 5 分鐘；缺 K 不跳日，來源失敗不冒充已確認缺口。歷史越多，資料檔與備份也會增長，應保留足夠磁碟空間。舊版已刪除、且沒有備份的紀錄無法恢復，不從後來結果反推訊號。新版本累積證據後，不可直接啟動仍會裁剪歷史的舊版；回復前須完整隔離備份並匯出新證據，驗證恢復後再切換。
 
 ---
