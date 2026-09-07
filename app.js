@@ -12190,12 +12190,6 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
-  const swingCard = target.closest(".swing-card[data-swing-code][role=button]");
-  if (!swingCard) return;
-  const nestedControl = target.closest("button, a[href], input, select, textarea, summary, [contenteditable=true], [role=button], [tabindex]");
-  if (nestedControl && nestedControl !== swingCard) return;
-  event.preventDefault();
-  swingCard.click();
 });
 
 document.addEventListener("click", async (event) => {

@@ -115,7 +115,7 @@ test("narrow bottom navigation keeps full accessible names beside its short visu
   assert.ok(items.every((item) => item.wide && item.narrow && item.narrowDecorative === "true"));
 });
 
-test("glossary terms and swing cards provide Enter and Space activation without hijacking nested controls", () => {
+test("glossary terms provide Enter and Space activation", () => {
   const result = json(`(() => {
     const host = document.createElement('div');
     document.body.appendChild(host);
@@ -136,18 +136,9 @@ test("glossary terms and swing cards provide Enter and Space activation without 
     gloss.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
     openGlossaryAtTerm = originalOpenGlossaryAtTerm;
 
-    host.innerHTML = '<article class="swing-card" data-swing-code="2330" role="button" tabindex="0"><strong>台積電</strong><button type="button" data-child>內層按鈕</button></article>';
-    const card = host.querySelector('.swing-card');
-    const child = host.querySelector('[data-child]');
-    let cardClicks = 0;
-    card.click = () => { cardClicks += 1; };
-    card.focus();
-    card.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    card.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
-    child.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     host.remove();
 
-    return { glossSemantics, glossCalls, cardClicks };
+    return { glossSemantics, glossCalls };
   })()`);
 
   assert.deepEqual(result.glossSemantics, {
@@ -160,7 +151,6 @@ test("glossary terms and swing cards provide Enter and Space activation without 
     { term: "量比5", sameTrigger: true },
     { term: "量比5", sameTrigger: true },
   ]);
-  assert.equal(result.cardClicks, 2, "nested native controls must not activate the parent role=button card");
 });
 
 test("visual selection classes stay synchronized with ARIA pressed state", () => {
