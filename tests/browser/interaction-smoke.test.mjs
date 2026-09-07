@@ -92,6 +92,11 @@ test("populated：Tab/Enter/Escape 操作真按鈕、內層提醒不誤開明細
     if (!(await scoreFold.evaluate((node) => node.open))) await scoreFold.locator("summary").click();
     const zoomMeasurements = await fixture.emulateTextZoom(2);
     assert.equal(zoomMeasurements.length, 4);
+    const scrollY = await page.evaluate(() => {
+      window.scrollTo(0, 0);
+      return window.scrollY;
+    });
+    assert.equal(scrollY, 0, "量 viewport 幾何前必須回到頁頂");
     await assertExpectedLayout(page, { width: 375 });
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),

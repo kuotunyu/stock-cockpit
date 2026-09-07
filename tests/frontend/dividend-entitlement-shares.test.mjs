@@ -14,8 +14,20 @@ import assert from "node:assert/strict";
 import { createAppWindow } from "../helpers/dom-harness.mjs";
 
 let app;
+let resolveTradePlans;
+let tradePlansRequested;
 before(async () => {
-  app = await createAppWindow();
+  let markTradePlansRequested;
+  tradePlansRequested = new Promise((resolve) => { markTradePlansRequested = resolve; });
+  const tradePlansResponse = new Promise((resolve) => { resolveTradePlans = resolve; });
+  app = await createAppWindow({
+    fetchRoutes: {
+      "/api/trade-plans": () => {
+        markTradePlansRequested();
+        return tradePlansResponse;
+      },
+    },
+  });
 });
 after(() => app.cleanup());
 
@@ -89,8 +101,8 @@ test("比率缺值或壞值視為 0，不得產生 NaN", () => {
   assert.equal(entitled(), 10000);
 });
 
-test("快速鈕上顯示的股數就是含配股的數字", () => {
-  app.evalIn(`
+test("快速鈕上顯示的股數就是含配股的數字", async () => {
+  const planLoad = app.evalIn(`
     tradesState.records = ${JSON.stringify([buy("b1", 10000, "20230715"), ca("c1", "20240801", 0.1)])};
     tradesState.portfolio = { ok: true, holdings: [{ code: "2881", shares: 11000, avgCost: 100, cost: 1000000 }],
       realized: [], totals: { cost: 1000000, realizedPnl: 0 } };
@@ -100,8 +112,13 @@ test("快速鈕上顯示的股數就是含配股的數字", () => {
       groups: [], strategies: [], spark: [],
       dividend: { exDate: "${EX}", kind: "\\u9664\\u606f", cash: 3.5, isToday: true, daysUntil: 0 } });
     state.watchList = "hold";
+    const pendingPlanLoad = loadHoldingsRiskPlans();
     renderHoldingsPanel();
+    pendingPlanLoad;
   `);
+  await tradePlansRequested;
+  resolveTradePlans({ plans: [], linkEvidence: {}, rev: 0 });
+  await planLoad;
   const shares = app.evalIn(`el.holdingsPanel.querySelector('[data-dividend-quick]')?.dataset.shares`);
   assert.equal(shares, "11000", "按鈕帶的股數要含配股，否則按下去就把少掉的金額寫進帳本");
   const text = app.evalIn(`el.holdingsPanel.textContent`);
