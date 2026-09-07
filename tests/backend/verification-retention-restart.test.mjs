@@ -32,7 +32,15 @@ test("1040 日歷史的 load/save、每日與異地備份、還原後獨立程�
         {code:"2454",status:"win",lastChecked:day,resolvedAt:day,resultPct:10,formulaVersion:"current-fixture"},
       ];
     }
-    const fingerprint=createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+    // T03 冷載入只補 identity；原訊號、觀察結果與重試證據仍逐欄完全不變。
+    const migratedEvidence=structuredClone(evidence);
+    for(const item of [...migratedEvidence.signalSnapshots,...Object.values(migratedEvidence.swingVerification).flat()]) {
+      item.identity={snapshotSchemaVersion:"legacy-unknown",selectionVersion:item.formulaVersion,
+        evaluationVersion:"legacy-unknown",costModelVersion:"legacy-unknown",cohortPolicyVersion:"legacy-unknown",
+        entryModel:"legacy-unknown",returnBasis:"legacy-unknown"};
+    }
+    console.log("RETENTION_METADATA_BYTES:"+JSON.stringify({before:Buffer.byteLength(JSON.stringify(evidence)),after:Buffer.byteLength(JSON.stringify(migratedEvidence))}));
+    const fingerprint=createHash("sha256").update(JSON.stringify(migratedEvidence)).digest("hex");
     const db={users:[{id:"u1",username:"keeper",displayName:"合成",role:"user",passwordHash:"x",passwordSource:"user-set"}],sessions:[],watchLists:{},...evidence};
     await writeFile(join(source,"stock1-db.json"),JSON.stringify(db));
     const restart=async dir=>{
@@ -48,6 +56,10 @@ test("1040 日歷史的 load/save、每日與異地備份、還原後獨立程�
       return actual;
     };
     await restart(source);
+    const originalFields=JSON.parse(await readFile(join(source,"stock1-db.json"),"utf8"));
+    for(const item of [...originalFields.signalSnapshots,...Object.values(originalFields.swingVerification).flat()]) delete item.identity;
+    assert.deepEqual({signalSnapshots:originalFields.signalSnapshots,swingVerification:originalFields.swingVerification,
+      swingVerificationRetry:originalFields.swingVerificationRetry},evidence);
     await restart(source); // 同一 DB 新行程真正重啟，非 module cache 模擬。
     const daily=(await readdir(join(source,"backups"))).find(n=>/^stock1-db-\d{8}\.json$/.test(n));
     assert.ok(daily);

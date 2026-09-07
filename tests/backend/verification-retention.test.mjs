@@ -27,7 +27,7 @@ test("第 261 份隔日沖快照不刪最舊完整觀察", async () => {
   const evidence = { asOf: compactTradingDay(-400), formulaVersion: "legacy-test", picks: [], observed: { phase: "final", marker: "keep" } };
   db.signalSnapshots = [evidence, ...Array.from({ length: 259 }, (_, i) => ({ asOf: compactTradingDay(-i - 2), picks: [] }))];
   await mod.saveDb(db);
-  await mod.saveSignalSnapshot({ asOf: today, groups: { a: [{ code: "2330", price: 100 }] } });
+  await mod.saveSignalSnapshot({ formulaVersion:mod.OVERNIGHT_FORMULA_VERSION, requestScope:{maxCandidates:260,maxPerGroup:20}, coverage:{complete:true}, scanQuality:{candidateCount:0,completedCount:0,reliable:true}, asOf: today, groups: { a: [{ code: "2330", price: 100 }] } });
   assert.equal(db.signalSnapshots.length, 261);
   assert.deepEqual(db.signalSnapshots.find(s => s.asOf === evidence.asOf), evidence);
 });
@@ -122,6 +122,10 @@ test("舊年度跨年 holiday：查原月份、按實際下一交易日結案，
   const result=db.swingVerification[d0][0];
   assert.equal(result.status,"win"); assert.equal(result.resolvedAt,d1);
   assert.equal(result.daysHeld,1); assert.equal(result.dataGap,undefined);
+  assert.equal(result.evaluationApplied.kind,"retrospective-legacy-evidence");
+  assert.equal(result.evaluationApplied.scope,"this-advance-only");
+  assert.equal(result.evaluationApplied.evaluationVersion,mod.currentVerificationIdentity("swing").evaluationVersion);
+  assert.equal(db.swingVerification[old][0].evaluationApplied,undefined);
   assert.equal(db.swingVerification[old][0].status,"win");
   const requests=mock.calls.slice(before).map(c=>new URL(c.url));
   assert.deepEqual(requests.filter(u=>u.pathname.includes("STOCK_DAY")).map(u=>u.searchParams.get("date")).sort(),[from,`${year+1}0101`]);

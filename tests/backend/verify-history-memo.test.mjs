@@ -60,8 +60,12 @@ test("final 且 complete 的觀察結果寫回快照；重建時不再重觀察�
   assert.equal(first.records.find((record) => record.asOf === iso(TODAY)).pending, true);
 
   const stored = (await mod.loadDb()).signalSnapshots;
-  const memo = stored.find((item) => item.asOf === iso(D2)).observed;
+  const memo = stored.find((item) => item.asOf === iso(D2)).observationRevisions[0];
   assert.ok(memo, "complete 的觀察結果要寫回快照");
+  assert.equal(memo.kind, "retrospective-observation");
+  assert.equal(memo.identity.cohortPolicyVersion, "legacy-unknown");
+  assert.equal(memo.identity.evaluationVersion, "overnight-price-observation-v1");
+  assert.equal(stored.find((item) => item.asOf === iso(D2)).observed, undefined);
   assert.equal(memo.complete, true);
   assert.equal(memo.status, "final");
   assert.equal(memo.observationDate, iso(D1));

@@ -14,6 +14,14 @@ const referenceFor = (twse, tpex, coverageComplete = true) => ({
   markets: { twse: { asOf: iso(twse) }, tpex: { asOf: iso(tpex) } },
 });
 
+function withFormal(db) {
+  for (const [strategy,formulaVersion] of [['overnight',mod.OVERNIGHT_FORMULA_VERSION],['swing',mod.SWING_FORMULA_VERSION]]) {
+    mod.publishVerification(db,strategy,{asOf:iso(today),formulaVersion,requestScope:mod.canonicalVerificationScope(strategy),
+      coverage:{complete:true},scanQuality:{candidateCount:0,completedCount:0,reliable:true},groups:{},picks:[]});
+  }
+  return db;
+}
+
 test("closeTasksDue：今天跑過、資料未對齊、覆蓋不完整 → 不跑；兩市場都是今天且缺快照 → 跑並說缺什麼", () => {
   const yesterday = compactTradingDay(-1);
   assert.deepEqual(mod.closeTasksDue({ today, reference: referenceFor(today, today), db: {}, lastRunDay: today }).due, false);
@@ -28,10 +36,10 @@ test("closeTasksDue：今天跑過、資料未對齊、覆蓋不完整 → 不�
   const both = mod.closeTasksDue({
     today,
     reference: referenceFor(today, today),
-    db: {
+    db: withFormal({
       signalSnapshots: [{ asOf: iso(today), formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, picks: [] }],
       swingSnapshots: { [`${today}:all`]: { body: { formulaVersion: mod.SWING_FORMULA_VERSION, provisional: false } } },
-    },
+    }),
     lastRunDay: "",
   });
   assert.deepEqual(both, { due: true, reason: "ok", needOvernight: false, needSwing: false });
@@ -65,10 +73,10 @@ test("runScheduledCloseTasks：缺什麼跑什麼，都有則只推進驗證；�
   assert.deepEqual(calls[1], ["swing"]);
 
   calls.length = 0;
-  result = await mod.runScheduledCloseTasks(deps({
+  result = await mod.runScheduledCloseTasks(deps(withFormal({
     signalSnapshots: [{ asOf: iso(today), formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, picks: [] }],
     swingSnapshots: { [`${today}:all`]: { body: { formulaVersion: mod.SWING_FORMULA_VERSION } } },
-  }));
+  })));
   assert.deepEqual(result, { ran: ["advance"], skipped: "", persisted: true });
   assert.deepEqual(calls, [["advance"]]);
 
@@ -107,10 +115,10 @@ test("provisional 不算已跑：builder 跑完 db 仍缺快照 → persisted=fa
 
 test("真的落盤才標記今天已跑；之後同一天回 already-ran", async () => {
   mod.resetCloseSchedulerStateForTest();
-  const stored = {
+  const stored = withFormal({
     signalSnapshots: [{ asOf: iso(today), formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, picks: [] }],
     swingSnapshots: { [`${today}:all`]: { body: { formulaVersion: mod.SWING_FORMULA_VERSION, provisional: false } } },
-  };
+  });
   let db = {};
   const deps = {
     getReferenceData: async () => referenceFor(today, today),

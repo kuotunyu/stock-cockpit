@@ -69,25 +69,30 @@ const pickOf = (price = 100) => ({
 // 真的要測跨版本的案例照樣可以自己指定（見下面的 overnight-v0-test）。
 async function resetSnapshots(list = []) {
   const db = await mod.loadDb();
+  db.verificationPublications = {captures:{},current:{}};
   db.signalSnapshots = list.map((item) => ({ formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, ...item }));
   await mod.saveDb(db);
   return db;
 }
 
-test("saveSignalSnapshot：首次存檔＋空清單不存", async () => {
+const saveFormal = body => mod.saveSignalSnapshot({ formulaVersion: mod.OVERNIGHT_FORMULA_VERSION,
+  requestScope:{maxCandidates:260,maxPerGroup:20},coverage:{complete:true},
+  scanQuality:{candidateCount:0,completedCount:0,reliable:true,coverageRate:100}, ...body });
+
+test("saveSignalSnapshot：首次存檔＋完整空清單有效", async () => {
   const db = await resetSnapshots();
-  await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { strongContinuation: [pickOf()] } });
+  await saveFormal({ asOf: iso(YESTERDAY), groups: { strongContinuation: [pickOf()] } });
   assert.equal(db.signalSnapshots.length, 1);
   assert.equal(db.signalSnapshots[0].asOf, iso(YESTERDAY));
   assert.equal(db.signalSnapshots[0].formulaVersion, mod.OVERNIGHT_FORMULA_VERSION);
   assert.equal(db.signalSnapshots[0].picks[0].code, "2330");
-  await mod.saveSignalSnapshot({ asOf: iso(TODAY), groups: { strongContinuation: [] } });
-  assert.equal(db.signalSnapshots.length, 1, "沒有 picks 的快照不該存");
+  await saveFormal({ asOf: iso(TODAY), groups: { strongContinuation: [] } });
+  assert.equal(db.signalSnapshots.length, 2, "完整零訊號仍是正式發布");
 });
 
 test("saveSignalSnapshot：市場覆蓋不完整不可落正式快照", async () => {
   const db = await resetSnapshots();
-  await mod.saveSignalSnapshot({
+  await saveFormal({
     asOf: iso(YESTERDAY),
     provisional: true,
     coverage: { complete: false },
@@ -96,15 +101,15 @@ test("saveSignalSnapshot：市場覆蓋不完整不可落正式快照", async ()
   assert.equal(db.signalSnapshots.length, 0, "半市場結果只能顯示，不能成為前向驗證樣本");
 });
 
-test("saveSignalSnapshot：同日快照——較短不覆蓋（半個市場）、較長才覆蓋（補齊後）", async () => {
+test("saveSignalSnapshot：同日快照——較短不覆蓋（半個市場）、較長記更正 revision", async () => {
   const db = await resetSnapshots();
-  await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { a: [pickOf(), { ...pickOf(), code: "1101" }] } });
-  await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { a: [pickOf(999)] } });
+  await saveFormal({ asOf: iso(YESTERDAY), groups: { a: [pickOf(), { ...pickOf(), code: "1101" }] } });
+  await saveFormal({ asOf: iso(YESTERDAY), groups: { a: [pickOf(999)] } });
   assert.equal(db.signalSnapshots[0].picks.length, 2, "較短的新清單不可蓋掉完整版");
   assert.equal(db.signalSnapshots[0].picks[0].price, 100);
-  await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { a: [pickOf(101), { ...pickOf(), code: "1101" }, { ...pickOf(), code: "2454" }] } });
-  assert.equal(db.signalSnapshots[0].picks.length, 3, "較完整的清單要覆蓋");
-  assert.equal(db.signalSnapshots[0].picks[0].price, 101);
+  await saveFormal({ asOf: iso(YESTERDAY), groups: { a: [pickOf(101), { ...pickOf(), code: "1101" }, { ...pickOf(), code: "2454" }] } });
+  assert.equal(db.signalSnapshots[0].picks.length, 2, "首次完整清單不被事後更多檔覆蓋");
+  assert.equal(db.signalSnapshots[0].picks[0].price, 100);
 });
 
 test("saveSignalSnapshot：超過讀取窗口仍完整保留歷史（依訊號日排序）", async () => {
@@ -113,7 +118,7 @@ test("saveSignalSnapshot：超過讀取窗口仍完整保留歷史（依訊號�
     asOf: iso(compactTradingDay(-(limit + 5 - i))), savedAt: "", picks: [pickOf()],
   }));
   const db = await resetSnapshots(seed);
-  await mod.saveSignalSnapshot({ asOf: iso(YESTERDAY), groups: { a: [pickOf()] } });
+  await saveFormal({ asOf: iso(YESTERDAY), groups: { a: [pickOf()] } });
   assert.equal(db.signalSnapshots.length, limit + 1);
   assert.ok(db.signalSnapshots.some((s) => s.asOf === iso(YESTERDAY)), "新的一份要在");
   assert.ok(db.signalSnapshots.some((s) => s.asOf === iso(compactTradingDay(-(limit + 5)))), "最舊的證據仍在");
@@ -121,10 +126,10 @@ test("saveSignalSnapshot：超過讀取窗口仍完整保留歷史（依訊號�
 
 test("saveSignalSnapshot：同日不同公式版本互不覆蓋，舊缺欄位明確視為 v1", async () => {
   const db = await resetSnapshots();
-  await mod.saveSignalSnapshot({
+  await saveFormal({
     asOf: iso(YESTERDAY), formulaVersion: "overnight-v0-test", groups: { a: [pickOf(90)] },
   });
-  await mod.saveSignalSnapshot({
+  await saveFormal({
     asOf: iso(YESTERDAY), formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, groups: { a: [pickOf(100)] },
   });
   assert.equal(db.signalSnapshots.length, 2);

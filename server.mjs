@@ -2329,7 +2329,10 @@ async function loadDbOnce() {
   dbCache.swingSnapshots ||= {};
   dbCache.swingVerification ||= {};
 
-  let changed = recoveredFromCorruption;
+  const migratedVerification = migrateVerificationMetadata({ signalSnapshots: dbCache.signalSnapshots || [], swingVerification: dbCache.swingVerification });
+  const verificationChanged = stableJson(migratedVerification) !== stableJson({ signalSnapshots: dbCache.signalSnapshots || [], swingVerification: dbCache.swingVerification });
+  Object.assign(dbCache, migratedVerification);
+  let changed = recoveredFromCorruption || verificationChanged;
   // 既有 DB 補標 passwordSource：這個欄位是 2026-07-31 才加的，在那之前建立的帳號沒有。
   // 唯一可靠的判準就是實際驗一次 hash——不能用 createdAt === updatedAt 這種啟發式，
   // 那只說明「沒改過任何欄位」，不代表密碼是哪一組。
@@ -4258,6 +4261,8 @@ async function getCompanyDirectory() {
         count: result.value?.count || 0,
         validCount: result.value?.validCount || 0,
         fetchedAt: result.value?.fetchedAt || null,
+        observedAt: result.value?.fetchedAt || null,
+        sourceAsOfPrecision: result.value?.asOf ? "date" : "unknown",
       };
       if (result.status === "stale") {
         warnings.push(`${source.label}公司主檔暫時更新失敗（${result.error}），已沿用最近成功資料。`);
@@ -6026,6 +6031,7 @@ async function fetchStockHistoryMonth(code, exchange, monthCompact, name = "", o
 
     // 當月資料收盤後會新增今天的 K 棒，快取縮短；過去月份不會再變，可以放久一點。
     const now = Date.now();
+    rows = rows.map(row => ({ ...row, observedAt: new Date(now).toISOString() }));
     const isCurrentMonth = String(monthCompact).slice(0, 6) === toTaipeiCompactDate().slice(0, 6);
     for (const [key, entry] of historyCache) if (!entry || entry.expiresAt <= now) historyCache.delete(key);
     historyCache.delete(cacheKey);
@@ -8373,13 +8379,21 @@ async function buildOvernightSignalsUncached({
     ensureCorporateActionResults(compactMonthsBefore(latestDate, CORPORATE_ACTION_RESULT_FALLBACK_MONTHS), latestDate),
   ]);
   const unresolvedToday = [];
+  const inputEvidence = [];
   const enriched = await mapLimit(candidates, 3, async (quote) => {
+    const failedMonths = [];
     let history = await getStockHistory(quote, latestDate, 4, {
+      failedMonths,
       allowExternalFallback: true,
       fallbackMinRows: 60,
       fallbackRange: "1y",
     });
     history = appendTodayCloseBar(history, quote, latestDate);
+    const evidence = { code: quote.code, exchange: quote.exchange, price: quote.price,
+      sourceAsOf: quote.asOf || null, outcome: 'data-insufficient', failedMonths: failedMonths.map(item => item.month),
+      historyFingerprint: createHash('sha256').update(stableJson(history.map(({observedAt,...row}) => row))).digest('hex'),
+      observedAt: history.map(row => row.observedAt).filter(Boolean).sort().at(-1) || null };
+    inputEvidence.push(evidence);
     // 訊號判定與歷史統計都跑在還原權息後的序列上（D-02）。
     // 沒還原時 computeMetrics 的「前一根收盤」是除權息**前**的價格，算出來的是一個機械性
     // 跌幅而不是真實漲跌——同一天同一檔因此有兩個漲跌幅：候選池用交易所口徑的
@@ -8388,6 +8402,8 @@ async function buildOvernightSignalsUncached({
     // 今天那一根本身永遠不會被還原：factor 從 1 起算、事件當根在 factor 更新前就寫入，
     // 所以卡片上的開高低收與成交量仍是真實成交數字（pinned in overnight-back-adjust.test）。
     const officialActions = corporateActionHistoryForCode(quote.code, history[0]?.date, history.at(-1)?.date);
+    evidence.corporateActionsFingerprint = createHash("sha256").update(stableJson(officialActions)).digest("hex");
+    evidence.issuedShares = issuedShares.get(quote.code) ?? null;
     const adjustOptions = { allowHeuristicFallback: isOrdinaryStock(quote) };
     const adjustments = resolveCorporateActionAdjustments(history, officialActions, adjustOptions);
     // 交易所說「今天有事件」但比率算不出來 → 還原不會發生，changePct 就退回機械性跌幅，
@@ -8395,11 +8411,13 @@ async function buildOvernightSignalsUncached({
     // 實測 2026-07-24（260 檔／31,137 根 K）：unresolved 只佔 0.016%，落在訊號日的 0 檔。
     if ((adjustments.unresolvedIndices || []).includes(history.length - 1)) {
       unresolvedToday.push(quote.code);
+      evidence.reason = "corporate-action-unresolved";
       return [];
     }
     const adjustedHistory = backAdjustForCorporateActions(history, officialActions, adjustOptions);
     const metrics = computeMetrics(adjustedHistory);
     if (!metrics || toCompactDate(metrics.date) !== latestDate) return [];
+    evidence.outcome = "condition-not-met";
     metrics.turnover = computeTurnoverPct(metrics.volumeLots, issuedShares.get(metrics.code) ?? NaN);
     // 訊號日本身就是事件日時，畫面上的漲跌幅是相對參考價算的，要說出來——
     // 使用者對照券商 App 看到的是同一個口徑，但對照「昨天的收盤價」會兜不起來。
@@ -8413,6 +8431,7 @@ async function buildOvernightSignalsUncached({
     const volumeUnknown = (adjustments.shareFactorUnknownIndices || [])
       .some((index) => index >= history.length - 20);
     return evaluateGroups(metrics).map((groupInfo) => {
+      evidence.outcome = "selected";
       const pick = buildPick(metrics, groupInfo, null, summarizeRecentBacktest(adjustedHistory, groupInfo.group, 30));
       if (basisTag) {
         pick.riskTags = [...pick.riskTags, basisTag];
@@ -8427,6 +8446,12 @@ async function buildOvernightSignalsUncached({
   // 注意/處置/變更交易股保留並標示（前端可切換隱藏）。
   for (const pick of picks) pick.surveillance = riskSets.surveillance.get(pick.code) || null;
   const groups = groupPicks(picks, maxPerGroup);
+  inputEvidence.sort((a,b) => `${a.exchange}:${a.code}`.localeCompare(`${b.exchange}:${b.code}`));
+  const readyCount = inputEvidence.filter(item => item.outcome !== 'data-insufficient').length;
+  const scanQuality = { candidateCount: candidates.length, completedCount: inputEvidence.length,
+    readyCount, coverageRate: candidates.length ? roundTo(readyCount / candidates.length * 100) : 100,
+    reliable: inputEvidence.length === candidates.length && (!candidates.length || readyCount > 0 || inputEvidence.some(item => !item.failedMonths.length)),
+    corporateActionResultsComplete: !corporateActionCoverage?.degraded };
   const body = {
     ok: true,
     generatedAt: new Date().toISOString(),
@@ -8437,7 +8462,8 @@ async function buildOvernightSignalsUncached({
     formulaVersion: OVERNIGHT_FORMULA_VERSION,
     candidateCount: candidates.length,
     surveillanceCount: picks.filter((p) => p.surveillance).length,
-    provisional: !reference.coverageComplete,
+    provisional: !reference.coverageComplete || !scanQuality.reliable,
+    requestScope: { maxCandidates, maxPerGroup }, sourceTimes: sourceTimesFor(reference), inputEvidence, scanQuality,
     coverage: {
       complete: Boolean(reference.coverageComplete),
       markets: reference.markets,
@@ -8464,7 +8490,8 @@ async function buildOvernightSignalsUncached({
   };
 
   if (!dateCompact && persistSnapshot) {
-    await saveSignalSnapshot(body).catch(() => {});
+    try { body.publication = await saveSignalSnapshot(body); }
+    catch { body.publication = { kind: 'not-persisted' }; body.warnings.push('正式隔日沖快照暫時無法儲存，將在下次更新重試。'); }
   }
   return body;
 }
@@ -8477,9 +8504,9 @@ async function buildOvernightSignals({ dateCompact = "", maxPerGroup = 20, maxCa
     .sort()
     .at(-1);
   const shouldPersistSnapshot = !dateCompact && persistSnapshot;
-  const cacheKey = `${latestDate}:${maxPerGroup}:${maxCandidates}:${shouldPersistSnapshot ? "persist" : "read"}`;
+  const cacheKey = `${latestDate}:${maxPerGroup}:${maxCandidates}:${shouldPersistSnapshot ? "persist" : "read"}:${verificationModelKey(currentVerificationIdentity("overnight"))}`;
   const cached = getFreshTtlCacheEntry(overnightCache, cacheKey);
-  if (cached) return cached.value;
+  if (cached) { cached.value = await confirmVerificationBody(cached.value); return cached.value; }
   if (overnightInFlight.has(cacheKey)) return overnightInFlight.get(cacheKey);
 
   const task = buildOvernightSignalsUncached({
@@ -8491,7 +8518,7 @@ async function buildOvernightSignals({ dateCompact = "", maxPerGroup = 20, maxCa
     latestDate,
   }).then((body) => {
     setBoundedDateCache(overnightCache, cacheKey, {
-      expiresAt: Date.now() + (reference.coverageComplete ? 5 * 60 * 1000 : REFERENCE_RETRY_MS),
+      expiresAt: Date.now() + (reference.coverageComplete && body.publication?.kind !== "not-persisted" ? 5 * 60 * 1000 : REFERENCE_RETRY_MS),
       value: body,
     }, OVERNIGHT_CACHE_MAX_ENTRIES);
     return body;
@@ -8502,58 +8529,190 @@ async function buildOvernightSignals({ dateCompact = "", maxPerGroup = 20, maxCa
   return task;
 }
 
+// T03：選股、觀察、成本與母體各自升版；舊證據不能反推當時用的模型。
+function verificationIdentity(input = {}) {
+  const value = input.identity || input;
+  return Object.fromEntries([
+    'snapshotSchemaVersion', 'selectionVersion', 'evaluationVersion', 'costModelVersion',
+    'cohortPolicyVersion', 'entryModel', 'returnBasis',
+  ].map(key => [key, value[key] ?? (key === 'selectionVersion' ? input.formulaVersion : undefined) ?? 'legacy-unknown']));
+}
+
+function verificationModelKey(identity) {
+  return stableJson(verificationIdentity(identity));
+}
+
+function currentVerificationIdentity(strategy) {
+  return verificationIdentity({
+    snapshotSchemaVersion: 2,
+    selectionVersion: strategy === 'swing' ? SWING_FORMULA_VERSION : OVERNIGHT_FORMULA_VERSION,
+    evaluationVersion: strategy === 'swing' ? 'swing-price-observation-v1' : 'overnight-price-observation-v1',
+    costModelVersion: 'flat-round-trip-0.471pct-v1',
+    cohortPolicyVersion: 'first-canonical-publication-v1',
+    entryModel: 'signal-close-observation', returnBasis: 'adjusted-reference-price',
+  });
+}
+
+function migrateVerificationMetadata(input) {
+  const db = cloneJson(input);
+  for (const item of [...(db.signalSnapshots || []), ...Object.values(db.swingVerification || {}).flat()]) {
+    item.identity = verificationIdentity(item);
+    // 舊 observed 的原始證據不改寫；讀取時由 verificationIdentity 明示 unknown。
+  }
+  return db;
+}
+
+function canonicalVerificationScope(strategy) {
+  return strategy === 'swing' ? { maxCandidates: 240, scenarioKey: '', limit: 40 } : { maxCandidates: 260, maxPerGroup: 20 };
+}
+
+function verificationPublicationKey(strategy, asOf, selectionVersion) {
+  return stableJson({ strategy, tradeDate: compactToIsoDate(toCompactDate(asOf)), selectionVersion });
+}
+
+function sourceTimesFor(reference) {
+  return Object.fromEntries(Object.entries(reference.markets || {}).map(([market, value]) => [market, {
+    sourceAsOf: value.asOf || null, precision: value.asOf ? 'date' : 'unknown', observedAt: value.fetchedAt || null,
+  }]));
+}
+
+// 必須在 commitDbMutation 的最新 draft 內呼叫；網路工作在 queue 外完成。
+function verificationInputContent(value) {
+  if (Array.isArray(value)) return value.map(verificationInputContent);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !['observedAt','fetchedAt','generatedAt'].includes(key))
+    .map(([key,item]) => [key, verificationInputContent(item)]));
+}
+
+function publishVerification(db, strategy, body) {
+  const tradeDate = compactToIsoDate(toCompactDate(body.asOf));
+  const scope = cloneJson(body.requestScope || {});
+  const canonical = stableJson(scope) === stableJson(canonicalVerificationScope(strategy));
+  const identity = currentVerificationIdentity(strategy);
+  identity.selectionVersion = body.formulaVersion || 'legacy-unknown';
+  const key = verificationPublicationKey(strategy, body.asOf, identity.selectionVersion);
+  const complete = !body.provisional && body.coverage?.complete === true && body.scanQuality?.reliable === true
+    && Number.isInteger(body.scanQuality.candidateCount) && body.scanQuality.candidateCount >= 0
+    && body.scanQuality.completedCount === body.scanQuality.candidateCount && identity.selectionVersion !== 'legacy-unknown';
+  const picks = strategy === 'swing' ? (body.picks || []).filter((pick, index, all) =>
+    all.slice(0, index).filter(other => other.scenario?.key === pick.scenario?.key).length < 40)
+    : Object.values(body.groups || {}).flatMap(group => canonical ? group.slice(0, 20) : group);
+  // 只對輸入與結果指紋化，計算時刻/取得時刻不會讓相同內容憑空長出新 revision。
+  const inputFingerprint = createHash('sha256').update(stableJson(verificationInputContent({
+    identity, scope, picks, coverage: body.coverage, scanQuality: body.scanQuality,
+    warnings: body.warnings || [], regime: body.regime || null,
+    inputEvidence: body.inputEvidence || null,
+  }))).digest('hex');
+  db.verificationPublications ||= { captures: {}, current: {} };
+  const store = db.verificationPublications;
+  const revisions = Object.values(store.captures).filter(capture => capture.publicationKey === key);
+  const reusable = revisions.find(capture => capture.inputFingerprint === inputFingerprint && capture.complete === complete);
+  if (reusable) return cloneJson(reusable);
+  const revision = revisions.length + 1;
+  const first = store.current[key];
+  const kind = !complete ? 'provisional' : !canonical ? 'research' : first ? 'correction' : 'formal';
+  const publicationStartedAt = new Date().toISOString();
+  const captureId = createHash('sha256').update(stableJson({strategy,tradeDate,selectionVersion:identity.selectionVersion,scope,revision})).digest('hex');
+  const capture = {
+    captureId, publicationKey: key, strategy, tradeDate, identity, modelKey: verificationModelKey(identity),
+    revision, kind, complete, requestScope: scope, inputFingerprint,
+    generatedAt: body.generatedAt || null, publicationStartedAt,
+    publishedAt: null, decisionAvailableAt: null, availableConfirmedAt: null,
+    publicationTimePrecision: 'unknown', timingReason: 'availability-not-confirmed',
+    sourceTimes: cloneJson(body.sourceTimes || {}), coverage: cloneJson(body.coverage || {}),
+    scanQuality: cloneJson(body.scanQuality || {}), warnings: cloneJson(body.warnings || []), regime: cloneJson(body.regime || null),
+    degraded: (body.scanQuality?.coverageRate ?? 100) < 100 || body.scanQuality?.corporateActionResultsComplete === false || Boolean(body.warnings?.length),
+    inputEvidence: cloneJson(body.inputEvidence || null),
+    signals: picks.map(pick => ({ ...cloneJson(pick), signalId: createHash('sha256').update(stableJson({
+      captureId, exchange: pick.exchange || 'legacy-unknown', code: pick.code, group: pick.group || pick.scenario?.key || 'unknown',
+    })).digest('hex') })),
+  };
+  store.captures[captureId] = capture;
+  if (kind === 'formal') {
+    store.current[key] = captureId;
+    if (strategy === 'swing') {
+      recordSwingVerification(db, { ...body, picks: capture.signals, publication: capture });
+    } else {
+      db.signalSnapshots ||= [];
+      db.signalSnapshots.push({ asOf: tradeDate, savedAt: publicationStartedAt, publicationStartedAt, publishedAt: null, decisionAvailableAt: null,
+        formulaVersion: identity.selectionVersion, identity, captureId, inputFingerprint, sourceTimes: capture.sourceTimes,
+        coverage: capture.coverage, regime: body.regime || null, picks: capture.signals });
+      db.signalSnapshots.sort((a,b) => String(a.asOf).localeCompare(String(b.asOf)));
+    }
+  }
+  return cloneJson(capture);
+}
+
+// 首次落盤後才有「此刻已可讀」的上界證據；時間補證不是訊號清單修訂。
+// 只在最新 draft 補空白時間，不能用第一次建立時的 entry 覆蓋已推進結果。
+async function confirmVerificationPublication(publication) {
+  if (publication?.availableConfirmedAt) return publication;
+  const availableConfirmedAt = new Date().toISOString();
+  try {
+    return await commitDbMutation(db => {
+      const capture = db.verificationPublications?.captures?.[publication?.captureId];
+      if (!capture || capture.inputFingerprint !== publication.inputFingerprint) {
+        throw Object.assign(new Error('發布尚未提交或輸入已不同'), { code: 'PUBLICATION_NOT_COMMITTED' });
+      }
+      if (capture.availableConfirmedAt) return skipDbMutation(cloneJson(capture));
+      // 系統時鐘倒退時不能編造上界；保持未知，待真實時間追上下界後再補證。
+      if (Date.parse(availableConfirmedAt) < Date.parse(capture.publicationStartedAt)) return skipDbMutation(cloneJson(capture));
+      const timing = {
+        publicationStartedAt: capture.publicationStartedAt,
+        availableConfirmedAt, publishedAt: availableConfirmedAt, decisionAvailableAt: availableConfirmedAt,
+        publicationTimePrecision: 'confirmed-available-upper-bound', timingReason: null,
+      };
+      const fillTiming = item => {
+        if (item.availableConfirmedAt) return;
+        for (const [key,value] of Object.entries(timing)) {
+          if (item[key] == null || key === 'publicationTimePrecision' || key === 'timingReason') item[key] = value;
+        }
+      };
+      fillTiming(capture);
+      for (const signal of capture.signals || []) fillTiming(signal);
+      for (const snapshot of db.signalSnapshots || []) {
+        if (snapshot.captureId !== capture.captureId) continue;
+        fillTiming(snapshot);
+        for (const signal of snapshot.picks || []) fillTiming(signal);
+      }
+      for (const entries of Object.values(db.swingVerification || {})) {
+        for (const entry of entries) if (entry.captureId === capture.captureId) fillTiming(entry);
+      }
+      for (const snapshot of Object.values(db.swingSnapshots || {})) {
+        if (snapshot.body?.publication?.captureId !== capture.captureId) continue;
+        fillTiming(snapshot.body.publication);
+        for (const signal of snapshot.body.publication.signals || []) fillTiming(signal);
+      }
+      return cloneJson(capture);
+    });
+  } catch (error) {
+    if (error?.code !== 'PERSISTENCE_FAILED') throw error;
+    // 清單本身已成功落盤；補證失敗不撤銷正式身份，也不回傳失敗 draft 的時間。
+    const committed = (await loadDb()).verificationPublications?.captures?.[publication.captureId];
+    return cloneJson(committed);
+  }
+}
+
+async function confirmVerificationCaptures(captureIds) {
+  const db = await loadDb();
+  for (const captureId of new Set(captureIds.filter(Boolean))) {
+    const capture = db.verificationPublications?.captures?.[captureId];
+    if (capture && !capture.availableConfirmedAt) await confirmVerificationPublication(capture);
+  }
+}
+
+async function confirmVerificationBody(body) {
+  if (!body?.publication?.captureId || body.publication.availableConfirmedAt) return body;
+  return { ...body, publication: await confirmVerificationPublication(body.publication) };
+}
+
 // 每天把隔日沖訊號清單存進資料庫，隔天用真實行情驗證表現。
 async function saveSignalSnapshot(body) {
   if (!body?.asOf || !body.groups) return;
-  // 半市場、last-good 或兩市場資料日未對齊的結果可以暫時顯示，但不可成為正式前向驗證樣本。
-  if (body.provisional || body.coverage?.complete === false) return;
-  const picks = Object.values(body.groups)
-    .flat()
-    .map((pick) => ({
-      code: pick.code,
-      name: pick.name,
-      exchange: pick.exchange,
-      group: pick.group,
-      groupName: pick.groupName,
-      score: pick.score,
-      price: pick.price,
-      changePct: pick.changePct,
-  }));
-  if (!picks.length) return;
-  const formulaVersion = String(body.formulaVersion || OVERNIGHT_FORMULA_VERSION);
-  // 建立當天的大盤位階一起存：之後成績單才能分「季線上／下」兩欄。抓不到就 null（成績單歸 unknown）。
   const regime = regimeStamp(await getCurrentRegime(body.asOf));
-  await commitDbMutation((db) => {
-    db.signalSnapshots ||= [];
-    const existing = db.signalSnapshots.find((item) => (
-      item.asOf === body.asOf && overnightSnapshotFormulaVersion(item) === formulaVersion
-    ));
-    if (existing) {
-      const existingComplete = existing.coverage?.complete !== false;
-      const needsVersionMigration = !existing.formulaVersion;
-      // 完整覆蓋優先於檔數；同為完整時才以檔數避免較短重算覆蓋較完整清單。
-      if (existingComplete && picks.length <= existing.picks.length) {
-        if (needsVersionMigration) existing.formulaVersion = LEGACY_OVERNIGHT_FORMULA_VERSION;
-        else return skipDbMutation();
-        return undefined;
-      }
-      existing.picks = picks;
-      existing.savedAt = new Date().toISOString();
-      existing.coverage = body.coverage || { complete: true };
-      existing.formulaVersion = formulaVersion;
-      if (regime && !existing.regime) existing.regime = regime;
-      return undefined;
-    }
-    db.signalSnapshots.push({
-      asOf: body.asOf,
-      savedAt: new Date().toISOString(),
-      coverage: body.coverage || { complete: true },
-      formulaVersion,
-      regime,
-      picks,
-    });
-    db.signalSnapshots.sort((a, b) => String(a.asOf).localeCompare(String(b.asOf)));
-  });
+  const publication = await commitDbMutation(db => publishVerification(db, 'overnight', { ...body, regime }));
+  invalidateVerifyHistoryCacheForTest();
+  return confirmVerificationPublication(publication);
 }
 
 const TRADING_CALENDAR_SOURCES = {
@@ -9096,16 +9255,28 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
 
 // 把每天存下來的訊號快照，逐日對照真實的隔日 OHLC，累積成長期成績單。
 // 快照裡落盤的 final 觀察結果（只有 complete 且同一公式版本的才用；版本一換就整份重觀察）。
-function storedObservationFor(snapshot) {
-  const stored = snapshot?.observed;
-  if (!stored || stored.complete !== true || stored.status !== "final") return null;
-  if (stored.formulaVersion !== overnightSnapshotFormulaVersion(snapshot)) return null;
-  if (!Array.isArray(stored.rows)) return null;
-  return {
-    ...stored,
-    observationPhase: "final",
-    warnings: Array.isArray(stored.warnings) ? stored.warnings : [],
-  };
+function observationIdentityFor(snapshot) {
+  if (snapshot.captureId) return verificationIdentity(snapshot);
+  return { ...currentVerificationIdentity('overnight'), selectionVersion: verificationIdentity(snapshot).selectionVersion,
+    cohortPolicyVersion: 'legacy-unknown' };
+}
+
+function observationInputFingerprint(snapshot) {
+  return snapshot.inputFingerprint || createHash('sha256').update(stableJson({ asOf: snapshot.asOf, picks: snapshot.picks || [] })).digest('hex');
+}
+
+function storedObservationFor(snapshot, expected = null) {
+  const identity = expected || verificationIdentity(snapshot);
+  const candidates = [snapshot?.observed, ...(snapshot?.observationRevisions || [])];
+  for (const stored of candidates) {
+    if (!stored || stored.complete !== true || stored.status !== 'final') continue;
+    if (stored.formulaVersion !== overnightSnapshotFormulaVersion(snapshot)) continue;
+    if (verificationModelKey(identity) !== verificationModelKey(verificationIdentity(stored))) continue;
+    if ((stored.inputFingerprint || null) !== (expected ? observationInputFingerprint(snapshot) : snapshot.inputFingerprint || null)) continue;
+    if (!Array.isArray(stored.rows)) continue;
+    return { ...stored, identity: verificationIdentity(stored), observationPhase: 'final', warnings: Array.isArray(stored.warnings) ? stored.warnings : [] };
+  }
+  return null;
 }
 
 // 寫回快照的精簡版：只留成績單用得到的欄位（不把整個 pick 與證據再存一份）。一次 mutation 寫全部。
@@ -9129,10 +9300,15 @@ async function persistFinalObservations(entries) {
     for (const { snapshot, observed } of entries) {
       const version = overnightSnapshotFormulaVersion(snapshot);
       const item = (Array.isArray(db.signalSnapshots) ? db.signalSnapshots : [])
-        .find((candidate) => candidate.asOf === snapshot.asOf && overnightSnapshotFormulaVersion(candidate) === version);
-      if (!item || item.observed?.complete === true) continue;
-      item.observed = {
+        .find((candidate) => snapshot.captureId ? candidate.captureId === snapshot.captureId
+          : candidate.asOf === snapshot.asOf && overnightSnapshotFormulaVersion(candidate) === version && !candidate.captureId);
+      if (item && observationInputFingerprint(item) !== observationInputFingerprint(snapshot)) continue;
+      if (!item || storedObservationFor(item, observed.identity)) continue;
+      const memo = {
         formulaVersion: version,
+        identity: observed.identity, inputFingerprint: observationInputFingerprint(snapshot),
+        kind: snapshot.captureId ? 'forward-observation' : 'retrospective-observation',
+        computedAt: observed.computedAt || new Date().toISOString(),
         observationDate: observed.observationDate,
         observationCompact: observed.observationCompact,
         observationPhase: "final",
@@ -9143,6 +9319,8 @@ async function persistFinalObservations(entries) {
         warnings: observed.warnings || [],
         evidence: observed.evidence || null,
       };
+      if (snapshot.captureId && !item.observed) item.observed = memo;
+      else (item.observationRevisions ||= []).push({ ...memo, revision: (item.observationRevisions?.length || 0) + 1 });
       changed = true;
     }
     return changed ? true : skipDbMutation(false);
@@ -9159,11 +9337,11 @@ function resetHistoryCacheForTest() {
 
 async function buildVerificationHistory() {
   const now = Date.now();
-  if (verifyHistoryCache.value && verifyHistoryCache.expiresAt > now) {
-    return verifyHistoryCache.value;
-  }
-  const generatedAt = new Date().toISOString();
   const db = await loadDb();
+  await confirmVerificationCaptures((db.signalSnapshots || []).slice(-OVERNIGHT_SNAPSHOT_LIMIT).map(snapshot => snapshot.captureId));
+  const cacheKey = stableJson({day: toTaipeiCompactDate(), model: currentVerificationIdentity('overnight'), snapshots: db.signalSnapshots || []});
+  if (verifyHistoryCache.value && verifyHistoryCache.expiresAt > now && verifyHistoryCache.key === cacheKey) return verifyHistoryCache.value;
+  const generatedAt = new Date().toISOString();
   const allSnapshots = (Array.isArray(db.signalSnapshots) ? db.signalSnapshots : [])
     .slice()
     .sort((a, b) => String(a.asOf).localeCompare(String(b.asOf)));
@@ -9184,6 +9362,7 @@ async function buildVerificationHistory() {
       totals: null,
       formulaVersion: OVERNIGHT_FORMULA_VERSION,
       formulaVersions,
+      modelGroups: [], selectedModelKey: verificationModelKey(currentVerificationIdentity("overnight")),
       message: "尚未累積訊號快照，每天看一次隔日沖清單就會自動記錄。",
     };
   }
@@ -9194,12 +9373,18 @@ async function buildVerificationHistory() {
   const observations = [];
   const finalized = [];
   for (const snapshot of snapshots) {
-    const stored = storedObservationFor(snapshot);
+    const stored = storedObservationFor(snapshot) || storedObservationFor(snapshot, observationIdentityFor(snapshot));
     if (stored) {
       observations.push(stored);
       continue;
     }
-    const observed = await observeSignalSnapshot(snapshot, { allowIntraday: false, reference, calendar });
+    if (snapshot.captureId && verificationModelKey(snapshot) !== verificationModelKey(currentVerificationIdentity('overnight'))) {
+      observations.push({ identity: verificationIdentity(snapshot), status: 'unavailable', complete: false, rows: [], warnings: ['此評估模型目前不支援補算，保留原版本與輸入。'] });
+      continue;
+    }
+    const observed = { ...await observeSignalSnapshot(snapshot, { allowIntraday: false, reference, calendar }),
+      identity: observationIdentityFor(snapshot), computedAt: new Date().toISOString(),
+      kind: snapshot.captureId ? 'forward-observation' : 'retrospective-observation' };
     observations.push(observed);
     if (observed.status === "final" && observed.complete) finalized.push({ snapshot, observed });
   }
@@ -9214,6 +9399,9 @@ async function buildVerificationHistory() {
     return {
       asOf: snapshot.asOf,
       formulaVersion: overnightSnapshotFormulaVersion(snapshot),
+      identity: observed.identity || verificationIdentity(snapshot), modelKey: verificationModelKey(observed.identity || verificationIdentity(snapshot)),
+      captureId: snapshot.captureId || null, inputFingerprint: observationInputFingerprint(snapshot),
+      publishedAt: snapshot.publishedAt || null, kind: observed.kind || (snapshot.captureId ? 'forward-observation' : 'legacy-observation'),
       regime: regimeBucket(snapshot.regime),
       observationDate: observed.observationDate,
       observationPhase: observed.observationPhase,
@@ -9235,7 +9423,14 @@ async function buildVerificationHistory() {
   });
 
   // 長期正式統計只納入「觀察日已收盤且全部訊號都完成」的日子；partial 先顯示、不污染分母。
-  const done = records.filter((record) => record.complete);
+  const currentModelKey = verificationModelKey(currentVerificationIdentity('overnight'));
+  const selectedModelKey = records.some(record => record.modelKey === currentModelKey) ? currentModelKey : records.at(-1)?.modelKey;
+  const modelGroups = [...new Set(records.map(record => record.modelKey))].map(modelKey => ({ modelKey,
+    identity: records.find(record => record.modelKey === modelKey).identity,
+    days: records.filter(record => record.modelKey === modelKey).length,
+    completeDays: records.filter(record => record.modelKey === modelKey && record.complete).length }));
+  const done = records.filter((record) => record.complete && record.modelKey === selectedModelKey);
+  const knownCost = records.find(record => record.modelKey === selectedModelKey)?.identity.costModelVersion === currentVerificationIdentity('overnight').costModelVersion;
   const verifiedTotal = done.reduce((sum, record) => sum + record.verified, 0);
   const weightedAvg = (field) => (verifiedTotal
     ? done.reduce((sum, record) => sum + (record[field] || 0) * record.verified, 0) / verifiedTotal
@@ -9249,9 +9444,10 @@ async function buildVerificationHistory() {
         winAtOpen: done.reduce((sum, record) => sum + record.winAtOpen, 0),
         winAtClose: done.reduce((sum, record) => sum + record.winAtClose, 0),
         avgOpenReturn: weightedAvg("avgOpenReturn"),
-        avgOpenReturnNet: netReturnPct(weightedAvg("avgOpenReturn")),
+        avgOpenReturnNet: knownCost ? netReturnPct(weightedAvg("avgOpenReturn")) : null,
         avgCloseReturn: weightedAvg("avgCloseReturn"),
-        avgCloseReturnNet: netReturnPct(weightedAvg("avgCloseReturn")),
+        avgCloseReturnNet: knownCost ? netReturnPct(weightedAvg("avgCloseReturn")) : null,
+        netUnavailableReason: knownCost ? null : "legacy-unknown-cost-model",
         // 低於 minDays 前端不染色；達到後附以「日」為叢集的 95% 信賴區間，染色看下界。
         minDays: OVERNIGHT_MIN_DAYS,
         ci: {
@@ -9286,6 +9482,7 @@ async function buildVerificationHistory() {
     formulaVersion: OVERNIGHT_FORMULA_VERSION,
     formulaVersions,
     records: [...records].reverse(),
+    modelGroups, selectedModelKey,
     totals,
     warnings: unique(observations.flatMap((observed) => observed.warnings || [])),
     dataQuality: {
@@ -9302,6 +9499,7 @@ async function buildVerificationHistory() {
   };
   const hasPending = records.some((record) => !record.complete);
   verifyHistoryCache = {
+    key: cacheKey,
     expiresAt: now + (hasPending ? 60 * 1000 : 10 * 60 * 1000),
     value: body,
   };
@@ -11053,10 +11251,11 @@ function recordSwingVerification(db, body) {
   db.swingVerification ||= {};
   const list = (db.swingVerification[day] ||= []);
   const bodyVersion = body.formulaVersion || "legacy";
-  const seen = new Set(list.map((entry) => `${entry.code}:${entry.scenario}:${entry.formulaVersion || "legacy"}`));
+  const relevant = list.filter(entry => body.publication ? entry.captureId === body.publication.captureId : !entry.captureId);
+  const seen = new Set(relevant.map((entry) => `${entry.exchange || ""}:${entry.code}:${entry.scenario}:${entry.formulaVersion || "legacy"}`));
   const perScenario = new Map();
   let changed = false;
-  for (const entry of list) {
+  for (const entry of relevant) {
     const scenarioVersion = `${entry.scenario}:${entry.formulaVersion || "legacy"}`;
     perScenario.set(scenarioVersion, (perScenario.get(scenarioVersion) || 0) + 1);
   }
@@ -11064,7 +11263,7 @@ function recordSwingVerification(db, body) {
     const scenario = pick.scenario?.key || "unknown";
     const scenarioVersion = `${scenario}:${bodyVersion}`;
     if ((perScenario.get(scenarioVersion) || 0) >= 40) continue;
-    const key = `${pick.code}:${scenario}:${bodyVersion}`;
+    const key = `${pick.exchange || ""}:${pick.code}:${scenario}:${bodyVersion}`;
     if (seen.has(key)) continue;
     const plan = pick.plan || {};
     if (!Number.isFinite(plan.entry) || !Number.isFinite(plan.structuralStop) || !Number.isFinite(plan.target)) continue;
@@ -11091,6 +11290,12 @@ function recordSwingVerification(db, body) {
       rr: plan.rr ?? null,
       score: pick.score ?? null,
       formulaVersion: bodyVersion,
+      ...(body.publication ? {
+        identity: body.publication.identity, captureId: body.publication.captureId, signalId: pick.signalId,
+        inputFingerprint: body.publication.inputFingerprint, publicationStartedAt: body.publication.publicationStartedAt, publishedAt: body.publication.publishedAt,
+        decisionAvailableAt: body.publication.decisionAvailableAt,
+        originalEntry: plan.entry, originalStop: plan.structuralStop, originalTarget: plan.target,
+      } : {}),
       surveillance,
       fillModel: swingVerificationFillModel(surveillance),
       // 建立當天的大盤位階（只分層、不濾網）；沒抓到就 null → 成績單歸 unknown。
@@ -11626,7 +11831,17 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
         rows = historical ? history : [...history, ...directRows];
       }
       for (const entry of entries) {
+        const beforeEvaluation = stableJson(entry);
         replaySwingVerificationHistory(entry, rows, through, replayCalendar);
+        if (beforeEvaluation !== stableJson(entry)) {
+          entry.evaluationApplied = {
+            evaluationVersion: currentVerificationIdentity('swing').evaluationVersion,
+            evaluatedAt: new Date().toISOString(),
+            kind: entry.captureId ? 'forward-observation' : 'retrospective-legacy-evidence',
+            inputFingerprint: createHash('sha256').update(stableJson(verificationInputContent({ rows, through, calendar: replayCalendar, beforeEvaluation }))).digest('hex'),
+            scope: 'this-advance-only',
+          };
+        }
         if (entry.status !== "pending") delete entry.verificationRetry;
         else entry.verificationRetry = {
           from, through,
@@ -11726,12 +11941,20 @@ function worstResolvedDay(results) {
 }
 
 async function buildSwingVerificationSummary() {
-  if (swingVerifySummaryCache.value && swingVerifySummaryCache.expiresAt > Date.now()) {
-    return swingVerifySummaryCache.value;
-  }
   const db = await loadDb();
   const summaryToday = toTaipeiCompactDate();
+  await confirmVerificationCaptures(Object.values(selectSwingVerificationWindow(db.swingVerification, { asOf: summaryToday, keepDays: 90 })).flat().map(entry => entry.captureId));
   const store = selectSwingVerificationWindow(db.swingVerification, { asOf: summaryToday, keepDays: 90 });
+  const cacheKey = stableJson({ summaryToday, store, model: currentVerificationIdentity('swing') });
+  if (swingVerifySummaryCache.value && swingVerifySummaryCache.expiresAt > Date.now() && swingVerifySummaryCache.key === cacheKey) return swingVerifySummaryCache.value;
+  const modelEntries = Object.values(store).flat();
+  const currentModelKey = verificationModelKey(currentVerificationIdentity('swing'));
+  const matchingEntries = modelEntries.filter(entry => entry.formulaVersion === SWING_FORMULA_VERSION);
+  const selectedModelKey = matchingEntries.some(entry => verificationModelKey(entry) === currentModelKey) ? currentModelKey
+    : matchingEntries.length ? verificationModelKey(matchingEntries.at(-1)) : currentModelKey;
+  const modelGroups = [...new Set(modelEntries.map(entry => verificationModelKey(entry)))].map(modelKey => ({modelKey,
+    identity: verificationIdentity(modelEntries.find(entry => verificationModelKey(entry) === modelKey)),
+    samples: modelEntries.filter(entry => verificationModelKey(entry) === modelKey).length}));
   const byScenario = new Map();
   const all = [];
     const versionCounts = new Map();
@@ -11748,7 +11971,7 @@ async function buildSwingVerificationSummary() {
         if (entry.status === "win") version.wins += 1;
       }
       versionCounts.set(formulaVersion, version);
-      if (formulaVersion !== SWING_FORMULA_VERSION) continue;
+      if (formulaVersion !== SWING_FORMULA_VERSION || verificationModelKey(entry) !== selectedModelKey) continue;
       const s = byScenario.get(entry.scenario) || {
         scenario: entry.scenario,
         samples: 0, wins: 0, losses: 0, expired: 0, pending: 0, stalled: 0,
@@ -11798,6 +12021,7 @@ async function buildSwingVerificationSummary() {
       all.push({ day, ...entry });
     }
   }
+  const knownCost = modelGroups.find(group => group.modelKey === selectedModelKey)?.identity.costModelVersion === currentVerificationIdentity("swing").costModelVersion;
   const scenarios = [...byScenario.values()].map((s) => {
     // headline 的分母只算連續競價：處置期間是分盤集合競價，日 K 高低價只是幾十次撮合的極值，
     // 「觸價」判定的前提在那些樣本上不成立，而且處置股要預收款券、觀察用的散戶多半不會做。
@@ -11823,20 +12047,21 @@ async function buildSwingVerificationSummary() {
       winRate: continuous.length >= WIN_RATE_MIN_SAMPLES ? Math.round((cWins / continuous.length) * 1000) / 10 : null,
       winRateMinSamples: WIN_RATE_MIN_SAMPLES,
       avgResultPct: continuous.length ? Math.round((cSum / continuous.length) * 100) / 100 : null,
-      avgResultPctNet: continuous.length ? netReturnPct(cSum / continuous.length) : null,
+      avgResultPctNet: knownCost && continuous.length ? netReturnPct(cSum / continuous.length) : null,
+      netUnavailableReason: knownCost ? null : "legacy-unknown-cost-model",
       avgDaysHeld: continuous.length ? Math.round((cDays / continuous.length) * 10) / 10 : null,
       // 分佈指標：等權平均會把「一週內 75/88 筆停損」和「平穩小虧」混成同一個數字。
       profitFactor: lossesAbs > 0 ? roundTo(gains / lossesAbs) : null,
       // 淨口徑：勝率用 status（淨）、PF 卻用毛正負分是同一批樣本兩種定義。淨 PF 與淨中位數並列，毛值仍保留。
-      profitFactorNet: (() => {
+      profitFactorNet: !knownCost ? null : (() => {
         const net = continuous.map((item) => netReturnPct(item.resultPct)).filter(Number.isFinite);
         const up = net.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
         const down = net.filter((value) => value < 0).reduce((sum, value) => sum + Math.abs(value), 0);
         return down > 0 ? roundTo(up / down) : null;
       })(),
       medianResultPct: median(continuous.map((item) => item.resultPct)),
-      medianResultPctNet: median(continuous.map((item) => netReturnPct(item.resultPct))),
-      maxConsecutiveLossDays: maxConsecutiveLossDays(continuous),
+      medianResultPctNet: knownCost ? median(continuous.map((item) => netReturnPct(item.resultPct))) : null,
+      maxConsecutiveLossDays: knownCost ? maxConsecutiveLossDays(continuous) : null,
       worstDay: worstResolvedDay(continuous),
       // 分盤撮合（處置期間）的樣本數：不進 headline 分母，但要能單獨看見（含處置股的口徑另列）。
       periodicCallSamples: s.periodicCallSamples,
@@ -11850,11 +12075,11 @@ async function buildSwingVerificationSummary() {
       // 只有 2026-09-05 之後推進過的單有 nextOpen；勝負以該口徑的淨報酬 > 0 判定，同樣套最小樣本。
       nextOpenEntry: (() => {
         const rows = continuous.filter((item) => Number.isFinite(item.resultPctNextOpen));
-        const wins = rows.filter((item) => netReturnPct(item.resultPctNextOpen) > 0).length;
+        const wins = knownCost ? rows.filter((item) => netReturnPct(item.resultPctNextOpen) > 0).length : null;
         return {
           resolved: rows.length,
           wins,
-          winRate: rows.length >= WIN_RATE_MIN_SAMPLES ? Math.round((wins / rows.length) * 1000) / 10 : null,
+          winRate: knownCost && rows.length >= WIN_RATE_MIN_SAMPLES ? Math.round((wins / rows.length) * 1000) / 10 : null,
           avgResultPct: rows.length ? roundTo(average(rows.map((item) => item.resultPctNextOpen))) : null,
           // 第一根開盤已穿過停損／目標、在這個口徑裡不會進場的筆數（不進分母，但要讓人看得到少了多少）。
           gapSkipped: continuous.filter((item) => item.nextOpenSkipped === "gap").length,
@@ -11873,6 +12098,7 @@ async function buildSwingVerificationSummary() {
     ok: true,
     generatedAt: new Date().toISOString(),
     currentFormulaVersion: SWING_FORMULA_VERSION,
+    modelGroups, selectedModelKey,
     formulaVersions: [...versionCounts.values()].sort((a, b) => b.formulaVersion.localeCompare(a.formulaVersion)),
     // 版本作為分層而非排除：headline 只用現版，這裡另給「全版本合併」讓改版不會把累積歸零。
     allVersions: (() => {
@@ -11884,7 +12110,8 @@ async function buildSwingVerificationSummary() {
         samples: versions.reduce((sum, item) => sum + item.samples, 0),
         resolved,
         wins,
-        winRate: resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((wins / resolved) * 1000) / 10 : null,
+        winRate: modelGroups.length === 1 && resolved >= WIN_RATE_MIN_SAMPLES ? Math.round((wins / resolved) * 1000) / 10 : null,
+        reason: modelGroups.length > 1 ? "mixed-models" : null,
       };
     })(),
     scenarios,
@@ -11913,7 +12140,7 @@ async function buildSwingVerificationSummary() {
       `所有百分比預設為未扣費稅的毛報酬；${VERIFY_COST_NOTE}`,
     ],
   };
-  swingVerifySummaryCache = { expiresAt: Date.now() + 10 * 60 * 1000, value: body };
+  swingVerifySummaryCache = { key: cacheKey, expiresAt: Date.now() + 10 * 60 * 1000, value: body };
   return body;
 }
 
@@ -11930,9 +12157,10 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     loadFundamentalsHistory().then(() => ensureCorporateActionResults(scanFromDate, latestDate)),
   ]);
   const candidates = preselectSwingQuotes(reference, riskSets, latestDate, maxCandidates);
+  const inputEvidence = candidates.map(quote => ({ code:quote.code,exchange:quote.exchange,price:quote.price,sourceAsOf:quote.asOf || null }));
   // 同時抓取數再調低（5→3）：當月逐檔 K 在高並發下最容易被證交所限流而退回前一交易日，
   // 降併發讓更多檔能抓到「當日」官方收盤（配合上面的嚴格新鮮度過濾，過期的會被剔除而非用錯價）。
-  const enriched = await mapLimit(candidates, 3, async (quote) => {
+  const enriched = await mapLimit(candidates, 3, async (quote,index) => {
     try {
       // 6 個月歷史：MACD(8,17,9)約 3~4 個月就收斂，6 個月足夠且與技術分析頁一致；
       // 比 9 個月少抓 1/3 的月份端點，明顯降低被證交所限流而漏抓 → 命中更完整、掃描間更穩定。
@@ -11942,10 +12170,13 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
         fallbackRange: "1y",
       });
       history = appendTodayCloseBar(history, quote, latestDate);
+      inputEvidence[index].historyFingerprint = createHash('sha256').update(stableJson(verificationInputContent(history))).digest('hex');
+      inputEvidence[index].observedAt = history.map(row => row.observedAt).filter(Boolean).sort().at(-1) || null;
       if (!history.length) return { hits: [], pick: null, outcome: "history-empty", historySuccess: false, freshHistory: false, featureReady: false };
       const rows = addPreviousClose(history)
         .filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite));
       const officialActions = corporateActionHistoryForCode(quote.code, rows[0]?.date, rows.at(-1)?.date);
+      inputEvidence[index].corporateActionsFingerprint = createHash('sha256').update(stableJson(officialActions)).digest('hex');
       // 本機歸檔從部署後才開始累積、也不含減資；已知事件用官方公式，其餘大缺口仍保留「疑似」降級，
       // 不可把 archive 空白誤解成整段歷史都經官方確認沒有公司行為。
       const features = computeSwingFeatures(rows, officialActions, { allowHeuristicFallback: true });
@@ -12038,6 +12269,7 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
   const scanReliable = coverageRate >= SWING_MIN_SCAN_COVERAGE;
   const scanQuality = {
     candidateCount: candidates.length,
+    completedCount: enrichedResults.length,
     historySuccessCount,
     freshHistoryCount,
     featureReadyCount,
@@ -12070,6 +12302,9 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     riskPolicy: "注意股、處置股、變更交易改為標示、不再排除（前端可切換隱藏）；低流動性已先濾掉",
     surveillanceCount: picks.filter((p) => p.surveillance).length,
     formulaVersion: SWING_FORMULA_VERSION,
+    requestScope: { maxCandidates, scenarioKey, limit: 40 },
+    sourceTimes: sourceTimesFor(reference),
+    inputEvidence: inputEvidence.map((evidence,index) => ({ ...evidence, outcome: enriched[index]?.outcome || "scan-incomplete" })),
     scenarios: SWING_SCENARIOS.map((detector) => ({
       key: detector.key,
       name: detector.name,
@@ -12100,7 +12335,7 @@ function scanSwingBoardSingleFlight(reference, latestDate, maxCandidates) {
 }
 
 // 對外入口：同一交易日只算一次，算完存進資料庫快照、整天回同一份（收盤後就不再變動）。
-// forceRefresh（按「重新整理」）才重算，且只有在新結果「更完整」時才覆蓋，避免退回殘缺版。
+// forceRefresh 另記修訂；顯示可採較完整結果，首次正式發布及其驗證單永遠保留。
 async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 240, forceRefresh = false } = {}) {
   const reference = await getReferenceData();
   const latestDate = resolveMarketCloseDate(reference);
@@ -12108,11 +12343,13 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
   await advanceSwingVerification(reference, latestDate);
   // 整個板子共用一份快照（含所有場景），不再分場景各存一份 → 兩分頁的命中數與計算時間一定一致，
   // 而且一天只掃一次（切換分頁不重掃，只是把同一份快照換場景切片）。
-  const snapshotKey = `${latestDate}:all`;
+  const snapshotKey = maxCandidates === 240 ? `${latestDate}:all` : `${latestDate}:research:${maxCandidates}`;
+  const modelCacheKey = `${snapshotKey}:${verificationModelKey(currentVerificationIdentity("swing"))}`;
 
   // 1) 記憶體快取（最快路徑）
-  const cached = swingCache.get(snapshotKey);
+  const cached = swingCache.get(modelCacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+    cached.value = await confirmVerificationBody(cached.value);
     return sliceSwingBody(cached.value, limit, scenarioKey);
   }
 
@@ -12121,9 +12358,10 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
   if (!forceRefresh) {
     const db = await loadDb();
     const stored = db.swingSnapshots?.[snapshotKey];
-    if (stored?.body && stored.body.formulaVersion === SWING_FORMULA_VERSION) {
-      swingCache.set(snapshotKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: stored.body });
-      return sliceSwingBody(stored.body, limit, scenarioKey);
+    if (stored?.body?.publication?.modelKey === verificationModelKey(currentVerificationIdentity("swing")) && stored.body.formulaVersion === SWING_FORMULA_VERSION) {
+      const confirmedBody = await confirmVerificationBody(stored.body);
+      swingCache.set(modelCacheKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: confirmedBody });
+      return sliceSwingBody(confirmedBody, limit, scenarioKey);
     }
   }
 
@@ -12144,13 +12382,13 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
             "本次更新資料覆蓋不足，已保留同日最近一次完整波段快照。",
           ]),
         };
-        swingCache.set(snapshotKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: fallbackBody });
+        swingCache.set(modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: fallbackBody });
         return sliceSwingBody(fallbackBody, limit, scenarioKey);
       }
     } catch {
       // DB 暫時讀不到時仍可回 provisional 記憶體結果，不做持久化。
     }
-    swingCache.set(snapshotKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: body });
+    swingCache.set(modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: body });
     return sliceSwingBody(body, limit, scenarioKey);
   }
 
@@ -12158,34 +12396,37 @@ async function buildSwingBoard({ scenarioKey = "", limit = 40, maxCandidates = 2
   // 建立驗證單前先拿當天的大盤位階（只分層、不濾網；抓不到就 null）——recordSwingVerification 是同步的。
   body.regime = regimeStamp(await getCurrentRegime(latestDate));
   try {
-    const persistedBody = await commitDbMutation((db) => {
+    let persistedBody = await commitDbMutation((db) => {
       db.swingSnapshots ||= {};
+      const publication = publishVerification(db, 'swing', body);
+      const publishedBody = { ...body, publication };
       const existing = db.swingSnapshots[snapshotKey];
       const sameVersion = existing?.body?.formulaVersion === SWING_FORMULA_VERSION;
       const incomingCoverage = body.scanQuality?.coverageRate ?? 0;
       const existingCoverage = existing?.body?.scanQuality?.coverageRate ?? 100;
       const shouldReplace = !existing || !sameVersion || incomingCoverage > existingCoverage ||
         (incomingCoverage === existingCoverage && body.matchedCount >= (existing.matchedCount || 0));
-      if (!shouldReplace) return skipDbMutation(existing.body);
+      if (!shouldReplace) return existing.body; // 修訂已在同一 draft 保存，顯示仍沿用較完整結果。
       db.swingSnapshots[snapshotKey] = {
         asOf: body.asOf,
         generatedAt: body.generatedAt,
         matchedCount: body.matchedCount,
-        body,
+        body: publishedBody,
       };
       pruneSwingSnapshots(db.swingSnapshots, 7);
-      recordSwingVerification(db, body); // 同一次 transaction 落盤，不多一次 IO
-      return body;
+      return publishedBody;
     });
-    swingCache.set(snapshotKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: persistedBody });
+    persistedBody = await confirmVerificationBody(persistedBody);
+    swingCache.set(modelCacheKey, { expiresAt: Date.now() + 30 * 60 * 1000, value: persistedBody });
     return sliceSwingBody(persistedBody, limit, scenarioKey);
   } catch (error) {
     // 寫入失敗仍回本次分析，但只短暫快取並明確提示；下次會重試正式快照。
     const retryBody = {
       ...body,
+      publication: { kind: "not-persisted" },
       warnings: unique([...(body.warnings || []), "正式波段快照暫時無法儲存，將在下次更新重試。"]),
     };
-    swingCache.set(snapshotKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: retryBody });
+    swingCache.set(modelCacheKey, { expiresAt: Date.now() + REFERENCE_RETRY_MS, value: retryBody });
     return sliceSwingBody(retryBody, limit, scenarioKey);
   }
 }
@@ -14280,10 +14521,14 @@ function closeTasksDue({ today, reference, db, lastRunDay }) {
   const twse = toCompactDate(reference?.markets?.twse?.asOf || "") || "";
   const tpex = toCompactDate(reference?.markets?.tpex?.asOf || "") || "";
   if (!reference?.coverageComplete || twse !== today || tpex !== today) return { due: false, reason: "reference-not-today" };
-  const hasOvernight = (Array.isArray(db?.signalSnapshots) ? db.signalSnapshots : [])
-    .some((snapshot) => toCompactDate(snapshot?.asOf) === today && overnightSnapshotFormulaVersion(snapshot) === OVERNIGHT_FORMULA_VERSION);
-  const swingStored = db?.swingSnapshots?.[`${today}:all`];
-  const hasSwing = Boolean(swingStored?.body && swingStored.body.formulaVersion === SWING_FORMULA_VERSION && !swingStored.body.provisional);
+  const hasFormal = (strategy, version) => {
+    const key = verificationPublicationKey(strategy, today, version);
+    const store = db?.verificationPublications;
+    const capture = store?.captures?.[store?.current?.[key]];
+    return capture?.kind === 'formal' && capture.complete === true;
+  };
+  const hasOvernight = hasFormal('overnight', OVERNIGHT_FORMULA_VERSION);
+  const hasSwing = hasFormal('swing', SWING_FORMULA_VERSION);
   return { due: true, reason: "ok", needOvernight: !hasOvernight, needSwing: !hasSwing };
 }
 
@@ -14546,6 +14791,7 @@ export {
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
+  verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
   holidayCalendarCoversYear,
   getTradingCalendarEvidence, getOfficialObservationEvidence, observeSignalSnapshot,
@@ -14598,7 +14844,7 @@ export {
   SWING_FORMULA_VERSION, stockTickSize, roundToStockTick,
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,
   stockLimitUpPrice, isLimitUpLockedBar, stockLimitDownPrice, isLimitDownLockedBar,
-  scanSwingBoard, inspectSwingStock,
+  scanSwingBoard, buildSwingBoard, inspectSwingStock,
   // 波段前向驗證
   recordSwingVerification, swingVerificationFillModel, advanceSwingVerificationEntry, replaySwingVerificationHistory, advanceSwingVerification, applySwingCorporateAction, resetSwingAdvanceKeyForTest,
   swingAdvanceTargetDate,

@@ -156,3 +156,11 @@ node scripts/date-sweep.mjs 2027-01-01   # 只掃指定日期，用來重現回�
 - `importServer({ routes, dataDir, dbPath })`／`bootServer({ routes, dataDir, dbPath })` 會在 import 前以**顯式 options**設定隔離環境；需要預埋 DB／備份的測試先建立目錄與 fixture，再把路徑傳入 helper。helper 固定 `ADMIN_USERNAME=admin`、`PORT=0`，清除 ambient `SESSION_MAX_AGE_MS`／`COOKIE_SECURE`；未傳 `dbPath` 時也必須刪除 `process.env.DB_PATH`，不可讓外部 shell 或前一情境污染測試。一般測試一律走 helper 的顯式 options，不直接修改 ambient `DATA_DIR`／`DB_PATH`。
 - `bootServer().close()` 會走正式 `shutdownServer()`：HTTP listener、未完成的持久化寫入與券商清理都必須排空；測試不得只直接呼叫 `server.close()` 留下背景工作。
 - runtime DB 寫入走 `commitDbMutation()`；queue tail 會自行吸收當次 rejection 並保持 fulfilled，`flushPersistence()` 仍會等待所有 pending mutation。測試製造 business 4xx 或已安全丟棄的 persistence failure 後，只需移除暫時性故障 blocker，即可直接驗證後續 mutation 或安全關機；不要額外做一筆成功 mutation 來「清洗」queue。
+
+### 正式發布與模型版本回歸
+
+`verification-publication.test.mjs` 覆蓋首次完整發布、零訊號、研究 scope、逐檔完整性與 degraded、每場景上限、原計畫凍結、兩 builder 的場景／候選快取、手動 refresh、並發、atomic temp 故障及獨立 Node 冷啟動；另鎖兩階段發布時間、確認寫入失敗重啟、跨 09:00 上下界及並發補證不覆蓋已推進 entry。`verification-model-version.test.mjs` 驗 canonical 模型鍵、非破壞冪等遷移、memo 版本與輸入隔離、未知成本空值與摘要分組。`verify-history-memo.test.mjs` 驗 legacy 事後觀察 revision 落盤與離線重用；legacy final 原始證據不覆寫。數學 fixture 若期待目前成本的淨值，須明確給目前模型 identity，不可假造舊成本已知。
+
+```powershell
+node --test tests/backend/verification-publication.test.mjs tests/backend/verification-model-version.test.mjs tests/backend/verify-history-memo.test.mjs
+```

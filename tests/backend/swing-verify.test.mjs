@@ -357,7 +357,7 @@ test("regime 分層：建單時記錄大盤位階（精簡版），summary 依�
 test("分佈指標：PF／中位數／最長連虧／最差單日；處置股（分盤）不進 headline 分母、另列 withPeriodicCall", async () => {
   const db = await mod.loadDb();
   const day = compactTradingDay(-10);
-  const resolved = (code, status, resultPct, resolvedAt, extra = {}) => makeEntry({ code, status, resultPct, resolvedAt, daysHeld: 3, lastChecked: resolvedAt, ...extra });
+  const resolved = (code, status, resultPct, resolvedAt, extra = {}) => makeEntry({ identity:mod.currentVerificationIdentity("swing"), code, status, resultPct, resolvedAt, daysHeld: 3, lastChecked: resolvedAt, ...extra });
   const entries = [];
   // 21 筆連續競價：前 3 筆同一天停損（最長連虧 3、最差單日），之後 11 勝（+5）／7 負（−3）交錯
   const d = (offset) => compactTradingDay(-9 + offset);
@@ -485,7 +485,7 @@ test("口徑並陳：第一根推進記 nextOpen，結案並陳 resultPctNextOpe
 
   const db = await mod.loadDb();
   const day = compactTradingDay(-10);
-  const resolved = (code, status, resultPct, resultPctNextOpen, extra = {}) => makeEntry({ code, status, resultPct, resultPctNextOpen, resolvedAt: day, daysHeld: 2, lastChecked: day, ...extra });
+  const resolved = (code, status, resultPct, resultPctNextOpen, extra = {}) => makeEntry({ identity:mod.currentVerificationIdentity("swing"), code, status, resultPct, resultPctNextOpen, resolvedAt: day, daysHeld: 2, lastChecked: day, ...extra });
   db.swingVerification = {
     [day]: [
       resolved("A1", "win", 5, 3.2),

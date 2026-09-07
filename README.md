@@ -122,6 +122,14 @@ sequenceDiagram
 
 隔日沖正式快照與波段驗證單會保留歷史；預設成績單仍分別讀取目前公式最近 260 份快照與近 90 日驗證單。隔日沖未滿 20 個觀察日不把百分比當作結論。卡片的歷史回測只回看今天入選的股票，有取樣偏誤，應與前向驗證分開解讀。注意／處置股預設保留並標示，可切換隱藏；停牌／下市股不進候選池。
 
+正式發布固定掃描範圍：隔日沖 260 候選／每群 20；波段 240 候選／所有場景／每場景 40。首次完整發布可為零訊號；全部來源失敗或未完成採集不算完整零訊號。UI 場景與顯示筆數不改發布母體，研究參數另存 revision。後到資料、重算與手動 refresh 可以留下更正，但不改原正式 signalId、原計畫與首次發布時間。
+
+API 的 `publication` 提供 captureId、版本身份、輸入指紋、request scope、來源日期精度與本機取得／發布時間；寫入失敗回 `kind: "not-persisted"` 並保留重試提示。正式身份與全部修訂保存在主 DB 的 `verificationPublications`，與訊號／驗證單同次原子提交及備份。來源只有日期時不補造時分秒；週一才取得週五清單，不代表週五已能決策。 發布先原子保存清單與 `publicationStartedAt` 下界，再一次性補存真正可讀後的 `availableConfirmedAt` 上界；`publishedAt`／`decisionAvailableAt` 採此保守上界並標 `confirmed-available-upper-bound`。補證失敗不撤銷正式清單，時間保留 null 與原因；之後讀取時用當下真實時間補證，不能回填。跨開盤的提交區間不能直接認定必定晚發布。
+
+評估 metadata 分為 `selectionVersion`、`evaluationVersion`、`costModelVersion`、`cohortPolicyVersion`、`entryModel`、`returnBasis`（schema 2），另保留 `formulaVersion` 相容。此次沿用的價格觀察算式為 `overnight-price-observation-v1`／`swing-price-observation-v1`，成本為固定扣 0.471 個百分點的 `flat-round-trip-0.471pct-v1`，母體政策為 `first-canonical-publication-v1`。這些仍是收盤基準的還原座標價格觀察，並非成交或帳戶含息實績。
+
+成績單的 `modelGroups`／`selectedModelKey` 分開完整模型，headline 不混算新版與舊版。缺少舊 metadata 標 `legacy-unknown`，未知成本不補算淨值。已有 final 觀察保留；舊訊號補算另存 `observationRevisions`，標記事後觀察與本次實際模型，不能補成當時正式發布。舊波段 pending 的 `evaluationApplied` 只證明本次補驗套用的模型，不回填原始進場或當時可得時間。
+
 漏開程式留下的波段 pending 會分批補判：每輪最多 16 組近期與 4 組歷史標的，舊單每次核對停住月份及下一月份的官方交易日、日 K 與公司行動。無法確認市場或來源時保留原因，歷史重試至少間隔 5 分鐘；缺 K 不跳日，來源失敗不冒充已確認缺口。歷史越多，資料檔與備份也會增長，應保留足夠磁碟空間。舊版已刪除、且沒有備份的紀錄無法恢復，不從後來結果反推訊號。新版本累積證據後，不可直接啟動仍會裁剪歷史的舊版；回復前須完整隔離備份並匯出新證據，驗證恢復後再切換。
 
 ---
