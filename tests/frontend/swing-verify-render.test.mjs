@@ -11,6 +11,29 @@ after(() => app.cleanup());
 
 const json = (expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 
+test('I3/M2：正式分支保留原結案尾端風險；次開結果與完整來源在模型展開區可讀', () => {
+  const m=(value,n=20)=>({value,validCount:n,totalCount:20,missingCount:20-n,validDays:8,reason:null});
+  const data={cohort:{headline:{scenarios:[]},models:[{identity:{entryModel:'next-open-price-observation',returnBasis:'adjusted-reference-price',costModelVersion:'flat-round-trip-0.471pct-v1'},
+    issued:20,resolved:20,metricCoverage:{avgResultPctNet:m(1.25),netProfitRate:m(65),targetHitRate:m(10,2)}}]},
+    modelGroups:[{identity:{entryModel:'signal-close-observation',returnBasis:'legacy-unknown',costModelVersion:'legacy-unknown'},samples:12}],
+    scenarios:[{scenario:'midBandDefense',resolved:10,maxConsecutiveLossDays:8,worstDay:{day:'20260901',avgResultPct:-13.7,count:3},avgResultPctNet:-4}],recent:[]};
+  app.evalIn(`state.screen='strategy';swingVerifyState.data=${JSON.stringify(data)};renderSwingVerifyPanel();`);
+  const panel=app.doc.getElementById('swingVerify');
+  const original=panel.querySelector('.verification-original-results');
+  assert.ok(original,'原結案口徑需有可見出口');
+  assert.match(original.textContent,/最長連虧 8/);
+  assert.match(original.textContent,/最差單日.*13\.7/);
+  assert.doesNotMatch(panel.querySelector('.sv-chips').textContent,/最長連虧 8/);
+  const models=panel.querySelector('.verification-model').textContent;
+  assert.match(models,/歷史平均淨報酬.*1\.25%/);
+  assert.match(models,/淨獲利率.*65%/);
+  assert.match(models,/達標率.*累積中 2\/20 筆/);
+  const source=panel.querySelector('.verification-saved-models').textContent;
+  assert.match(source,/returnBasis.*legacy-unknown/);
+  assert.match(source,/costModelVersion.*legacy-unknown/);
+  assert.match(source,/缺少模型證據/);
+});
+
 test('正式成熟cohort取代快結案headline，淨獲利/達標/歷史平均分名並保留最近結案', () => {
   const metric = {value:2,validCount:1,totalCount:2,missingCount:1,validDays:1,reason:'partial-field-coverage'};
   const headline = {issued:3,matureCount:2,immatureCount:1,unknownCount:0,signalDays:1,

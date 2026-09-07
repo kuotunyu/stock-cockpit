@@ -115,7 +115,7 @@ tests/
 
 ## Mock 與驗證範圍
 
-- `verification-metric-coverage` 以合法已保存 final 觀察驗證逐欄分母，涵蓋 0、全缺、不同日有效筆數、開盤缺值的 CI 日期，以及真 history API 的正式母體和零訊號採集。`verification-cohort` 釘官方 15 交易日窗口、休市日、證據不足／下界、快贏快輸超時、缺 K 補齊、版本與分盤／regime 分層，並走真 summary 的日曆失敗及補齊路徑。固定日期案例均傳明確 asOf，涉及 builder 時局部設定測試時鐘。
+- `verification-metric-coverage` 以合法已保存 final 觀察驗證逐欄分母，涵蓋 0、全缺、不同日有效筆數、開盤缺值的 CI 日期，以及真 history API 的正式母體和零訊號採集；未知成本的原 true／false 保留但不進衍生淨勝負分母與 CI。`verification-cohort` 釘官方 15 交易日窗口、休市日、證據不足／下界、快贏快輸超時、缺 K 補齊、版本與分盤／regime 分層，並走真 summary 的日曆失敗及補齊路徑。固定日期案例均傳明確 asOf，涉及 builder 時局部設定測試時鐘。
 - Chromium 的 populated／expired-session fixture 使用 `cohort`／`metricCoverage`／`captureCoverage` 新回應，partial 保留舊 payload 相容測試。分母區須能以鍵盤展開及收合，並驗證次開口徑與缺值文字；原四尺寸、200% 字體、精確回焦、登入失效及草稿保護斷言保留。
 
 - `verification-retention` 驗證儲存保留與查詢窗口分離、16／4 組有界補判、歷史月份與跨年日曆、未知市場、來源失敗、已封月但被歸檔上限淘汰的公司行動，以及 copy-on-write 證據／游標回滾。`verification-retention-restart` 使用 1040 日純合成資料，經每日備份與真正 `scripts/backup.mjs` 還原至新臨時目錄，再以獨立程序在埠 0 啟動／關閉並比對 SHA-256；不讀正式資料或 `.env`。
@@ -179,3 +179,5 @@ T03 修正回歸另走真實隔日 builder 的 HTTP200 未成功／TPEx 缺表�
 ```powershell
 node --test tests/backend/verification-publication.test.mjs tests/backend/verification-model-version.test.mjs tests/backend/verify-history-memo.test.mjs
 ```
+
+T05 成績單瀏覽器覆蓋包含隔日新 `cohort`／`captureCoverage`：375／768／1280／1440 px 各測原字體及 200% 文字放大，釘開盤僅 1 有效日、收盤 20 日、觸及 19 日及全缺欄位的不同門檻。主摘要與分母區需在 viewport 內，只有逐日明細獨立橫捲；原生 details 以 Enter 展開／收合並精確保留 summary 焦點。fixture 自驗每模型 issued 四狀態等式、完整 modelKey、raw metric 與顯示門檻分離；保留既有現代波段與 legacy fallback、登入失效、refresh 草稿檢查。這是成績單範圍驗證；375 px／200% 固定底部導覽文字互疊已移交後續手機可及性工作，不能宣稱全站控制項皆已通過 200%。

@@ -120,7 +120,7 @@ sequenceDiagram
 | **盤中選股** | 只篩選目前載入的觀察池（自選、搜尋與已載入訊號等）；盤中每 10 秒輪詢更新 | 是本機即時粗估，不是全市場收盤策略或前向驗證 |
 | **注意/處置股票看板** | 即將處置、處置中、即將出關、鉅額、注意、全額交割六分頁 | 以本機每日快照比對「新進／連 N 天／出關」，比不了時明講判定中而非印 0 |
 
-隔日沖正式快照與波段驗證單會保留歷史；預設成績單仍分別讀取目前公式最近 260 份快照與近 90 日驗證單。隔日沖未滿 20 個觀察日不把百分比當作結論。卡片的歷史回測只回看今天入選的股票，有取樣偏誤，應與前向驗證分開解讀。注意／處置股預設保留並標示，可切換隱藏；停牌／下市股不進候選池。
+隔日沖正式快照與波段驗證單會保留歷史；預設成績單仍分別讀取目前公式最近 260 份快照與近 90 日驗證單。隔日沖四個主要比例各依該欄有效日期計算門檻；未滿 20 日顯示累積進度，全缺顯示未知，達門檻的合法零值顯示 0%。卡片的歷史回測只回看今天入選的股票，有取樣偏誤，應與前向驗證分開解讀。注意／處置股預設保留並標示，可切換隱藏；停牌／下市股不進候選池。
 
 正式發布固定掃描範圍：隔日沖 260 候選／每群 20；波段 240 候選／所有場景／每場景 40。首次完整發布可為零訊號；全部來源失敗或未完成採集不算完整零訊號。UI 場景與顯示筆數不改發布母體，研究參數另存 revision。後到資料、重算與手動 refresh 可以留下更正，但不改原正式 signalId、原計畫與首次發布時間。
 
@@ -128,11 +128,11 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 
 評估 metadata 分為 `selectionVersion`、`evaluationVersion`、`costModelVersion`、`cohortPolicyVersion`、`entryModel`、`returnBasis`（schema 2），另保留 `formulaVersion` 相容。此次沿用的價格觀察算式為 `overnight-price-observation-v1`／`swing-price-observation-v1`，成本為固定扣 0.471 個百分點的 `flat-round-trip-0.471pct-v1`，母體政策為 `first-canonical-publication-v1`。這些仍是收盤基準的還原座標價格觀察，並非成交或帳戶含息實績。
 
-成績單的 `modelGroups`／`selectedModelKey` 保留各原觀察模型，主卡使用 `cohort.headline`／`cohort.selectedModelKey` 的正式母體比較，不混算新版與舊版。缺少舊 metadata 標 `legacy-unknown`，未知成本不補算淨值。已有 final 觀察保留；舊訊號補算另存 `observationRevisions`，標記事後觀察與本次實際模型，不能補成當時正式發布。舊波段 pending 的 `evaluationApplied` 只證明本次補驗套用的模型，不回填原始進場或當時可得時間。
+成績單的 `modelGroups`／`selectedModelKey` 保留各原觀察模型，主卡使用 `cohort.headline`／`cohort.selectedModelKey` 的正式母體比較，不混算新版與舊版。缺少舊 metadata 標 `legacy-unknown`，未知成本不補算淨值，也不把原始勝負布林當成有效淨獲利率分母或 CI。已有 final 觀察保留；舊訊號補算另存 `observationRevisions`，標記事後觀察與本次實際模型，不能補成當時正式發布。舊波段 pending 的 `evaluationApplied` 只證明本次補驗套用的模型，不回填原始進場或當時可得時間。
 
 成績單逐欄提供 `metricCoverage`：`value`、`validCount`、`totalCount`、`missingCount`、`reason` 與有效日期數 `validDays`；合法 0 保留，空值不當 0 或虧損。開盤缺值不借用收盤筆數或日期計算平均、淨獲利率、最低樣本門檻或日叢集 CI。完整零訊號日算採集成功，不進收益 CI；區間仍受日間相依限制，不能視為精度保證。
 
-波段主比較採 `mature-issued-15-official-sessions-v1`：首次正式訊號日之後已滿 15 個官方交易日的同批訊號，無論快速達標、停損或超時，一起到期才納入。日曆使用有界月份的 TWSE FMTQIK 官方日期；不足時成熟狀態未知；若只能證明至少 15 日，成熟可確定但精確 `ageSessions` 為 null。成熟仍可能有缺 K／公司行動待補，平均只代表有效部分的條件式價格觀察。達標率、淨獲利率與歷史平均淨報酬分開；超時淨正也屬淨獲利，分盤撮合另列。隔日沖主比較為 `complete-issued-next-session-v1`，限完整正式下一交易日觀察。這些是摘要投影的母體版本，不改寫保存的發布身份。
+波段主比較採 `mature-issued-15-official-sessions-v1`：首次正式訊號日之後已滿 15 個官方交易日的同批訊號，無論快速達標、停損或超時，一起到期才納入。日曆使用有界月份的 TWSE FMTQIK 官方日期；不足時成熟狀態未知；若只能證明至少 15 日，成熟可確定但精確 `ageSessions` 為 null。成熟仍可能有缺 K／公司行動待補，平均只代表有效部分的條件式價格觀察。達標率、淨獲利率與歷史平均淨報酬分開；超時淨正也屬淨獲利，分盤撮合另列。隔日沖主比較為 `complete-issued-next-session-v1`，限完整正式下一交易日觀察。模型展開區可查通過各欄門檻的結果、完整模型身份及缺證據原因；既有最長連虧與最差單日保留在原結案口徑，與成熟主比較分開。這些是摘要投影的母體版本，不改寫保存的發布身份。
 
 兩套主卡保留最近結案／逐日觀察，並在「分母、模型與來源」展開區揭露完整紀錄起點、缺覆蓋、模型及原結案口徑。舊 `totals`／`scenarios` API 欄位相容保留並修正缺值分母，不補造歷史 issued。觀察值不代表可成交回測、含現金流持有報酬或帳戶收益。
 

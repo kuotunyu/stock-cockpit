@@ -45,7 +45,8 @@ test("populated：Tab/Enter/Escape 操作真按鈕、內層提醒不誤開明細
     assert.equal(await denominators.evaluate(node => node.parentElement.open), true, '正式cohort分母可用鍵盤展開');
     await page.locator('#swingVerify .verification-denominators').getByText(/次開價格觀察沿用原收盤退出與窗口/).waitFor();
     assert.match(await page.locator('#swingVerify .verification-denominators').textContent(), /舊紀錄 12 筆驗證單/);
-    assert.match(await page.locator('#swingVerify .verification-denominators').textContent(), /有效 0\/38・缺 38/);
+    assert.match(await page.locator('#swingVerify .verification-denominators').textContent(), /有效 20\/38・缺 18/);
+    assert.match(await page.locator('#swingVerify .verification-model').nth(1).textContent(), /歷史平均淨報酬：▲1\.10%/);
     await fixture.captureSnapshot('measurement-denominators-375');
     await page.keyboard.press('Enter');
     assert.equal(await denominators.evaluate(node => node.parentElement.open), false);

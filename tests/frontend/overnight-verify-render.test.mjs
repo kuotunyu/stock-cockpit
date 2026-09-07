@@ -11,6 +11,24 @@ after(() => app.cleanup());
 
 const normalized = (html) => String(html).replace(/\s+/g, " ").trim();
 
+test('I1：20個完整日不能替開盤1日與觸及19日通過門檻，達門檻合法0仍呈現', () => {
+  for (const openingWins of [0,1]) {
+    const host=app.doc.createElement('div');
+    host.innerHTML=app.evalIn(`(() => {
+      const m=(value,count,days)=>({value,validCount:count,totalCount:20,missingCount:20-count,validDays:days});
+      const headline={days:20,signals:20,minDays:20,winAtOpen:${openingWins},winAtClose:0,hitPlus2:0,brokeMinus2:0,
+        metricCoverage:{winAtOpen:m(${openingWins},1,1),winAtClose:m(0,20,20),hitPlus2:m(0,19,19),brokeMinus2:m(null,0,0)}};
+      verifyHistoryState.data={records:[{status:'final',complete:true,verified:1,signals:1}],cohort:{headline,models:[]}};
+      return renderVerifyHistory(); })()`);
+    const chips=[...host.querySelector('.verify-stats').children].map(n=>n.textContent);
+    assert.match(chips.find(t=>t.includes('開盤觀察淨獲利率')),/累積中 1\/20 天/);
+    assert.doesNotMatch(chips.find(t=>t.includes('開盤觀察淨獲利率')),/\d%/);
+    assert.match(chips.find(t=>t.includes('收盤觀察淨獲利率')),/0%/);
+    assert.match(chips.find(t=>t.includes('曾達+2%')),/累積中 19\/20 天/);
+    assert.match(chips.find(t=>t.includes('曾破−2%')),/--/);
+  }
+});
+
 test('開盤有效一天不得借20個收盤日顯示CI或綠燈，缺欄不是0%', () => {
   const metric={value:null,validCount:0,totalCount:20,missingCount:20,validDays:0};
   const html=normalized(app.evalIn(`(() => {

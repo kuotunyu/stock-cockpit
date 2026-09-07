@@ -8401,11 +8401,12 @@ function overnightMetricCoverage(rows, knownCost = true) {
     avgOpenReturn: row => price(row, 'openReturn'), avgCloseReturn: row => price(row, 'currentReturn'),
     avgHighReturn: row => price(row, 'highReturn'),
     hitPlus2: row => event(row, 'hitPlus2', 'highReturn'), brokeMinus2: row => event(row, 'brokeMinus2', 'lowReturn'),
-    // 保留舊已存布林作原證據；沒有相應價格仍不能把false當有效虧損。
-    winAtOpen: row => event(row, 'winAtOpen', 'openReturn'), winAtClose: row => event(row, 'winAtClose', 'currentReturn'),
+    // 原布林不改寫；只有成本模型已知且相應價格有效時才衍生淨勝負分母。
+    winAtOpen: row => knownCost ? event(row, 'winAtOpen', 'openReturn') : null, winAtClose: row => knownCost ? event(row, 'winAtClose', 'currentReturn') : null,
     avgOpenReturnNet: row => knownCost ? netReturnPct(price(row, 'openReturn')) : null,
     avgCloseReturnNet: row => knownCost ? netReturnPct(price(row, 'currentReturn')) : null,
-  }).map(([key, read]) => [key, datedMetric(rows, read, 'observationDate')]));
+  }).map(([key, read]) => [key, { ...datedMetric(rows, read, 'observationDate'),
+    ...(!knownCost && ['winAtOpen','winAtClose','avgOpenReturnNet','avgCloseReturnNet'].includes(key) ? { reason: 'legacy-unknown-cost-model' } : {}) }]));
 }
 
 function aggregateOvernightRecords(records) {
@@ -8416,7 +8417,7 @@ function aggregateOvernightRecords(records) {
     return [field, { value: validCount ? parts.reduce((sum, part) => sum + (part.value ?? 0) * part.validCount, 0) / validCount : null,
       validCount, totalCount, missingCount: totalCount - validCount,
       validDays: new Set(records.filter(record => record.metricCoverage[field].validCount > 0).map(record => record.observationDate)).size,
-      reason: !validCount ? 'no-valid-values' : validCount < totalCount ? 'partial-field-coverage' : null }];
+      reason: parts.some(part => part.reason === 'legacy-unknown-cost-model') ? 'legacy-unknown-cost-model' : !validCount ? 'no-valid-values' : validCount < totalCount ? 'partial-field-coverage' : null }];
   }));
   const ci = field => {
     const days = new Map();

@@ -9796,3 +9796,13 @@ body.is-locked .app-shell {
 .verification-denominators summary:focus-visible { outline: 2px solid var(--info-text); outline-offset: 2px; }
 .verification-model { margin-block: 0.65em; overflow-wrap: anywhere; }
 .verification-denominators { min-width: 0; }
+
+/* 隔日主摘要依視窗換行；只有逐日多欄明細保留橫向捲動。 */
+.verify-history { grid-template-columns: minmax(0, 1fr); }
+.verify-history header, .verify-history header > div { min-width: 0; max-width: 100%; }
+.verify-history .verify-stats > span { overflow-wrap: anywhere; }
+.verify-history-table { min-width: 0; overflow-x: auto; display: grid; gap: 8px; }
+.verify-history-table:focus-visible { outline: 2px solid var(--info-text); outline-offset: 2px; }
+.verification-saved-models { overflow-wrap: anywhere; }
+
+.verify-history-row > span { min-width: 0; overflow-wrap: anywhere; }

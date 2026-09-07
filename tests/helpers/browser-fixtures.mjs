@@ -72,17 +72,31 @@ const measuredIdentity = { snapshotSchemaVersion:2,selectionVersion:'browser-fix
   costModelVersion:'flat-round-trip-0.471pct-v1',cohortPolicyVersion:'mature-issued-15-official-sessions-v1',entryModel:'signal-close-observation',returnBasis:'adjusted-reference-price' };
 const measuredScenarios = swingVerification.scenarios.map(s => ({ ...s, issued:s.samples,matureCount:s.resolved,immatureCount:s.pending,unknownCount:0,
   netProfitRate:s.winRate,targetHitRate:s.winRate,avgResultPctNet:s.avgResultPct-0.471,
-  metricCoverage:{ netProfitRate:metric(s.winRate,s.resolved,s.resolved,8),avgResultPctNet:metric(s.avgResultPct-0.471,s.resolved,s.resolved,8) } }));
+  metricCoverage:{ netProfitRate:metric(s.wins/s.resolved*100,s.resolved,s.resolved,8),avgResultPctNet:metric(s.avgResultPct-0.471,s.resolved,s.resolved,8) } }));
 const measuredHeadline = { identity:measuredIdentity,modelKey:JSON.stringify(measuredIdentity),issued:44,matureCount:38,immatureCount:6,unknownCount:0,
-  signalDays:10,noEntry:0,pending:0,resolved:38,unresolved:0,scenarios:measuredScenarios,
-  metricCoverage:{avgResultPctNet:metric(0.7,38,38,8),netProfitRate:metric(58,38,38,8)},missingReasons:{} };
+  signalDays:10,noEntry:0,pending:6,resolved:38,unresolved:0,scenarios:measuredScenarios,
+  metricCoverage:{avgResultPctNet:metric((1.8*20+0.4*18)/38-0.471,38,38,8),netProfitRate:metric(22/38*100,38,38,8)},missingReasons:{} };
+const nextIdentity = {...measuredIdentity,entryModel:'next-open-price-observation',evaluationVersion:'swing-next-open-price-observation-v1'};
 const measuredSwingVerification = { ...swingVerification,
   captureCoverage:{fullRecordStartDate:'2026-08-01',expectedCount:26,completeCount:25,expectedDateReason:'official-session-dates-only'},
   population:{legacy:{samples:12,reason:'issued-and-no-entry-not-recorded'},models:[]},
   modelGroups:[{identity:measuredIdentity,samples:44}],metricCoverage:measuredHeadline.metricCoverage,
   cohort:{policy:measuredIdentity.cohortPolicyVersion,selectedModelKey:measuredHeadline.modelKey,headline:measuredHeadline,
-    models:[measuredHeadline,{...measuredHeadline,identity:{...measuredIdentity,entryModel:'next-open-price-observation',evaluationVersion:'swing-next-open-price-observation-v1'},
-      resultBasis:'original-close-observation-exit-and-window',pending:38,resolved:0,metricCoverage:{avgResultPctNet:metric(null,0,38,0)},missingReasons:{'timing-uncertain':38}}] } };
+    models:[measuredHeadline,{...measuredHeadline,identity:nextIdentity,modelKey:JSON.stringify(nextIdentity),scenarios:[],
+      resultBasis:'original-close-observation-exit-and-window',pending:24,resolved:20,metricCoverage:{avgResultPctNet:metric(1.1,20,38,8),netProfitRate:metric(60,20,38,8)},missingReasons:{'timing-uncertain':18}}] } };
+
+const overnightIdentity = {...measuredIdentity, selectionVersion:'overnight-browser-v1',evaluationVersion:'overnight-price-observation-v1',cohortPolicyVersion:'complete-issued-next-session-v1'};
+const overnightCoverage = {winAtOpen:metric(0,1,20,1),winAtClose:metric(0,20,20,20),hitPlus2:metric(0,19,20,19),brokeMinus2:metric(null,0,20,0),
+  avgOpenReturn:metric(0,1,20,1),avgCloseReturn:metric(0,20,20,20),avgOpenReturnNet:metric(-0.471,1,20,1),avgCloseReturnNet:metric(-0.471,20,20,20)};
+const overnightHeadline = {identity:overnightIdentity,modelKey:JSON.stringify(overnightIdentity),issued:20,noEntry:0,pending:0,resolved:20,unresolved:0,
+  matureCount:20,immatureCount:0,unknownCount:0,signalDays:20,days:20,signals:20,minDays:20,winAtOpen:0,winAtClose:0,hitPlus2:0,brokeMinus2:0,
+  avgOpenReturn:0,avgCloseReturn:0,avgOpenReturnNet:-0.471,avgCloseReturnNet:-0.471,metricCoverage:overnightCoverage,ci:{}};
+const overnightDates = ['03','04','05','06','07','10','11','12','13','14','17','18','19','20','21','24','25','26','27','28','31'].map(day => `2026-08-${day}`);
+const overnightVerification = {ok:true,records:Array.from({length:20},(_,i)=>({asOf:overnightDates[i],observationDate:overnightDates[i+1],
+  complete:true,status:'final',signals:1,verified:1,winAtOpen:0,winAtClose:0,hitPlus2:0,brokeMinus2:0,avgOpenReturn:i===0?0:null,avgCloseReturn:0,
+  metricCoverage:{winAtOpen:metric(i===0?0:null,i===0?1:0,1,i===0?1:0),hitPlus2:metric(i<19?0:null,i<19?1:0,1,i<19?1:0),brokeMinus2:metric(null,0,1,0)}})),
+  totals:overnightHeadline,cohort:{headline:overnightHeadline,models:[overnightHeadline]},captureCoverage:{fullRecordStartDate:'2026-08-03',expectedCount:21,completeCount:20,expectedDateReason:'official-session-dates-only'},
+  population:{legacy:{samples:2,reason:'issued-and-no-entry-not-recorded'}},modelGroups:[{identity:overnightIdentity,days:20}]};
 
 function swingPayload(scenario, kind) {
   const pick = scenario === "strongContinuation" ? strongPick : midPick;
@@ -201,7 +215,7 @@ function apiResponse(url, method, scenario) {
   if (path === "/api/quotes") return { body: quotesPayload(url) };
   if (path === "/api/overnight") return { body: overnightPayload(kind) };
   if (path === "/api/overnight/verify") return { body: { ok: true, available: false, message: "固定 fixture 累積中" } };
-  if (path === "/api/overnight/verify/history") return { body: { ok: true, rows: [], summary: {} } };
+  if (path === "/api/overnight/verify/history") return { body: overnightVerification };
   if (path === "/api/backtest/overnight") return { body: { ok: true, available: false, groups: {} } };
   if (path === "/api/market/breadth") return { body: { ok: true, asOf: AS_OF, stance: "neutral", summary: {}, warnings: [] } };
   if (path === "/api/swing") return { body: swingPayload(url.searchParams.get("scenario") || "midBandDefense", kind) };
@@ -452,11 +466,10 @@ export async function createBrowserFixture({ scenario, setupFailure } = {}) {
       await response.finished();
       await page.evaluate(() => new Promise((resolveFrame) => requestAnimationFrame(() => resolveFrame())));
     },
-    emulateTextZoom: async (factor) => {
-      const setup = await page.evaluate((zoomFactor) => {
+    emulateTextZoom: async (factor, trackedSelectors = [".swing-nm", ".swing-stat strong", ".swing-open", ".swing-plan-alerts"]) => {
+      const setup = await page.evaluate(({zoomFactor, trackedSelectors}) => {
         window.__stock1BrowserTextZoomBases ||= new WeakMap();
         const baseSizes = window.__stock1BrowserTextZoomBases;
-        const trackedSelectors = [".swing-nm", ".swing-stat strong", ".swing-open", ".swing-plan-alerts"];
         const tracked = trackedSelectors.map((selector) => {
           const node = document.querySelector(selector);
           const before = node
@@ -478,7 +491,7 @@ export async function createBrowserFixture({ scenario, setupFailure } = {}) {
           rules: rules.join("\n"),
           tracked,
         };
-      }, factor);
+      }, {zoomFactor:factor,trackedSelectors});
       textZoomCss = setup.rules;
       textZoomVersion += 1;
       await page.evaluate((version) => new Promise((resolveLoad, rejectLoad) => {

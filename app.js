@@ -5729,13 +5729,27 @@ function verificationMetricNote(metric) {
   return metric ? `有效 ${metric.validCount}/${metric.totalCount}・缺 ${metric.missingCount}・${metric.validDays || 0} 個訊號／觀察日` : '欄位覆蓋未知';
 }
 
+function verificationMetricValue(metric, key, strategy) {
+  if (metric?.reason === 'legacy-unknown-cost-model') return '未知（成本模型未記錄）';
+  if (!Number.isFinite(metric?.value) || !metric.validCount) return '--';
+  const count = strategy === 'swing' ? metric.validCount : metric.validDays;
+  if (!(count >= 20)) return `累積中 ${count || 0}/20 ${strategy === 'swing' ? '筆' : '天'}`;
+  return /Rate$|^winAt|^hitPlus|^brokeMinus/.test(key) ? `${formatNumber(metric.value * (strategy === 'overnight' ? 100 : 1),1)}%` : formatSignedPercent(metric.value);
+}
+
+function verificationIdentityNote(identity = {}) {
+  const text = Object.entries(identity).map(([key,value]) => `${escapeHtml(key)} ${escapeHtml(value)}`).join(' · ');
+  return `${text}${Object.values(identity).some(value => String(value).includes('legacy-unknown')) || !identity.returnBasis || !identity.costModelVersion ? '；缺少模型證據，未補造歷史口徑' : ''}`;
+}
+
 function renderVerificationMeasurement(data, strategy) {
   const cohort = data.cohort;
   if (!cohort) return '';
   const head = cohort.headline || {};
   const coverage = data.captureCoverage || {};
   const labels = { avgResultPctNet: '歷史平均淨報酬', netProfitRate: '淨獲利率', targetHitRate: '達標率',
-    avgOpenReturn: '開盤價格報酬', avgCloseReturn: '收盤價格報酬', winAtOpen: '開盤觀察淨獲利率', winAtClose: '收盤觀察淨獲利率' };
+    avgOpenReturn: '開盤價格報酬', avgCloseReturn: '收盤價格報酬', avgHighReturn: '最高價格報酬',
+    avgOpenReturnNet: '開盤觀察淨報酬', avgCloseReturnNet: '收盤觀察淨報酬', hitPlus2: '曾達+2%', brokeMinus2: '曾破−2%', winAtOpen: '開盤觀察淨獲利率', winAtClose: '收盤觀察淨獲利率' };
   return `<div class="verification-measurement">
     <p>價格觀察・${strategy === 'swing' ? '訊號日後 15 個官方交易日窗口' : '下一實際交易日完整觀察'}；非可成交回測或帳戶收益。
       已發 ${head.issued || 0} 筆／${head.signalDays || 0} 個訊號日・成熟 ${head.matureCount || 0}・未成熟 ${head.immatureCount || 0}・成熟未知 ${head.unknownCount || 0}。
@@ -5746,14 +5760,14 @@ function renderVerificationMeasurement(data, strategy) {
       <p>採集 ${coverage.completeCount ?? '--'}/${coverage.expectedCount ?? '--'} 個已知官方交易日；${escapeHtml(coverage.expectedDateReason || '日曆覆蓋未知')}。
         舊紀錄 ${data.population?.legacy?.samples || 0} ${strategy === 'swing' ? '筆驗證單' : '份快照'}，無完整 issued／未進場分母，原證據保留。</p>
       ${(cohort.models || []).map(model => `<div class="verification-model"><strong>${escapeHtml(model.identity?.entryModel || '模型未知')}</strong>
-        <p>${escapeHtml(Object.values(model.identity || {}).join(' · '))}</p>
+        <p>${verificationIdentityNote(model.identity)}</p>
         <p>已發 ${model.issued || 0}・成熟 ${model.matureCount || 0}・未成熟 ${model.immatureCount || 0}・未知 ${model.unknownCount || 0}；未進場 ${model.noEntry || 0}／待補 ${model.pending || 0}／已估值 ${model.resolved ?? model.signals ?? 0}／未解 ${model.unresolved || 0}；分盤 ${model.periodicCallSamples || 0} 另列。</p>
         ${model.resultBasis === 'original-close-observation-exit-and-window' ? '<p>次開價格觀察沿用原收盤退出與窗口；發布時間不明者不進有效前向結果，並非完整交易模擬。</p>' : ''}
-        ${Object.entries(model.metricCoverage || {}).filter(([key]) => labels[key]).map(([key,metric]) => `<p>${labels[key]}：${verificationMetricNote(metric)}</p>`).join('')}
+        ${Object.entries(model.metricCoverage || {}).filter(([key]) => labels[key]).map(([key,metric]) => `<p>${labels[key]}：${verificationMetricValue(metric,key,strategy)}；${verificationMetricNote(metric)}${metric.reason ? `・${escapeHtml(metric.reason)}` : ''}</p>`).join('')}
         ${Object.entries(model.missingReasons || {}).map(([reason,count]) => `<p>${escapeHtml(reason)}：${count}</p>`).join('')}
       </div>`).join('')}
-      ${(data.modelGroups || []).length ? `<p>其他已存觀察模型：${data.modelGroups.map(group => `${escapeHtml(group.identity?.entryModel || '模型未知')} ${group.samples ?? group.days ?? 0} ${strategy === 'swing' ? '筆' : '日'}`).join('；')}。其舊母體結果與原明細保留，不併入正式成熟比較。</p>` : ''}
-      ${strategy === 'swing' ? (data.scenarios || []).map(s => `<p>保留的原結案口徑・${escapeHtml(swingScenarioName(s.scenario))}：${s.resolved || 0} 筆；達標率 ${s.winRate == null ? '--' : `${formatNumber(s.winRate,1)}%`}；歷史平均淨報酬 ${formatSignedPercent(s.avgResultPctNet)}。${verificationMetricNote(s.metricCoverage?.avgResultPctNet)}</p>`).join('') : data.totals ? `<p>保留的原觀察口徑：${data.totals.days || 0} 日／${data.totals.signals || 0} 筆；平均開盤 ${formatSignedPercent(data.totals.avgOpenReturn)}；平均收盤 ${formatSignedPercent(data.totals.avgCloseReturn)}。</p>` : ''}
+      ${(data.modelGroups || []).length ? `<p class="verification-saved-models">其他已存觀察模型：${data.modelGroups.map(group => `${verificationIdentityNote(group.identity)} ${group.samples ?? group.days ?? 0} ${strategy === 'swing' ? '筆' : '日'}`).join('；')}。其舊母體結果與原明細保留，不併入正式成熟比較。</p>` : ''}
+      ${strategy === 'swing' ? (data.scenarios || []).map(s => `<div class="verification-original-results"><p>保留的原結案口徑・${escapeHtml(swingScenarioName(s.scenario))}：${s.resolved || 0} 筆；達標率 ${s.winRate == null ? '--' : `${formatNumber(s.winRate,1)}%`}；歷史平均淨報酬 ${formatSignedPercent(s.avgResultPctNet)}。${verificationMetricNote(s.metricCoverage?.avgResultPctNet)}</p>${swingDistributionLine(s)}</div>`).join('') : data.totals ? `<p>保留的原觀察口徑：${data.totals.days || 0} 日／${data.totals.signals || 0} 筆；平均開盤 ${formatSignedPercent(data.totals.avgOpenReturn)}；平均收盤 ${formatSignedPercent(data.totals.avgCloseReturn)}。</p>` : ''}
     </details></div>`;
 }
 
@@ -5804,6 +5818,11 @@ function renderVerifyHistory() {
   // 新母體的官方已知日期不證明歷史連續覆蓋；保留區間，首版不另給顯著性配色。
   const ciTone = (ci, field) => (!data.cohort && sufficient(field) && !totals?.metricCoverage?.[field]?.missingCount && ci && Number.isFinite(ci.low) && ci.low >= 0.5 ? "positive" : "");
   const denom = field => totals?.metricCoverage?.[field]?.validCount ?? totals?.signals;
+  const mainRate = field => {
+    if (!denom(field)) return '--';
+    if (!sufficient(field)) return `累積中 ${totals?.metricCoverage?.[field]?.validDays ?? totals?.days ?? 0}/${minDays} 天`;
+    return rate(totals[field], denom(field));
+  };
   return `
     <section class="verify-history" aria-label="實際驗證紀錄">
       <header>
@@ -5814,10 +5833,10 @@ function renderVerifyHistory() {
         ${totals ? `
           <div class="verify-stats">
             <span>累計 ${totals.days} 天 / ${totals.signals} 檔${enoughDays ? "" : `・累積中 ${totals.days}/${minDays} 天`}</span>
-            <span class="${ciTone(totals.ci?.winAtOpen,'winAtOpen')}" title="${verificationMetricNote(totals.metricCoverage?.winAtOpen)}">${glossLink('開盤觀察淨獲利率','開盤賣勝率')} ${rate(totals.winAtOpen, denom('winAtOpen'))}${ciText(totals.ci?.winAtOpen,'winAtOpen')}</span>
-            <span class="${ciTone(totals.ci?.winAtClose,'winAtClose')}" title="${verificationMetricNote(totals.metricCoverage?.winAtClose)}">${glossLink('收盤觀察淨獲利率','收盤賣勝率')} ${rate(totals.winAtClose, denom('winAtClose'))}${ciText(totals.ci?.winAtClose,'winAtClose')}</span>
-            <span class="${ciTone(totals.ci?.hitPlus2,'hitPlus2')}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">曾達+2% ${rate(totals.hitPlus2, denom('hitPlus2'))}${ciText(totals.ci?.hitPlus2,'hitPlus2')}</span>
-            <span title="觀察日最低價曾碰到 −2%">曾破−2% ${rate(totals.brokeMinus2, denom('brokeMinus2'))}</span>
+            <span class="${ciTone(totals.ci?.winAtOpen,'winAtOpen')}" title="${verificationMetricNote(totals.metricCoverage?.winAtOpen)}">${glossLink('開盤觀察淨獲利率','開盤賣勝率')} ${mainRate('winAtOpen')}${ciText(totals.ci?.winAtOpen,'winAtOpen')}</span>
+            <span class="${ciTone(totals.ci?.winAtClose,'winAtClose')}" title="${verificationMetricNote(totals.metricCoverage?.winAtClose)}">${glossLink('收盤觀察淨獲利率','收盤賣勝率')} ${mainRate('winAtClose')}${ciText(totals.ci?.winAtClose,'winAtClose')}</span>
+            <span class="${ciTone(totals.ci?.hitPlus2,'hitPlus2')}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">曾達+2% ${mainRate('hitPlus2')}${ciText(totals.ci?.hitPlus2,'hitPlus2')}</span>
+            <span title="觀察日最低價曾碰到 −2%">曾破−2% ${mainRate('brokeMinus2')}</span>
             <span>平均開盤 ${formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
             <span>平均隔日收 ${formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
           </div>
@@ -5825,6 +5844,7 @@ function renderVerifyHistory() {
       </header>
       ${renderVerificationMeasurement(data, 'overnight')}
       ${renderVerifyRegimeLine(totals)}
+      <div class="verify-history-table" tabindex="0" role="region" aria-label="每日觀察明細，可左右捲動">
       <div class="verify-history-row is-head">
         <span>訊號→觀察</span>
         <span>驗證檔數</span>
@@ -5835,6 +5855,7 @@ function renderVerifyHistory() {
         <span>平均收盤</span>
       </div>
       ${rows}
+      </div>
     </section>
   `;
 }
