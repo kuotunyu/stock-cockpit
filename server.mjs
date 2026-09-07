@@ -613,10 +613,21 @@ const VERIFY_ROUND_TRIP_FEE_PCT = TRADE_FEE_RATE * 0.6 * 2 * 100;   // 0.171%
 const VERIFY_ROUND_TRIP_TAX_PCT = TRADE_TAX_RATES.stock * 100;       // 0.3%
 const VERIFY_ROUND_TRIP_COST_PCT = roundTo(VERIFY_ROUND_TRIP_FEE_PCT + VERIFY_ROUND_TRIP_TAX_PCT, 3); // 0.471%
 const VERIFY_COST_NOTE = `淨報酬為估算：已扣一買一賣的手續費與證交稅合計約 ${VERIFY_ROUND_TRIP_COST_PCT}%`
-  + "（以預設 0.6 折、一般股票 3‰ 計；未計每筆最低 20 元手續費與滑價，小額部位實際成本更高）。";
+  + "（以預設 6 折（乘 0.6）、一般股票 3‰ 計；未計每筆最低 20 元手續費與滑價，小額部位實際成本更高）。";
 // 毛報酬扣成本；null 進 null 出，不可讓缺值變成 -0.471。
 function netReturnPct(grossPct) {
   return Number.isFinite(grossPct) ? roundTo(grossPct - VERIFY_ROUND_TRIP_COST_PCT) : null;
+}
+// 額外成本是已含基準成本之報酬的假設壓力，100 bps = 1 個百分點。
+function applyCostScenario({ baseReturnPct, extraCostBps } = {}) {
+  if (!Number.isFinite(baseReturnPct) || !Number.isFinite(extraCostBps) || extraCostBps < 0) return null;
+  const result = baseReturnPct - extraCostBps / 100;
+  return Number.isFinite(result) ? result : null;
+}
+function calculateNetR({ netPnl, initialRiskCash } = {}) {
+  if (!Number.isFinite(netPnl) || !Number.isFinite(initialRiskCash) || initialRiskCash <= 0) return null;
+  const result = netPnl / initialRiskCash;
+  return Number.isFinite(result) ? result : null;
 }
 const TRADE_SCHEMA_VERSION = 2;
 const TRADE_INSTRUMENT_TYPES = new Set([
@@ -9094,6 +9105,34 @@ function swingMetricCoverage(rows, identity) {
   }).map(([key, read]) => [key, datedMetric(rows, read)]));
 }
 
+// 只投影已保存的現金證據，不改成交價、退出規則、成本身份或原始部位。
+function verificationCostRisk(rows, identity, readOutcome, readRisk) {
+  const supported = isHoldingIdentity(identity) && identity.costModelVersion === 'initial-notional-flat-0.471pct-v1'
+    && identity.entryModel === 'signal-close-observation' && identity.snapshotSchemaVersion === 2
+    && ['swing-hypothetical-holding-v1','overnight-hypothetical-holding-v1'].includes(identity.evaluationVersion);
+  const evidence = rows.map(row => {
+    const outcome = readOutcome(row);
+    const reason = !supported ? 'cash-model-not-established' : row.status !== 'resolved' ? 'outcome-not-resolved'
+      : outcome?.status !== 'complete' || !Number.isFinite(outcome?.netPnl) ? 'complete-net-pnl-missing' : null;
+    const initialRiskCash = readRisk(row);
+    return { ...row, outcome, reason, initialRiskCash,
+      baseReturnPct: reason ? null : Number.isFinite(outcome.holdingReturnPct) ? outcome.holdingReturnPct : null,
+      netR: reason ? null : calculateNetR({ netPnl: outcome.netPnl, initialRiskCash }) };
+  });
+  const missingReasons = readReason => Object.fromEntries(unique(evidence.map(readReason).filter(Boolean))
+    .map(reason => [reason, evidence.filter(row => readReason(row) === reason).length]));
+  const returnReason = row => row.reason || (!Number.isFinite(row.baseReturnPct) ? 'holding-return-undefined' : null);
+  const riskReason = row => row.reason || (!Number.isFinite(row.netR) ? 'initial-risk-cash-missing-or-invalid' : null);
+  return {
+    costSensitivity: { scenarioVersion: 'additional-return-bps-v1', basis: 'already-net-return-percentage-points',
+      scenarios: [0,10,25,50].map(extraCostBps => ({ extraCostBps,
+        returnPct: { ...datedMetric(evidence, row => applyCostScenario({ baseReturnPct: row.baseReturnPct, extraCostBps })),
+          missingReasons: missingReasons(returnReason) } })) },
+    netR: { ...datedMetric(evidence, row => row.netR), definition: 'net-pnl-over-original-price-gap-times-original-shares-v1',
+      missingReasons: missingReasons(riskReason) },
+  };
+}
+
 function summarizeSwingCohortRows(rows, identity) {
   const mature = rows.filter(row => row.cohort.mature === true);
   const eligible = mature.filter(row => row.status !== 'noEntry' && !row.periodic);
@@ -9122,6 +9161,7 @@ function summarizeSwingCohortRows(rows, identity) {
     avgResultPct: metricCoverage.avgResultPct.value, avgResultPctNet: metricCoverage.avgResultPctNet.value,
     avgDaysHeld: metricCoverage.avgDaysHeld.value, profitFactorNet: !isHoldingIdentity(identity) && down > 0 ? roundTo(up/down) : null,
     medianResultPctNet: median(net), metricCoverage,
+    costRisk: verificationCostRisk(eligible, identity, row => row.holdingOutcome, row => row.initialRiskCash),
     missingReasons: Object.fromEntries([...new Set(mature.filter(row => row.reason).map(row => row.reason))].map(reason => [reason, mature.filter(row => row.reason === reason).length])),
   };
 }
@@ -9151,6 +9191,7 @@ function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, popula
         periodic: Boolean(entry?.fillModel && entry.fillModel !== 'continuous'),
         exitReason: entry?.status || null, resultPct: nextOpen ? entry?.resultPctNextOpen ?? null : entry?.resultPct ?? null,
         daysHeld: entry?.daysHeld ?? null, holdingOutcome: nextOpen ? null : entry?.holdingOutcome ?? null,
+        initialRiskCash: nextOpen ? null : entry?.holdingPosition?.originalRiskMoney ?? null,
         ...(strategy === 'overnight' ? { performance: perf || null, observationDate: observed?.observationDate || null } : {}) };
     });
     if (strategy === 'swing') {
@@ -9173,13 +9214,19 @@ function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, popula
         metricCoverage: overnightMetricCoverage(subset.map(row => ({ ...row.performance, observationDate: row.observationDate })), knownPriceCost(identity), isHoldingIdentity(identity)) };
     });
     const total = aggregateOvernightRecords(records);
+    const costRisk = subset => Object.fromEntries(['open','close'].map(key => [key,
+      verificationCostRisk(subset, identity, row => row.performance?.holdingOutcomes?.[key],
+        row => row.performance?.holdingOutcomes?.[key]?.evidence?.initialPosition?.originalRiskMoney)]));
     return { ...total, identity, modelKey: verificationModelKey(identity), populationModelKey: model.modelKey,
       issued: rows.length, matureCount: matured.length, immatureCount: rows.length - matured.length, unknownCount: 0,
       ...Object.fromEntries(['noEntry','pending','resolved','unresolved'].map(status => [status, rows.filter(row => row.status === status).length])),
       signalDays: new Set(rows.map(row => row.tradeDate)).size, rows,
       ...(isHoldingIdentity(identity) ? { holdingCoverage: Object.fromEntries(['open','close'].map(key => [key,
         holdingOutcomeCoverage(mature.map(row => row.performance?.holdingOutcomes?.[key]))])) } : {}),
-      byRegime: Object.fromEntries(['aboveMa60','belowMa60','unknown'].map(bucket => [bucket, aggregateOvernightRecords(records.filter(record => record.regime === bucket))])) };
+      costRisk: costRisk(mature),
+      byRegime: Object.fromEntries(['aboveMa60','belowMa60','unknown'].map(bucket => [bucket, {
+        ...aggregateOvernightRecords(records.filter(record => record.regime === bucket)),
+        costRisk: costRisk(mature.filter(row => row.regime === bucket)) }])) };
   });
   return { policy, asOf: compactToIsoDate(toCompactDate(asOf)), maxSessions: strategy === 'swing' ? SWING_VERIFY_MAX_DAYS : 1,
     selectedModelKey, models, headline: models.find(model => model.modelKey === selectedModelKey),
@@ -15622,7 +15669,7 @@ export {
   // 處置／監視
   SURVEILLANCE_RANK, classifySurveillance, parseDispositionPeriod, parseDispositionInterval, latestUpstreamDate,
   SURVEILLANCE_HISTORY_FIELDS, mergeSurveillanceDaySnapshot,
-  VERIFY_ROUND_TRIP_COST_PCT, VERIFY_COST_NOTE, netReturnPct,
+  VERIFY_ROUND_TRIP_COST_PCT, VERIFY_COST_NOTE, netReturnPct, applyCostScenario, calculateNetR,
   findMissingCorporateActions, corporateActionErrors, TRADE_CORPORATE_ACTION_SIDE,
   WIN_RATE_MIN_SAMPLES,
   lookupStockSurveillance, survFetchRecords, getSurveillanceBoard, getRiskSets, twseNoticeRowsOrNull,

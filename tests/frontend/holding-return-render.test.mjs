@@ -21,3 +21,38 @@ test('隔日個股價格與含息結果並列，股名維持跳脫',()=>{
   app.evalIn(`verifyState.data={available:true,summary:{},rows:[{code:'2330',name:'<img src=x>',currentReturn:10,highReturn:10,holdingOutcomes:{close:{netPnl:9.029,holdingReturnPct:9.029}}}]};`);
   const html=app.evalIn('renderSignalVerification()');assert.match(html,/價格/);assert.match(html,/含息持有/);assert.doesNotMatch(html,/<img src=x>/);
 });
+test('成本明細並列基準/壓力的百分點、R 倍數與獨立有效分母，原因跳脫',()=>{
+  const metric={value:0.75,validCount:1,totalCount:3,missingCount:2,reason:'partial-field-coverage',missingReasons:{'<img src=x>':2}};
+  const costRisk={costSensitivity:{scenarioVersion:'additional-return-bps-v1',scenarios:[{extraCostBps:0,returnPct:{...metric,value:1}},{extraCostBps:25,returnPct:metric}]},netR:{...metric,value:1.9}};
+  const identity={returnBasis:'cash-holding-return',entryModel:'signal-close-observation'};
+  const data={cohort:{headline:{identity},models:[{identity,costRisk}]}};
+  const html=app.evalIn(`renderVerificationMeasurement(${JSON.stringify(data)},'swing')`);
+  assert.match(html,/基準.*1\.00%/);assert.match(html,/額外 25 bps.*0\.75%/);
+  assert.match(html,/事後 netR.*1\.90R/);assert.doesNotMatch(html,/190\.00%|1\.90%/);
+  assert.match(html,/有效 1\/3/);assert.match(html,/假設壓力/);assert.match(html,/原始進場價/);
+  assert.doesNotMatch(html,/<img src=x>/);assert.match(html,/&lt;img/);
+  costRisk.netR={...metric,value:null,validCount:0};
+  const missing=app.evalIn(`renderVerificationMeasurement(${JSON.stringify({cohort:{headline:{identity},models:[{identity,costRisk:{open:costRisk,close:costRisk}}]}})},'overnight')`);
+  assert.match(missing,/開盤/);assert.match(missing,/收盤/);assert.match(missing,/未定義/);assert.doesNotMatch(missing,/0\.00R/);
+});
+test('行情重繪保留成本明細展開/手動收合與焦點；不同模型不借用舊展開狀態',()=>{
+  app.evalIn(`
+    state.screen='overnight';state.overnightView='performance';overnightState.error=null;
+    backtestState.loaded=true;verifyHistoryState.loaded=true;
+    verifyHistoryState.data={records:[{status:'final',date:'fixture',verified:1}],cohort:{models:[{modelKey:'cash-model-a',identity:{entryModel:'signal-close-observation'},costRisk:{},byRegime:{}}]}};
+    renderLiveDataUpdate();
+    document.querySelector('.verification-denominators').open=true;
+    document.querySelector('.verification-denominators details').open=true;
+    document.querySelector('.verification-denominators details > summary').focus();
+    renderLiveDataUpdate();
+  `);
+  assert.equal(app.evalIn(`document.querySelector('.verification-denominators').open`),true);
+  assert.equal(app.evalIn(`document.querySelector('.verification-denominators details').open`),true);
+  assert.equal(app.evalIn(`document.activeElement===document.querySelector('.verification-denominators details > summary')`),true);
+  app.evalIn(`document.querySelector('.verification-denominators details').open=false;renderLiveDataUpdate();`);
+  assert.equal(app.evalIn(`document.querySelector('.verification-denominators details').open`),false);
+  app.evalIn(`document.querySelector('.verification-denominators details').open=true;verifyHistoryState.data.cohort.models[0].modelKey='cash-model-b';renderLiveDataUpdate();`);
+  assert.equal(app.evalIn(`document.querySelector('.verification-denominators details').open`),false);
+  app.evalIn(`document.querySelector('.verification-denominators').open=false;renderLiveDataUpdate();`);
+  assert.equal(app.evalIn(`document.querySelector('.verification-denominators').open`),false);
+});

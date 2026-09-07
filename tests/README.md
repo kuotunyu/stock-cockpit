@@ -190,6 +190,12 @@ T05 成績單瀏覽器覆蓋包含隔日新 `cohort`／`captureCoverage`：375�
 
 `verification-holding-review` 覆蓋 TWSE 貨幣來源的缺表、完整 schema、查詢日期、畸形／重複列、已知截斷及完整空表；原價格月可用章不能替代 `monetaryCoverage`。同時測真 replay／隔日 observe 的不完整公告、重複公告歸檔，以及新 cash entries 保存的價格身份供尾部／次開摘要使用。TWSE 原回應無總筆數欄，無法偵測未宣告的合法 JSON 漏列；已有 sealed 月若缺新完整章會維持 cash unknown，歷史批次重新查詢可取得獨立證據，已結案結果不自動重算。
 
+T07 `verification-cost-sensitivity` 與 `verification-r-multiple` 覆蓋 0／10／25／50 bps 單位、不重扣基準、成本反轉、缺值、950／500＝1.9R、負／零損益與非法風險；真成熟摘要、正式隔日 manifest 及公司行動退出接線驗各自分母、模型／成熟／分盤／位階分層、原始風險不隨調價或 JSON 重開改寫。`holding-return-render` 與 Chromium `holding-return` 驗百分比和 R 倍數分開、有效筆數／未知原因、成本反轉及可展開分層，四尺寸及 200% 字體沿用隔離 fixture。情境不更改日期、來源或成交行為，日期 sweep 僅在另有具體日期風險時追加。
+
+```powershell
+node --test tests/backend/verification-cost-sensitivity.test.mjs tests/backend/verification-r-multiple.test.mjs
+```
+
 ```powershell
 node --test tests/backend/verification-holding-return.test.mjs tests/backend/verification-holding-source.test.mjs tests/backend/verification-corporate-actions.test.mjs tests/backend/swing-verify.test.mjs
 ```
