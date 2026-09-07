@@ -6025,7 +6025,11 @@ async function fetchStockHistoryMonth(code, exchange, monthCompact, name = "", o
     } else {
       const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?date=${monthCompact}&stockNo=${encodeURIComponent(code)}&response=json`;
       const payload = await fetchJsonWithRetry(url, {}, 1);
-      if (options.requireSourceSuccess && (payload?.stat !== "OK" || !Array.isArray(payload.data))) throw new Error("上市月歷史來源未成功");
+      // TWSE STOCK_DAY 的已證明空月份（7855 上市前 202607）；不外推至其他端點或所有 total=0 回應。
+      const confirmedEmpty = payload?.stat === '很抱歉，沒有符合條件的資料!'
+        && payload.total === 0 && !Object.hasOwn(payload, 'data');
+      if (options.requireSourceSuccess && !confirmedEmpty
+        && (payload?.stat !== "OK" || !Array.isArray(payload.data))) throw new Error("上市月歷史來源未成功");
       rows = Array.isArray(payload.data) ? payload.data.map((row) => normalizeTwseHistoryRow(row, code, name)) : [];
     }
 
@@ -8462,9 +8466,10 @@ async function buildOvernightSignalsUncached({
   const readyCount = inputEvidence.filter(item => item.outcome !== 'data-insufficient').length;
   const scanQuality = { candidateCount: candidates.length, completedCount: inputEvidence.length,
     readyCount, coverageRate: candidates.length ? roundTo(readyCount / candidates.length * 100) : 100,
-    reliable: inputEvidence.length === candidates.length && inputEvidence.every(item =>
+    // 完整 terminal accounting 與成功率分開；已有可評估結果可發布 degraded，全部失敗仍不可冒充零訊號。
+    reliable: inputEvidence.length === candidates.length && (readyCount > 0 || inputEvidence.every(item =>
       item.sourceEvidence.official.every(source => source.status !== 'failed')
-      || ['success', 'confirmed-empty'].includes(item.sourceEvidence.fallback.status)),
+      || ['success', 'confirmed-empty'].includes(item.sourceEvidence.fallback.status))),
     corporateActionResultsComplete: !corporateActionCoverage?.degraded };
   const body = {
     ok: true,

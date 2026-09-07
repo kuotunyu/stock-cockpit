@@ -173,27 +173,53 @@ test('首次清單成功但時間補證失敗仍正式；冷啟動以本次真�
 });
 
 // I1 必須走真實 builder；每個 source shape 用獨立離線程序，避免 reference/歷史快取相互遮蔽。
-test('I1：HTTP200未成功/缺table與官方成功空資料分開，fallback失敗不凍結正式零訊號', () => {
+test('I1/N1/N2：真實builder區分來源失敗、確認空資料與部分失敗degraded發布', async t => {
   const helper=pathToFileURL(SERVER_PATH.replace(/server\.mjs$/, 'tests/helpers/test-server.mjs')).href;
   const fixtures=pathToFileURL(SERVER_PATH.replace(/server\.mjs$/, 'tests/helpers/fixtures.mjs')).href;
-  for (const mode of ['twse-failed','tpex-missing-table','twse-empty']) {
+  for (const mode of ['twse-failed','tpex-missing-table','twse-empty','twse-real-empty','twse-out-of-range','degraded']) {
+    await t.test(mode, () => {
     const script=`import {importServer} from ${JSON.stringify(helper)};
-      import {surveillanceRoutes,fundamentalsRoutes,stockDayAllRow,tpexDailyCloseRow} from ${JSON.stringify(fixtures)};
+      import {surveillanceRoutes,fundamentalsRoutes,stockDayAllRow,tpexDailyCloseRow,compactToday,rocSlash} from ${JSON.stringify(fixtures)};
       import {rm} from 'node:fs/promises';
       const mode=process.argv[1]; const tpex=mode==='tpex-missing-table';
+      const dates=Array.from({length:110},(_,i)=>compactToday(-i)).filter(day=>{
+        const d=new Date(day.slice(0,4)+'-'+day.slice(4,6)+'-'+day.slice(6)+'T00:00:00Z');
+        return d.getUTCDay()!==0 && d.getUTCDay()!==6;
+      });
       const {mod,mock,dataDir}=await importServer({routes:[
-        ...surveillanceRoutes({reference:[stockDayAllRow({code:tpex?'0050':'2330'})],tpexReference:[tpexDailyCloseRow({code:tpex?'6488':'00679B'})]}),
+        ...surveillanceRoutes({reference:mode==='degraded'?Array.from({length:10},(_,i)=>stockDayAllRow({code:String(2300+i)})):[stockDayAllRow({code:tpex?'0050':'2330'})],tpexReference:[tpexDailyCloseRow({code:tpex?'6488':'00679B'})]}),
         ...fundamentalsRoutes({}),
-        {match:url=>url.pathname.includes('/exchangeReport/STOCK_DAY'),reply:mode==='twse-empty'?{stat:'OK',data:[]}:{stat:'SERVICE_UNAVAILABLE'}},
+        {match:url=>url.pathname.includes('/exchangeReport/STOCK_DAY'),reply:url=>{
+          if(mode==='twse-empty') return {stat:'OK',data:[]};
+          if(mode==='twse-real-empty') return {stat:'很抱歉，沒有符合條件的資料!',total:0};
+          if(mode==='twse-out-of-range') return {stat:'查詢日期小於99年1月4日，請重新查詢!',total:0};
+          if(mode==='degraded' && url.searchParams.get('stockNo')!=='2309') {
+            const month=url.searchParams.get('date').slice(0,6);
+            return {stat:'OK',data:dates.filter(day=>day.startsWith(month)).map(day=>[rocSlash(day),'1500000','150000000','99','101','98','100','1','1000'])};
+          }
+          return {stat:'SERVICE_UNAVAILABLE'};
+        }},
         {match:url=>url.pathname.includes('/afterTrading/tradingStock'),reply:{stat:'OK'}},
         {match:url=>url.pathname.includes('/finance/chart/'),reply:{chart:{result:null,error:{code:'Unavailable'}}}}
       ]});
       try {const body=await mod.buildOvernightSignals();console.log(JSON.stringify(body));}
       finally {await mod.flushPersistence();mock.restore();await rm(dataDir,{recursive:true,force:true});}`;
     const result=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',script,mode],{encoding:'utf8'}).trim().split('\n').at(-1));
+    if(mode==='degraded') {
+      assert.equal(result.candidateCount,10); assert.equal(result.scanQuality.completedCount,10);
+      assert.equal(result.scanQuality.readyCount,9); assert.equal(result.scanQuality.coverageRate,90);
+      assert.equal(result.publication.kind,'formal'); assert.equal(result.publication.degraded,true);
+      const failed=result.inputEvidence.find(item=>item.code==='2309');
+      assert.equal(failed.outcome,'data-insufficient');
+      assert.ok(failed.sourceEvidence.official.every(row=>row.status==='failed'));
+      assert.equal(failed.sourceEvidence.fallback.status,'failed');
+      return;
+    }
+    const empty=['twse-empty','twse-real-empty'].includes(mode);
     assert.equal(result.candidateCount,1,mode); assert.equal(result.scanQuality.readyCount,0,mode);
-    assert.equal(result.publication.kind,mode==='twse-empty'?'formal':'provisional',mode);
+    assert.equal(result.publication.kind,empty?'formal':'provisional',mode);
     assert.equal(result.inputEvidence[0].sourceEvidence.fallback.status,'failed',mode);
-    assert.ok(result.inputEvidence[0].sourceEvidence.official.every(row=>row.status===(mode==='twse-empty'?'confirmed-empty':'failed')),mode);
+    assert.ok(result.inputEvidence[0].sourceEvidence.official.every(row=>row.status===(empty?'confirmed-empty':'failed')),mode);
+    });
   }
 });

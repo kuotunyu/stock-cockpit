@@ -163,6 +163,8 @@ node scripts/date-sweep.mjs 2027-01-01   # 只掃指定日期，用來重現回�
 
 T03 修正回歸另走真實隔日 builder 的 HTTP200 未成功／TPEx 缺表／備援失敗與官方成功空資料；故障 logger 只在注入個案局部 capture、斷言及 finally 還原。模型測試包含部分未知但明確不相容的 pending、全數不支援不抓行情且游標不動；`swing-verify.test.mjs` 釘直接推進與 replay 邊界。`signal-verify.test.mjs` 驗同日 legacy A／formal B 的兩入口一致、完整 memo 價格欄位與 legacy final 原證據不另造 revision。
 
+來源分類另由 `history-failure-propagation.test.mjs` 釘 TWSE 7855 上市前202607的已確認無資料形狀、超出範圍／未知錯誤／矛盾payload，以及TPEx缺表不接受TWSE文案。實際 builder 同時覆蓋9/10可評估的degraded正式發布與全部合法空資料／Yahoo失敗的正式零訊號；不得改成全候選來源100%成功門檻。
+
 ```powershell
 node --test tests/backend/verification-publication.test.mjs tests/backend/verification-model-version.test.mjs tests/backend/verify-history-memo.test.mjs
 ```
