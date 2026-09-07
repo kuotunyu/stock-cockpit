@@ -3,6 +3,16 @@ import test,{before,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {createAppWindow} from '../helpers/dom-harness.mjs';
 let app;before(async()=>{app=await createAppWindow();});after(()=>app.cleanup());
+test('候選池固定期間差以百分點顯示，配對訊號/池coverage分開、缺值與惡意原因不造0',()=>{
+  const model={modelKey:'fixed-price',horizon:'next-open-to-session-15-close',benchmarkSpec:{version:'frozen-pool-fixed-price-v1'},pairedCount:2,eligibleCount:3,pairedDays:1,eligibleDays:1,strategyMean:3,benchmarkMean:2,meanDifference:1};
+  const data={cohort:{models:[]},benchmarks:{window:{asOf:'2026-09-07',limit:260,includedCaptures:1,availableCaptures:1,fromDate:'2026-08-03',throughDate:'2026-08-03'},models:[model],cohorts:[{...model,captureId:'one',tradeDate:'20260803',status:'pending',cursor:4,poolCoverage:{TWSE:{eligibleCount:5,validCount:4,status:'unavailable',missingReasons:['<img src=x>']}},missingReasons:{'pool-incomplete':1}}]}};
+  const html=app.evalIn(`renderVerificationMeasurement(${JSON.stringify(data)},'swing')`);
+  assert.match(html,/相對候選池的同期間報酬差/);assert.match(html,/1\.00 個百分點/);assert.match(html,/配對訊號 2\/3/);assert.match(html,/4\/5 檔/);assert.match(html,/第 15/);
+  assert.match(html,/含入選股/);assert.match(html,/不是帳戶/);assert.doesNotMatch(html,/<img src=x>/);assert.match(html,/&lt;img/);
+  assert.match(html,/跨模型最多 260/);assert.match(html,/日期 2026-08-03 → 2026-08-03/);
+  model.meanDifference=null;const missing=app.evalIn(`renderVerificationBenchmarks(${JSON.stringify({models:[model],cohorts:[]})},'swing')`);
+  assert.match(missing,/未定義/);assert.doesNotMatch(missing,/0\.00 個百分點/);
+});
 test('含息文案保留零/負值；缺金額不用百分比或0冒充',()=>{
   assert.match(app.evalIn(`holdingOutcomeText({netPnl:0,holdingReturnPct:0})`),/模型損益 0/);
   assert.match(app.evalIn(`holdingOutcomeText({netPnl:-5,holdingReturnPct:-5})`),/-5/);

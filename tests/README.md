@@ -14,6 +14,8 @@ npm run test:dates    # 【選跑】把時鐘平移到各種風險日期各跑�
 npm run test:live     # 【選跑】真打 TWSE/TPEx 驗證上游欄位形狀（偵測 fixture 漂移）
 ```
 
+固定期間候選池回歸可跑 `node --test tests/backend/verification-benchmark*.test.mjs`：配對訊號與候選檔數分開、完整市場池才发布、官方第 15 個交易日、收盤凍結來源／價格修訂、公司行動還原、來源取得時刻與跨年月份覆蓋。cache 測試使用真 port 0 API 延遲來源驗先回 pending、4 檔游標由已採集完成的排程續跑、30 次實際來源呼叫上界（含重試）、來源故障／完成 memo 不回退、CAS、shutdown drain及獨立 Node 離線重啟。`holding-return-render` 和 Chromium `verification-benchmark` 驗獨立價格模型、配對與池 coverage、缺值、四尺寸／200% 文字及原生明細焦點；沿用原成績單視覺，不宣稱全站 200% 控制項已完成。
+
 第一次在本機執行瀏覽器測試前，先安裝 Playwright 鎖定版本對應的 Chromium：
 
 ```powershell

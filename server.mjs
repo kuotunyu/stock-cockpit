@@ -8946,6 +8946,296 @@ function buildCaptureManifest({ capture, body }) {
   };
 }
 
+// 固定期間候選池是獨立價格觀察，不能借用提前退出或含息現金模型。
+function fixedBenchmarkSpec(strategy) {
+  return { version: 'frozen-pool-fixed-price-v1', strategy,
+    horizon: strategy === 'swing' ? 'next-open-to-session-15-close' : 'signal-close-to-next-close',
+    sessions: strategy === 'swing' ? 15 : 1, entryField: strategy === 'swing' ? 'open' : 'close',
+    returnBasis: 'adjusted-reference-price', costModelVersion: 'flat-round-trip-0.471pct-v1', costPct: 0.471,
+    weighting: 'equal-weight-frozen-pool-by-exchange', poolPolicy: 'complete-exchange-pool-only',
+    priceSourceVersion: 'official-stock-month-v1', adjustmentVersion: 'official-reference-ratio-v1',
+    calendarVersion: 'TWSE-FMTQIK-official-monthly-sessions', timingPolicy: 'price-observation-with-publication-disclosure-v1' };
+}
+
+function benchmarkModelKey(capture, spec = fixedBenchmarkSpec(capture.strategy)) {
+  return stableJson({ captureIdentity: verificationIdentity(capture), benchmarkSpec: spec });
+}
+
+function benchmarkPeriod(capture, calendar, spec) {
+  const signalDate = toCompactDate(capture.tradeDate || '');
+  if (!isValidCompactCalendarDate(signalDate) || !calendar?.tradingDays?.includes(signalDate)) return null;
+  const days = unique(calendar?.tradingDays || []).filter(day => day > signalDate).sort();
+  const exitDate = days[spec.sessions - 1];
+  if (!exitDate || !calendar.through || exitDate > calendar.through) return null;
+  for (let month = signalDate.slice(0,6); month <= exitDate.slice(0,6); month = addMonthsCompact(month + '01', 1).slice(0,6)) {
+    if (!calendar.coveredMonths?.includes(month)) return null;
+  }
+  return { entryDate: capture.strategy === 'swing' ? days[0] : signalDate, exitDate };
+}
+
+function buildFixedHorizonObservation({ capture, candidate, rows = [], calendar, benchmarkSpec, actionResults = {} }) {
+  const spec = benchmarkSpec || fixedBenchmarkSpec(capture.strategy);
+  const period = benchmarkPeriod(capture, calendar, spec);
+  const result = { captureId: capture.captureId, inputFingerprint: capture.inputFingerprint,
+    modelKey: benchmarkModelKey(capture,spec), code: candidate.code, exchange: candidate.exchange,
+    horizon: spec.horizon, returnBasis: spec.returnBasis, period, status: 'unavailable', returnPct: null, missingReasons: [], evidence: null };
+  const missing = reason => ({ ...result, missingReasons: [reason] });
+  if (stableJson(spec) !== stableJson(fixedBenchmarkSpec(capture.strategy))) return missing('benchmark-model-unsupported');
+  if (!period) return missing('official-session-horizon-unavailable');
+  const expectedSource = candidate.exchange === 'TWSE' ? 'TWSE STOCK_DAY' : candidate.exchange === 'TPEx' ? 'TPEx tradingStock' : null;
+  if (!expectedSource) return missing('market-unknown');
+  const dates = unique([period.entryDate, ...(calendar.tradingDays || []).filter(day => day > period.entryDate && day <= period.exitDate)]).sort();
+  const byDate = new Map();
+  for (const row of rows) {
+    const date = toCompactDate(row.date || '');
+    if (!dates.includes(date)) continue;
+    if (byDate.has(date)) return missing('duplicate-price-date');
+    if (row.code !== candidate.code || row.exchange !== candidate.exchange || row.source !== expectedSource || row.priceCoordinate === 'adjusted') return missing('price-source-or-coordinate-mismatch');
+    if (!Number.isFinite(row.close) || row.close <= 0 || !Number.isFinite(Date.parse(row.observedAt))
+      || Date.parse(row.observedAt) < Date.parse(`${compactToIsoDate(date)}T13:35:00+08:00`)) return missing('official-price-evidence-missing');
+    byDate.set(date,row);
+  }
+  if (dates.some(date => !byDate.has(date))) return missing('official-session-price-missing');
+  const entry = byDate.get(period.entryDate), exit = byDate.get(period.exitDate);
+  const entryPrice = entry[spec.entryField];
+  if (!(Number.isFinite(entryPrice) && entryPrice > 0)) return missing('entry-price-missing');
+  if (capture.strategy === 'overnight') {
+    if (candidate.source !== candidate.exchange + ' OpenAPI' || toCompactDate(candidate.sourceAsOf || '') !== period.entryDate
+      || !(Number.isFinite(candidate.price) && candidate.price > 0)) return missing('frozen-official-close-unproven');
+    if (candidate.price !== entryPrice) return missing('frozen-close-source-revision-mismatch');
+  }
+  let adjustedEntryPrice = entryPrice;
+  const adjustments = [];
+  for (let index = 1; index < dates.length; index++) {
+    const date = dates[index], row = byDate.get(date), prior = byDate.get(dates[index-1]);
+    const action = candidate.exchange === 'TWSE' ? actionResults[date] : null;
+    let ratio;
+    if (action && Number.isFinite(action.preClose) && action.preClose > 0 && Number.isFinite(action.referencePrice) && action.referencePrice > 0) {
+      if (action.preClose !== prior.close) return missing('official-action-price-revision-mismatch');
+      ratio = action.referencePrice / action.preClose;
+    }
+    else if (row.exchangeCorporateActionMark) return missing('official-action-ratio-missing');
+    else {
+      const quantified = swingVerificationActionRatio(row,{price:prior.close},{adjacent:true});
+      if (!quantified.quantified) return missing('official-action-ratio-missing');
+      ratio = quantified.ratio ?? 1;
+    }
+    adjustedEntryPrice *= ratio;
+    if (ratio !== 1) adjustments.push({date,ratio,source:action ? 'TWSE-TWT49U' : expectedSource, ...(action ? {input:cloneJson(action)} : {previousClose:prior.close,exchangePreviousClose:row.exchangePreviousClose})});
+  }
+  const value = (exit.close / adjustedEntryPrice - 1) * 100 - spec.costPct;
+  if (!Number.isFinite(value)) return missing('fixed-return-not-finite');
+  const openAt = Date.parse(`${compactToIsoDate(period.entryDate)}T09:00:00+08:00`);
+  const lower = Date.parse(capture.publicationStartedAt), upper = Date.parse(capture.availableConfirmedAt);
+  const timing = capture.strategy !== 'swing' ? 'close-observation-not-executable'
+    : Number.isFinite(lower) && lower >= openAt ? 'late-publication'
+    : Number.isFinite(upper) && upper < openAt ? 'available-before-open' : 'timing-uncertain';
+  return { ...result, status:'complete', returnPct:value,
+    evidence:{entry:{date:period.entryDate,price:entryPrice,source:entry.source,observedAt:entry.observedAt},
+      exit:{date:period.exitDate,price:exit.close,source:exit.source,observedAt:exit.observedAt}, adjustedEntryPrice,
+      rows:dates.map(date=>cloneJson(byDate.get(date))), adjustments, calendar:cloneJson(calendar), timing,
+      publicationStartedAt:capture.publicationStartedAt || null, availableConfirmedAt:capture.availableConfirmedAt || null,
+      frozenCandidate:cloneJson(candidate),costPct:spec.costPct} };
+}
+
+function buildMatchedBenchmark({ capture, observations = [], benchmarkSpec }) {
+  const spec = benchmarkSpec || fixedBenchmarkSpec(capture.strategy), modelKey = benchmarkModelKey(capture,spec);
+  const poolCoverage = {}, paired = [], missingReasons = {};
+  const note = reason => { missingReasons[reason] = (missingReasons[reason] || 0) + 1; };
+  const valid = row => row?.status === 'complete' && Number.isFinite(row.returnPct) && row.modelKey === modelKey
+    && row.captureId === capture.captureId && row.inputFingerprint === capture.inputFingerprint
+    && row.horizon === spec.horizon && row.returnBasis === spec.returnBasis;
+  for (const exchange of unique((capture.candidates || []).map(item=>item.exchange))) {
+    const candidates = capture.candidates.filter(item=>item.exchange === exchange);
+    const values = candidates.map(candidate=>observations.find(row=>row.code === candidate.code && row.exchange === exchange && valid(row)));
+    const period = values.find(Boolean)?.period;
+    const samePeriod = values.filter(row=>row && period && stableJson(row.period) === stableJson(period));
+    const complete = candidates.length > 0 && samePeriod.length === candidates.length;
+    poolCoverage[exchange] = { eligibleCount:candidates.length,validCount:samePeriod.length,status:complete?'complete':'unavailable',
+      benchmarkMean:complete ? samePeriod.reduce((sum,row)=>sum+row.returnPct,0)/candidates.length : null,period:period || null,
+      missingReasons:candidates.flatMap((candidate,i)=>values[i] ? (samePeriod.includes(values[i]) ? [] : ['period-mismatch'])
+        : observations.find(row=>row.code===candidate.code && row.exchange===exchange)?.missingReasons || ['price-evidence-missing']) };
+  }
+  const issued = [...new Map((capture.issued || []).map(row=>[row.signalId,row])).values()];
+  for (const signal of issued) {
+    const pool = poolCoverage[signal.exchange];
+    const selected = observations.find(row=>row.code === signal.code && row.exchange === signal.exchange && valid(row));
+    if (!pool || pool.status !== 'complete') { note('pool-incomplete'); continue; }
+    if (!selected || !capture.candidates.some(c=>c.code===signal.code && c.exchange===signal.exchange)) { note('selected-price-missing');continue; }
+    if (stableJson(selected.period) !== stableJson(pool.period)) {note('period-mismatch');continue;}
+    paired.push({ signalId:signal.signalId,code:signal.code,exchange:signal.exchange,scenario:signal.scenario || 'unknown',
+      strategyReturn:selected.returnPct,benchmarkReturn:pool.benchmarkMean,timing:selected.evidence?.timing || 'timing-unknown' });
+  }
+  const mean = field => paired.length ? paired.reduce((sum,row)=>sum+row[field],0)/paired.length : null;
+  return {modelKey,horizon:spec.horizon,returnBasis:spec.returnBasis,benchmarkSpec:spec,
+    captureId:capture.captureId,tradeDate:capture.tradeDate,inputFingerprint:capture.inputFingerprint,
+    countGrain:'issued-signal',includesSelected:true,pairedCount:paired.length,eligibleCount:issued.length,
+    missingReasons,poolCoverage,paired, strategyMean:mean('strategyReturn'),benchmarkMean:mean('benchmarkReturn'),
+    meanDifference:paired.length ? mean('strategyReturn')-mean('benchmarkReturn') : null};
+}
+
+function authoritativeBenchmarkCaptures(db, strategy = null) {
+  const ids = new Set(Object.values(db.verificationPublications?.current || {}));
+  return Object.values(db.verificationCaptures || {}).filter(c => ids.has(c.captureId) && c.fullRecord && c.kind === 'formal'
+    && c.canonical && Array.isArray(c.candidates) && (!strategy || c.strategy === strategy))
+    .map(c => ({ ...c, publicationStartedAt:db.verificationPublications.captures?.[c.captureId]?.publicationStartedAt || c.publicationStartedAt,
+      availableConfirmedAt:db.verificationPublications.captures?.[c.captureId]?.availableConfirmedAt || null }))
+    .sort((a,b)=>String(a.tradeDate).localeCompare(String(b.tradeDate)) || a.captureId.localeCompare(b.captureId));
+}
+
+function benchmarkMemoKey(capture, spec = fixedBenchmarkSpec(capture.strategy)) {
+  return createHash('sha256').update(stableJson({captureId:capture.captureId,inputFingerprint:capture.inputFingerprint,modelKey:benchmarkModelKey(capture,spec)})).digest('hex');
+}
+
+// 一輪一cohort、四檔、最多三月份。Calendar 3 + action 3 + price 4×3×2(含retry) <= 30來源呼叫。
+// 沿用已有月cache/single-flight；完成的逐檔證據存DB，不因LRU淘汰或日後來源修訂而重抓。
+let verificationBenchmarkFlight = null;
+const BENCHMARK_RETRY_MS = 10 * 60 * 1000;
+function queueVerificationBenchmark() {
+  if (shutdownRequested) return null;
+  if (verificationBenchmarkFlight) return verificationBenchmarkFlight;
+  const task = Promise.resolve().then(()=>runVerificationBenchmarkBatch());
+  verificationBenchmarkFlight = trackBackgroundTask(task,'固定期間候選池觀察');
+  void task.finally(()=>{if(verificationBenchmarkFlight===task)verificationBenchmarkFlight=null;}).catch(()=>{});
+  return task;
+}
+
+async function runVerificationBenchmarkBatch() {
+  if (shutdownRequested) return {status:'stopped'};
+  const db = await loadDb(), now = Date.now();
+  const store = db.verificationBenchmarks || {memos:{},cursor:''};
+  const work = authoritativeBenchmarkCaptures(db).map(capture=>({capture,key:benchmarkMemoKey(capture)}))
+    .filter(({key})=>store.memos?.[key]?.status !== 'complete' && !(store.memos?.[key]?.retryAt > now));
+  if (!work.length) return {status:'idle'};
+  const after = work.findIndex(item=>item.key === store.cursor);
+  const {capture,key} = work[(after+1) % work.length];
+  const spec = fixedBenchmarkSpec(capture.strategy);
+  const prior = store.memos?.[key];
+  const memo = cloneJson(prior || {captureId:capture.captureId,inputFingerprint:capture.inputFingerprint,
+    modelKey:benchmarkModelKey(capture,spec),benchmarkSpec:spec,capture:cloneJson(capture),observations:[],cursor:0,status:'pending'});
+  // 完成的calendar及capture證據也不會在後續批次被來源修訂替换。
+  const frozen = memo.capture;
+  const from = toCompactDate(frozen.tradeDate || '');
+  const at = new Date(now), taipei = new Date(now+8*60*60*1000);
+  const today = toTaipeiCompactDate(at);
+  const closedThrough = taipei.getUTCHours()*60+taipei.getUTCMinutes() >= 13*60+35 ? today : addDaysCompact(today,-1);
+  let attempted = 0;
+  try {
+    if (!memo.calendar) {
+      const tradingDays=[],coveredMonths=[];
+      for(let i=0;i<3;i++) {
+        const month=addMonthsCompact(from,i).slice(0,6);
+        if(month>closedThrough.slice(0,6))break;
+        const evidence=await getSwingHistoricalCalendar(month+'01',month+'01');
+        coveredMonths.push(month);tradingDays.push(...evidence.tradingDays.filter(day=>day<=closedThrough));
+        const calendar={tradingDays:unique(tradingDays).sort(),coveredMonths:[...coveredMonths],through:closedThrough,
+          source:spec.calendarVersion,observedAt:at.toISOString()};
+        if(benchmarkPeriod(frozen,calendar,spec)){memo.calendar=calendar;break;}
+      }
+      if(!memo.calendar) throw new Error('official-session-horizon-unavailable');
+    }
+    const period=benchmarkPeriod(frozen,memo.calendar,spec);
+    const months=[];
+    for(let month=period.entryDate.slice(0,6);month<=period.exitDate.slice(0,6);month=addMonthsCompact(month+'01',1).slice(0,6))months.push(month);
+    const candidates=frozen.candidates;
+    const jobs=[];
+    for(let walked=0;walked<candidates.length && jobs.length<4;walked++) {
+      const index=(memo.cursor+walked)%candidates.length,candidate=candidates[index];
+      if(!memo.observations.some(row=>row.code===candidate.code && row.exchange===candidate.exchange && row.status==='complete'))jobs.push({candidate,index});
+    }
+    if(jobs.some(({candidate})=>candidate.exchange==='TWSE')) {
+      await loadFundamentalsHistory(); // 本機讀取；不啟動最新基本面或其他全市場來源。
+      for(const month of months)await loadCorporateActionResultMonth(month);
+    }
+    const outputs=await mapLimit(jobs,2,async({candidate,index})=>{
+      attempted++;
+      try {
+        const rows=[];
+        for(const month of months)rows.push(...await fetchStockHistoryMonth(candidate.code,candidate.exchange,month+'01','',{requireSourceSuccess:true}));
+        const actionResults={};
+        if(candidate.exchange==='TWSE')for(const date of memo.calendar.tradingDays.filter(date=>date>period.entryDate && date<=period.exitDate)) {
+          const action=corporateActionResultFor(candidate.code,date);
+          // 舊價格歸檔的sealed不證明原response沒有缺欄/重複；借既有完整章，不增加來源。
+          if(action && twseHoldingDateCovered(date))actionResults[date]={...cloneJson(action),source:'TWSE-TWT49U',
+            observedAt:corporateActionResultMonthState(date.slice(0,6))?.observedAt || null,
+            coverage:cloneJson(corporateActionResultMonthState(date.slice(0,6))?.monetaryCoverage || null)};
+        }
+        return {index,observation:buildFixedHorizonObservation({capture:frozen,candidate,rows,calendar:memo.calendar,benchmarkSpec:spec,actionResults})};
+      } catch {
+        return {index,observation:{captureId:frozen.captureId,inputFingerprint:frozen.inputFingerprint,modelKey:memo.modelKey,
+          code:candidate.code,exchange:candidate.exchange,horizon:spec.horizon,returnBasis:spec.returnBasis,period,
+          status:'unavailable',returnPct:null,missingReasons:['official-price-source-unavailable']}};
+      }
+    });
+    for(const {index,observation} of outputs) {
+      memo.observations=memo.observations.filter(row=>!(row.code===observation.code && row.exchange===observation.exchange));
+      memo.observations.push(observation);memo.cursor=(index+1)%candidates.length;
+    }
+    memo.result=buildMatchedBenchmark({capture:frozen,observations:memo.observations,benchmarkSpec:spec});
+    const completed=memo.observations.filter(row=>row.status==='complete').length;
+    memo.status=completed===candidates.length ? 'complete' : memo.observations.length===candidates.length ? 'unavailable' : 'pending';
+    memo.reason=memo.status==='unavailable'?'pool-evidence-incomplete':null;
+    memo.retryAt=memo.status==='unavailable'?now+BENCHMARK_RETRY_MS:0;
+    if(memo.status==='complete')memo.completedAt=at.toISOString();
+  } catch(error) {
+    memo.status='pending';memo.reason=error.message==='official-session-horizon-unavailable'?error.message:'official-calendar-source-unavailable';
+    memo.retryAt=now+BENCHMARK_RETRY_MS;
+    memo.result=buildMatchedBenchmark({capture:frozen,observations:memo.observations,benchmarkSpec:spec});
+  }
+  memo.updatedAt=at.toISOString();
+  const committed = await commitDbMutation(draft=>{
+    const current=authoritativeBenchmarkCaptures(draft).find(c=>benchmarkMemoKey(c)===key);
+    if(!current || stableJson(draft.verificationBenchmarks?.memos?.[key] || null)!==stableJson(prior || null))return skipDbMutation(false);
+    draft.verificationBenchmarks ||= {memos:{},cursor:''};
+    draft.verificationBenchmarks.memos[key]=memo;draft.verificationBenchmarks.cursor=key;
+    return true;
+  });
+  return {status:committed ? memo.status : 'discarded',attempted,cursor:memo.cursor,key};
+}
+
+function summarizeVerificationBenchmarks(db,strategy,{asOf=toTaipeiCompactDate()}={}) {
+  const through=toCompactDate(asOf || '');
+  const cutoff=strategy==='swing'?addDaysCompact(through,-90):null;
+  const available=authoritativeBenchmarkCaptures(db,strategy).filter(c=>toCompactDate(c.tradeDate || '')<=through);
+  const inRange=available.filter(c=>!cutoff || toCompactDate(c.tradeDate || '')>=cutoff);
+  const selected=inRange.slice(-260);
+  const window={policy:strategy==='swing'?'last-90-calendar-days-latest-260-formal-captures-v1':'latest-260-formal-captures-v1',
+    allModels:true,asOf:compactToIsoDate(through),limit:260,lookbackCalendarDays:strategy==='swing'?90:null,
+    requestedFromDate:cutoff?compactToIsoDate(cutoff):null,
+    fromDate:selected.length?compactToIsoDate(toCompactDate(selected[0].tradeDate)):null,
+    throughDate:selected.length?compactToIsoDate(toCompactDate(selected.at(-1).tradeDate)):null,
+    availableCaptures:available.length,inRangeCaptures:inRange.length,includedCaptures:selected.length,hasOlder:available.length>selected.length};
+  const cohorts=selected.map(capture=>{
+    const memo=db.verificationBenchmarks?.memos?.[benchmarkMemoKey(capture)];
+    const result=memo?.result || buildMatchedBenchmark({capture,observations:[]});
+    return {...result,status:memo?.status || 'pending',reason:memo?.reason || null,cursor:memo?.cursor || 0,
+      completedAt:memo?.completedAt || null,updatedAt:memo?.updatedAt || null,retryAt:memo?.retryAt || null};
+  });
+  const groups=new Map();
+  for(const cohort of cohorts) {
+    if(!groups.has(cohort.modelKey))groups.set(cohort.modelKey,{modelKey:cohort.modelKey,benchmarkSpec:cohort.benchmarkSpec,
+      horizon:cohort.horizon,returnBasis:cohort.returnBasis,countGrain:'issued-signal',eligibleCount:0,pairedCount:0,signalDates:[],pairedDates:[],missingReasons:{},paired:[]});
+    const group=groups.get(cohort.modelKey);group.eligibleCount+=cohort.eligibleCount;group.pairedCount+=cohort.pairedCount;
+    if(cohort.eligibleCount)group.signalDates.push(cohort.tradeDate);if(cohort.pairedCount)group.pairedDates.push(cohort.tradeDate);
+    group.paired.push(...cohort.paired);
+    for(const [reason,count]of Object.entries(cohort.missingReasons))group.missingReasons[reason]=(group.missingReasons[reason]||0)+count;
+  }
+  const models=[...groups.values()].map(({paired,signalDates,pairedDates,...group})=>({...group,
+    eligibleDays:unique(signalDates).length,pairedDays:unique(pairedDates).length,
+    strategyMean:paired.length?paired.reduce((s,r)=>s+r.strategyReturn,0)/paired.length:null,
+    benchmarkMean:paired.length?paired.reduce((s,r)=>s+r.benchmarkReturn,0)/paired.length:null,
+    meanDifference:paired.length?paired.reduce((s,r)=>s+r.strategyReturn-r.benchmarkReturn,0)/paired.length:null}));
+  return {models,cohorts,window,countGrain:'issued-signal',includesSelected:true,poolPolicy:'complete-exchange-pool-only',
+    reason:cohorts.length?null:available.length?'outside-display-window':'frozen-candidate-pool-not-recorded'};
+}
+
+async function withVerificationBenchmarks(body,strategy) {
+  const benchmarks=summarizeVerificationBenchmarks(await loadDb(),strategy);
+  // 回應消費已提交進度；開成績單不等260檔歷史補抓，也不污染原summary快取。
+  queueVerificationBenchmark();
+  return {...body,benchmarks};
+}
+
 function summarizeCaptureCoverage(manifests, expectedDates = [], { fromDate = '', asOf = '' } = {}) {
   const canonical = manifests.filter(item => item.canonical);
   const fullRecordStartDate = canonical.filter(item => item.fullRecord && item.kind === 'formal').map(item => item.tradeDate).sort()[0] || null;
@@ -14223,7 +14513,7 @@ async function handleApi(request, requestUrl, response) {
   }
   if (requestUrl.pathname === "/api/overnight/verify/history") {
     try {
-      jsonResponse(response, 200, await buildVerificationHistory());
+      jsonResponse(response, 200, await withVerificationBenchmarks(await buildVerificationHistory(),'overnight'));
     } catch (error) {
       apiFailure(response, 502, error);
     }
@@ -14509,7 +14799,7 @@ async function handleApi(request, requestUrl, response) {
   }
   if (requestUrl.pathname === "/api/swing/verify") {
     try {
-      jsonResponse(response, 200, await buildSwingVerificationSummary());
+      jsonResponse(response, 200, await withVerificationBenchmarks(await buildSwingVerificationSummary(),'swing'));
     } catch (error) {
       apiFailure(response, 502, error);
     }
@@ -15347,6 +15637,9 @@ function closeTasksDue({ today, reference, db, lastRunDay }) {
 // 編排：deps 可注入（測試用）；正式路徑用模組內的 builder。
 // deps.lastRunDay 沒給才使用／更新模組狀態（已跑日、失敗計數、退避）；給了就是純函式模式。
 async function runScheduledCloseTasks(deps = {}) {
+  // 先排獨立固定期間工作，不能被「今天採集完成」或原價格驗證無pending阻斷。
+  if (deps.queueVerificationBenchmark) deps.queueVerificationBenchmark();
+  else if (!deps.loadDb) queueVerificationBenchmark();
   const now = deps.now || new Date();
   const today = toTaipeiCompactDate(now);
   const useModuleState = deps.lastRunDay === undefined;
@@ -15631,6 +15924,8 @@ export {
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
   parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
+  fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
+  runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,
   summarizeFiniteMetric, classifyCohort, summarizeMatureVerification,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,
   holidayCalendarCoversYear,

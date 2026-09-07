@@ -5774,6 +5774,37 @@ function verificationFoldAttributes(key) {
   return `data-verification-fold="${escapeHtml(key)}"${previous?.open ? ' open' : ''}`;
 }
 
+function renderVerificationBenchmarks(data, strategy) {
+  if (!data) return '';
+  const count = value => Number.isFinite(value) ? value : '--';
+  const reasonText = reason => ({'pool-incomplete':'候選池證據未齊','price-evidence-missing':'價格證據待補',
+    'official-session-price-missing':'指定交易日缺 K','official-price-source-unavailable':'官方價格來源暫不可用',
+    'official-session-horizon-unavailable':'固定期間官方交易日尚未齊備','official-calendar-source-unavailable':'官方交易日來源暫不可用',
+    'frozen-official-close-unproven':'凍結來源無法證明官方收盤','frozen-close-source-revision-mismatch':'歷史收盤與凍結原價不一致',
+    'official-action-ratio-missing':'公司行動參考價比率不明','pool-evidence-incomplete':'候選池資料不足，依排程重試'}[reason] || reason);
+  return `<div class="verification-benchmark"><strong>相對候選池的同期間報酬差</strong>
+    ${data.window ? `<p>視圖截至 ${escapeHtml(data.window.asOf || '--')}，${strategy === 'swing' ? '近 90 個日曆日，' : ''}跨模型最多 ${count(data.window.limit)} 份正式採集，完整模型分組計算。本次 ${count(data.window.includedCaptures)}/${count(data.window.availableCaptures)} 份${data.window.fromDate ? `，日期 ${escapeHtml(data.window.fromDate)} → ${escapeHtml(data.window.throughDate)}` : ''}${data.window.hasOlder ? '；較早證據仍保存，未送入本次視圖' : ''}。</p>` : ''}
+    <p>候選池含入選股，各市場依當時凍結名單等權；每市場資料完整才配對，缺漏不移除原候選。配對單位是已發布訊號，同股不同場景仍是不同觀察，不是帳戶或獨立部位績效。</p>
+    <p>兩邊同為官方還原參考價格觀察，各扣 0.471% 近似成本；不含現金股利持有模型。固定期間與停損／達標退出分列；資料不足顯示未定義，缺漏未必隨機。</p>
+    ${!(data.models || []).length ? `<p>${data.reason === 'outside-display-window' ? '目前顯示範圍內沒有凍結候選池紀錄；較早證據仍保留。' : '尚無可用的凍結候選池紀錄；舊池不回填。'}</p>` : ''}
+    ${(data.models || []).map(model => {
+      const key = `${strategy}:${model.modelKey}:benchmark`;
+      const cohorts = (data.cohorts || []).filter(c => c.modelKey === model.modelKey);
+      return `<div class="verification-model"><p>${model.horizon === 'next-open-to-session-15-close' ? '訊號後第 1 個官方交易日開盤 → 第 15 個官方交易日收盤' : '訊號日凍結官方收盤 → 次一官方交易日收盤'}。</p>
+        <p>報酬差：${Number.isFinite(model.meanDifference) ? `${model.meanDifference > 0 ? '+' : ''}${model.meanDifference.toFixed(2)} 個百分點` : '未定義'}；配對訊號 ${count(model.pairedCount)}/${count(model.eligibleCount)}，有效日期 ${count(model.pairedDays)}/${count(model.eligibleDays)}。</p>
+        <p>同一配對交集：入選平均 ${formatSignedPercent(model.strategyMean)}／候選池平均 ${formatSignedPercent(model.benchmarkMean)}。模型 ${escapeHtml(model.benchmarkSpec?.version || '未知')}。</p>
+        <details ${verificationFoldAttributes(key)}><summary data-verification-summary="${escapeHtml(key)}">候選池覆蓋、進度與發布時間</summary>
+          <p>收盤發布晚於同次收盤，收盤價只作觀察；次開另揭露當時可得性。日 K 不證明成交。背景每輪至多一組採集、四檔、三個月，來源不足按排程重試，不保證短時間補完。</p>
+          ${cohorts.map(cohort => `<div><strong>${escapeHtml(cohort.tradeDate || '--')}</strong><p>配對訊號 ${count(cohort.pairedCount)}/${count(cohort.eligibleCount)}；${cohort.status === 'complete' ? '證據已保存' : cohort.status === 'unavailable' ? '資料不足' : '背景待補'}，游標 ${count(cohort.cursor)}${cohort.reason ? `・${escapeHtml(reasonText(cohort.reason))}` : ''}。</p>
+            ${Object.entries(cohort.poolCoverage || {}).map(([exchange,pool])=>`<p>${escapeHtml(exchange)} 池覆蓋 ${count(pool.validCount)}/${count(pool.eligibleCount)} 檔${pool.status !== 'complete' ? '，尚不配對' : ''}；${escapeHtml(pool.period?.entryDate || '--')} → ${escapeHtml(pool.period?.exitDate || '--')}。${[...new Set(pool.missingReasons || [])].map(reason=>escapeHtml(reasonText(reason))).join('、')}</p>`).join('')}
+            ${Object.entries(cohort.missingReasons || {}).map(([reason,n])=>`<p>${escapeHtml(reasonText(reason))}：${count(n)} 筆訊號</p>`).join('')}
+            ${(cohort.paired || []).some(row=>row.timing==='late-publication') ? '<p>含已知晚於開盤發布的價格觀察，不代表當時可進場。</p>' : ''}
+            ${(cohort.paired || []).some(row=>['timing-uncertain','timing-unknown'].includes(row.timing)) ? '<p>含發布時間不確定的價格觀察，無法證明開盤前可得。</p>' : ''}
+          </div>`).join('')}
+        </details></div>`;
+    }).join('')}</div>`;
+}
+
 function renderVerificationMeasurement(data, strategy) {
   const cohort = data.cohort;
   if (!cohort) return '';
@@ -5806,6 +5837,7 @@ function renderVerificationMeasurement(data, strategy) {
         ${strategy === 'overnight' && model.costRisk ? `<details ${verificationFoldAttributes(`${strategy}:${model.modelKey || JSON.stringify(model.identity)}:cost-strata`)}><summary data-verification-summary="${escapeHtml(`${strategy}:${model.modelKey || JSON.stringify(model.identity)}:cost-strata`)}">大盤位階成本明細</summary>${Object.entries(model.byRegime || {}).map(([key,group]) => `<strong>${escapeHtml(key)}</strong>${renderVerificationCostRisk(group.costRisk, strategy)}`).join('')}</details>` : ''}
         ${Object.entries(model.missingReasons || {}).map(([reason,count]) => `<p>${escapeHtml(reason)}：${count}</p>`).join('')}
       </div>`).join('')}
+      ${renderVerificationBenchmarks(data.benchmarks, strategy)}
       ${(data.modelGroups || []).length ? `<p class="verification-saved-models">其他已存觀察模型：${data.modelGroups.map(group => `${verificationIdentityNote(group.identity)} ${group.samples ?? group.days ?? 0} ${strategy === 'swing' ? '筆' : '日'}`).join('；')}。其舊母體結果與原明細保留，不併入正式成熟比較。</p>` : ''}
       ${strategy === 'swing' ? (data.scenarios || []).map(s => `<div class="verification-original-results"><p>保留的原結案口徑・${escapeHtml(swingScenarioName(s.scenario))}：${s.resolved || 0} 筆；達標率 ${s.winRate == null ? '--' : `${formatNumber(s.winRate,1)}%`}；歷史平均淨報酬 ${formatSignedPercent(s.avgResultPctNet)}。${verificationMetricNote(s.metricCoverage?.avgResultPctNet)}</p>${swingDistributionLine(s)}</div>`).join('') : data.totals ? `<p>保留的原觀察口徑：${data.totals.days || 0} 日／${data.totals.signals || 0} 筆；平均開盤 ${formatSignedPercent(data.totals.avgOpenReturn)}；平均收盤 ${formatSignedPercent(data.totals.avgCloseReturn)}。</p>` : ''}
     </details></div>`;
