@@ -10,7 +10,7 @@ log/
 npm-debug.log*
 .impeccable/
 
-# 私人面試筆記與本機開發輔助文檔
+# 私人筆記、本機開發規範、計畫與工具設定
 interview*.md
 INTERVIEW_PREP.md
 *.private.md

@@ -1,6 +1,6 @@
 # Stock1 測試套件
 
-零框架：Node 內建 `node --test`＋ `jsdom`（唯一 devDependency，前端用）。**跑測試需要 Node ≥ 22.22.2 或 ≥ 24.15**（jsdom 30 的 engines 比 app 本身嚴格；本專案用 Node 24）。
+Node 內建 `node --test`＋ `jsdom`（前端 DOM 測試）。使用 **Node 22.22.2 以上的 22.x、24.15.0 以上的 24.x，或 ≥26**；精確範圍為 jsdom 30 的 `^22.22.2 || ^24.15.0 || >=26.0.0`，比 App 本身的 `engines` 嚴格。CI 目前測 Node 22.x／24.x。
 
 ## 怎麼跑
 
@@ -78,7 +78,7 @@ tests/
 │             trade-v2-form / trade-edit-conflict /
 │             trade-product-directory / account-backup（下載、預覽、確認、帳號切換競態）/
 │             service-worker（自有 cache namespace 與離線策略）
-└─ live/      upstream-shape（25 項 opt-in；含 TWSE/TPEx 公司行動與 ETF 商品主檔契約；網路失敗會 skip 不 fail）
+└─ live/      upstream-shape（opt-in 上游契約；網路失敗會 skip，不算已驗證）
 ```
 
 ## 重要慣例（改測試前先讀）
@@ -98,10 +98,17 @@ tests/
 13. **DB corruption recovery 只認 JSON `SyntaxError`**：主檔 `readFile` 的 `EACCES`／`EIO`／`EISDIR` 等錯誤必須原樣 fail-closed，不能改名原路徑、不能嘗試備份或空 DB；`db-read-error.test.mjs` 與三個 `db-recovery*` 分別釘住兩條路徑。
 14. **atomic temp 不可 follow**：`atomic-write.test.mjs` 預埋 hard-linked `.tmp`，確認 `writeFileAtomic()` 先 unlink、只忽略 `ENOENT`，再以 `wx` 建新檔；sentinel inode 不得被改寫。
 
+## Mock 與驗證範圍
+
+- `fetch-mock.mjs` 的 `match(url, init)` 與 `reply(url, init)` 都能讀取 method、body、headers、signal；`calls` 記錄 url／method／body／headers。同 URL 不同 POST body 可以分流，不必以日期或呼叫次數猜測。
+- `dom-harness.mjs` 載入實際 HTML 與 app.js，但 Canvas、`matchMedia` 等由測試替身提供。jsdom 不計算真實 CSS 版面；DOM／樣式原文斷言通過，不代表欄寬、換行、遮擋、Canvas 繪製或手機互動已在瀏覽器驗證。
+- UI 排版改動需另用真實瀏覽器驗證。預覽必須使用獨立資料目錄與 5180 或臨時埠，結束後完整關閉；不可連到使用者的正式 5174 進行測試。
+- 測試數量與通過情況以這次命令輸出為準，不把某次歷史測量當作目前基準。
+
 ## 覆蓋率說明
 
-- 現況（2026-07-15）：最新 `npm test` 共 **543/543 項離線測試**（後端 339、前端 204；後續仍以最新 TAP 為準）；`npm run test:live` 共 **25 項 opt-in 契約**。`server.mjs` 覆蓋率為**行 89.29%／分支 77.30%／函式 89.53%**。
-- Node 24 原生 coverage 無法正確合併「同一 ESM 加 query-string cache bust」的多份來源。`scripts/test-coverage.mjs` 會先正常跑 **7/7** 項 cache-bust 契約（不納入原生 coverage 合併），再把其餘 **511/511** 項 measurable tests 用 `--test-concurrency=1` 收集可信聯集；不要把它改回單一 glob coverage 指令，否則報表會假降到約 16%。
+- 覆蓋率是當次執行的測量，請以 `npm run test:coverage` 輸出為準；不沿用歷史百分比或固定案例數。
+- Node 24 原生 coverage 無法正確合併「同一 ESM 加 query-string cache bust」的多份來源。`scripts/test-coverage.mjs` 先執行 `dividend-schedule-resilience.test.mjs` 與 `fundamentals-dividend-source-status.test.mjs` 的 cache-bust 契約（不納入原生 coverage 合併），再將其餘測試以 `--test-concurrency=1` 收集聯集。不要改回單一 glob coverage 指令；來源歸屬錯誤會產生失真的報表。
 - `app.js` 在 jsdom 內以 script 注入執行 → **拿不到覆蓋率歸屬**（eval 類執行的既知限制；c8 亦同）。前端品質由測試清單保證，不看百分比。
 
 ## 日期體檢（`npm run test:dates`）
@@ -122,12 +129,12 @@ node scripts/date-sweep.mjs 2027-01-01   # 只掃指定日期，用來重現回�
 
 實作上兩個關鍵：時鐘用**平移**不是凍結（否則量測經過時間的斷言會失去意義）；jsdom 是**獨立 realm**、有自己的 `Date`，必須另外 patch，否則前端測試會出現「測試檔用假今天、app.js 用真今天」的假失敗。
 
-刻意**不進 CI**：跑一輪好幾分鐘，掛在每次 push 上不划算。它證明的是「這些日子當下是綠的」，不是「永遠不會紅」。
+日期體檢不在每次 push／PR 執行；由 [Reliability workflow](../.github/workflows/reliability.yml) 每日排程或手動執行。它驗證選定日期下的行為，不保證所有未來日期都正確。
 
-## server.mjs 的測試掛鉤（唯一產品碼改動）
+## server.mjs 的測試掛鉤
 
 - 檔尾 `export { ... }`：純函式＋資料層＋`server`／`startServer`／`shutdownServer`／`flushPersistence`。
-- `if (!process.env.STOCK1_SKIP_LISTEN) startServer();`：測試 import 前設 `STOCK1_SKIP_LISTEN=1`，再自行 `startServer(0)`。
+- `STOCK1_SKIP_LISTEN=1`：測試 import 前停用正式自動啟動，再由 helper 呼叫 `startServer(0)`；收盤排程也由測試環境停用。
 - `importServer({ routes, dataDir, dbPath })`／`bootServer({ routes, dataDir, dbPath })` 會在 import 前以**顯式 options**設定隔離環境；需要預埋 DB／備份的測試先建立目錄與 fixture，再把路徑傳入 helper。helper 固定 `ADMIN_USERNAME=admin`、`PORT=0`，清除 ambient `SESSION_MAX_AGE_MS`／`COOKIE_SECURE`；未傳 `dbPath` 時也必須刪除 `process.env.DB_PATH`，不可讓外部 shell 或前一情境污染測試。一般測試一律走 helper 的顯式 options，不直接修改 ambient `DATA_DIR`／`DB_PATH`。
 - `bootServer().close()` 會走正式 `shutdownServer()`：HTTP listener、未完成的持久化寫入與券商清理都必須排空；測試不得只直接呼叫 `server.close()` 留下背景工作。
 - runtime DB 寫入走 `commitDbMutation()`；queue tail 會自行吸收當次 rejection 並保持 fulfilled，`flushPersistence()` 仍會等待所有 pending mutation。測試製造 business 4xx 或已安全丟棄的 persistence failure 後，只需移除暫時性故障 blocker，即可直接驗證後續 mutation 或安全關機；不要額外做一筆成功 mutation 來「清洗」queue。

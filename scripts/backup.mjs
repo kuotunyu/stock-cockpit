@@ -13,7 +13,8 @@
 //   npm run backup "D:\\OneDrive\\stock1-backup"     指定目標（第一次用這個）
 //   npm run backup                                    之後可改設環境變數 STOCK1_BACKUP_DIR
 //
-// 要自動化就交給 Windows 工作排程器：程式填 npm、引數填 run backup、起始位置填專案資料夾。
+// 工作排程器用 npm.cmd 完整路徑、引數 run backup "目標資料夾"、起始位置填專案資料夾；
+// 省略目標時需事先設定 STOCK1_BACKUP_DIR，命令列指定過的目標不會自動記住。
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -25,7 +26,8 @@ const KEEP = 30;
 
 // APP_SECRET 沒設（或還是範例值、太短）時，DB 裡的券商憑證是用公開 repo 裡寫死的金鑰加密的，
 // 等同明文：身分證字號、富邦登入密碼、憑證密碼。把它複製到雲端同步資料夾等於把這些送出去，
-// 所以這種情況預設剝掉 brokerCredentials（其餘完整）。這支 script 不經 --env-file 啟動，自己讀 .env。
+// 所以這種情況預設剝掉 brokerCredentials（其餘完整）。npm run backup 會載入 .env；
+// 直接 node 執行時，下面另有 APP_SECRET 的 .env 讀取備援（不等於載入全部環境變數）。
 const UNSAFE_SECRETS = new Set(["", "replace-with-a-long-random-secret"]);
 function readAppSecret() {
   if (process.env.APP_SECRET !== undefined) return String(process.env.APP_SECRET);
