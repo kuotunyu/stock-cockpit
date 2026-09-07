@@ -18,7 +18,7 @@ test('策略[2,4]對兩市場等權池[1,3]，均差1pp；包含入選股而非�
   const c=capture();const observations=[observation(c,'2330','TWSE',2),observation(c,'2317','TWSE',0),observation(c,'6488','TPEx',4),observation(c,'5483','TPEx',2)];
   const got=mod.buildMatchedBenchmark({capture:c,observations,benchmarkSpec:mod.fixedBenchmarkSpec('overnight')});
   assert.equal(got.strategyMean,3);assert.equal(got.benchmarkMean,2);assert.equal(got.meanDifference,1);assert.equal(got.pairedCount,2);assert.equal(got.eligibleCount,2);
-  assert.equal(got.countGrain,'issued-signal');assert.equal(got.poolCoverage.TWSE.eligibleCount,2);assert.equal(got.includesSelected,true);
+  assert.deepEqual(got.captureIdentity,c.identity);assert.equal(got.countGrain,'issued-signal');assert.equal(got.poolCoverage.TWSE.eligibleCount,2);assert.equal(got.includesSelected,true);
   const partial=mod.buildMatchedBenchmark({capture:c,observations:observations.slice(0,3),benchmarkSpec:mod.fixedBenchmarkSpec('overnight')});
   assert.equal(partial.eligibleCount,2);assert.equal(partial.pairedCount,1);assert.equal(partial.strategyMean,2);assert.equal(partial.benchmarkMean,1);assert.equal(partial.meanDifference,1);
   assert.equal(partial.poolCoverage.TPEx.eligibleCount,2);assert.equal(partial.poolCoverage.TPEx.validCount,1);assert.equal(partial.missingReasons['pool-incomplete'],1);
@@ -32,7 +32,8 @@ test('不同版本、座標、時間、capture與上市上櫃證據均不借用�
   }
 });
 function prices(c){return [day,...sessions].map((date,i)=>({date,code:'2330',exchange:'TWSE',open:i===1?100:99,close:i===15?110:100,exchangePreviousClose:100,source:'TWSE STOCK_DAY',observedAt:'2026-08-25T08:00:00Z'}));}
-const calendar={tradingDays:[day,...sessions],coveredMonths:['202608'],through:'20260831',source:'TWSE-FMTQIK-official-monthly-sessions'};
+const monthProof=(month,through)=>({source:'TWSE FMTQIK',requestedAt:'2027-02-01T06:00:00Z',observedAt:'2027-02-01T06:00:00Z',coveredFrom:month+'01',coveredThrough:through,completeMonth:true,status:'fresh'});
+const calendar={monthEvidence:{'202608':monthProof('202608','20260831')},tradingDays:[day,...sessions],coveredMonths:['202608'],through:'20260831',source:'TWSE-FMTQIK-official-monthly-sessions'};
 test('summary最新260份與波段90日視圖有界；窗口外與future證據仍留DB，空窗口日期不補造',()=>{
   const makeDb=captures=>({verificationCaptures:Object.fromEntries(captures.map(c=>[c.captureId,c])),verificationPublications:{current:Object.fromEntries(captures.map(c=>[c.captureId,c.captureId])),captures:{}},verificationBenchmarks:{memos:{old:{marker:'keep'}}}});
   const formal=(strategy,date,id)=>({...capture(strategy),tradeDate:date,captureId:id,kind:'formal',fullRecord:true,canonical:true});
@@ -46,6 +47,13 @@ test('summary最新260份與波段90日視圖有界；窗口外與future證據�
   assert.deepEqual(swing.cohorts.map(c=>c.captureId),['edge']);assert.equal(swing.window.availableCaptures,2);assert.equal(swing.window.hasOlder,true);assert.equal(Object.keys(swingDb.verificationCaptures).length,3);
   const empty=mod.summarizeVerificationBenchmarks(makeDb([formal('swing',before,'old')]),'swing',{asOf:'20260907'});
   assert.equal(empty.window.fromDate,null);assert.equal(empty.window.throughDate,null);assert.equal(empty.reason,'outside-display-window');
+});
+test('日曆來源時間無效或取得時間早於請求，不信任月份覆蓋',()=>{
+  const c=capture(),proof=calendar.monthEvidence['202608'];
+  for(const patch of [{observedAt:'2027-01-31T06:00:00Z'},{observedAt:'invalid'},{requestedAt:'invalid'}]){
+    const bad={...calendar,monthEvidence:{'202608':{...proof,...patch}}};
+    assert.equal(mod.buildFixedHorizonObservation({capture:c,candidate:c.candidates[0],rows:prices(c),calendar:bad}).returnPct,null);
+  }
 });
 test('波段固定第1session open到第15session close，不取提前停損；缺第15日不順延',()=>{
   const c=capture('swing'),spec=mod.fixedBenchmarkSpec('swing');
@@ -78,7 +86,7 @@ test('價格取得時刻早於該日收盤或無效，不是正式close證據',(
 test('官方跨年session需兩月份覆蓋與through上界',()=>{
   const c={...capture(),tradeDate:'20261231'},candidate={...c.candidates[0],sourceAsOf:'20261231'};
   const rows=[{date:'20261231',open:100,close:100},{date:'20270104',open:102,close:104}].map(r=>({...r,code:'2330',exchange:'TWSE',source:'TWSE STOCK_DAY',observedAt:'2027-01-04T08:00:00Z',exchangePreviousClose:100}));
-  const cal={tradingDays:['20261231','20270104'],coveredMonths:['202612','202701'],through:'20270104'};
+  const cal={monthEvidence:{'202612':monthProof('202612','20261231'),'202701':monthProof('202701','20270131')},tradingDays:['20261231','20270104'],coveredMonths:['202612','202701'],through:'20270104'};
   assert.ok(Math.abs(mod.buildFixedHorizonObservation({capture:c,candidate,rows,calendar:cal}).returnPct-3.529)<1e-9);
   for(const partial of [{...cal,coveredMonths:['202701']},{...cal,through:'20261231'}])assert.equal(mod.buildFixedHorizonObservation({capture:c,candidate,rows,calendar:partial}).returnPct,null);
 });

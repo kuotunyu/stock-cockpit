@@ -8954,7 +8954,7 @@ function fixedBenchmarkSpec(strategy) {
     returnBasis: 'adjusted-reference-price', costModelVersion: 'flat-round-trip-0.471pct-v1', costPct: 0.471,
     weighting: 'equal-weight-frozen-pool-by-exchange', poolPolicy: 'complete-exchange-pool-only',
     priceSourceVersion: 'official-stock-month-v1', adjustmentVersion: 'official-reference-ratio-v1',
-    calendarVersion: 'TWSE-FMTQIK-official-monthly-sessions', timingPolicy: 'price-observation-with-publication-disclosure-v1' };
+    calendarVersion: 'TWSE-FMTQIK-official-monthly-sessions-v2', timingPolicy: 'price-observation-with-publication-disclosure-v1' };
 }
 
 function benchmarkModelKey(capture, spec = fixedBenchmarkSpec(capture.strategy)) {
@@ -8969,6 +8969,13 @@ function benchmarkPeriod(capture, calendar, spec) {
   if (!exitDate || !calendar.through || exitDate > calendar.through) return null;
   for (let month = signalDate.slice(0,6); month <= exitDate.slice(0,6); month = addMonthsCompact(month + '01', 1).slice(0,6)) {
     if (!calendar.coveredMonths?.includes(month)) return null;
+    const evidence = calendar.monthEvidence?.[month];
+    const requiredThrough = month === exitDate.slice(0,6) ? exitDate : addDaysCompact(addMonthsCompact(month+'01',1),-1);
+    // 跨月前置月份必須涵蓋月底；last-good不得把未觀測交易日當休市跳過。
+    if (!evidence || evidence.source !== 'TWSE FMTQIK' || !Number.isFinite(Date.parse(evidence.requestedAt))
+      || !Number.isFinite(Date.parse(evidence.observedAt)) || Date.parse(evidence.observedAt) < Date.parse(evidence.requestedAt)
+      || evidence.coveredFrom !== month+'01'
+      || !isValidCompactCalendarDate(evidence.coveredThrough) || evidence.coveredThrough < requiredThrough) return null;
   }
   return { entryDate: capture.strategy === 'swing' ? days[0] : signalDate, exitDate };
 }
@@ -9068,7 +9075,7 @@ function buildMatchedBenchmark({ capture, observations = [], benchmarkSpec }) {
   }
   const mean = field => paired.length ? paired.reduce((sum,row)=>sum+row[field],0)/paired.length : null;
   return {modelKey,horizon:spec.horizon,returnBasis:spec.returnBasis,benchmarkSpec:spec,
-    captureId:capture.captureId,tradeDate:capture.tradeDate,inputFingerprint:capture.inputFingerprint,
+    captureId:capture.captureId,tradeDate:capture.tradeDate,inputFingerprint:capture.inputFingerprint,captureIdentity:verificationIdentity(capture),
     countGrain:'issued-signal',includesSelected:true,pairedCount:paired.length,eligibleCount:issued.length,
     missingReasons,poolCoverage,paired, strategyMean:mean('strategyReturn'),benchmarkMean:mean('benchmarkReturn'),
     meanDifference:paired.length ? mean('strategyReturn')-mean('benchmarkReturn') : null};
@@ -9122,14 +9129,17 @@ async function runVerificationBenchmarkBatch() {
   let attempted = 0;
   try {
     if (!memo.calendar) {
-      const tradingDays=[],coveredMonths=[];
+      const tradingDays=[],coveredMonths=[],monthEvidence={};
       for(let i=0;i<3;i++) {
         const month=addMonthsCompact(from,i).slice(0,6);
         if(month>closedThrough.slice(0,6))break;
-        const evidence=await getSwingHistoricalCalendar(month+'01',month+'01');
+        const evidence=await getSwingHistoricalCalendar(month+'01',month+'01',{includeSourceEvidence:true});
         coveredMonths.push(month);tradingDays.push(...evidence.tradingDays.filter(day=>day<=closedThrough));
-        const calendar={tradingDays:unique(tradingDays).sort(),coveredMonths:[...coveredMonths],through:closedThrough,
-          source:spec.calendarVersion,observedAt:at.toISOString()};
+        Object.assign(monthEvidence,evidence.monthEvidence);
+        const sourceThrough=Object.values(monthEvidence).map(row=>row.coveredThrough).filter(Boolean).sort().at(-1) || '';
+        const calendar={tradingDays:unique(tradingDays).sort(),coveredMonths:[...coveredMonths],monthEvidence:cloneJson(monthEvidence),
+          through:sourceThrough<closedThrough?sourceThrough:closedThrough,source:spec.calendarVersion,computedAt:at.toISOString()};
+        memo.calendarAttempt=calendar;
         if(benchmarkPeriod(frozen,calendar,spec)){memo.calendar=calendar;break;}
       }
       if(!memo.calendar) throw new Error('official-session-horizon-unavailable');
@@ -9213,7 +9223,7 @@ function summarizeVerificationBenchmarks(db,strategy,{asOf=toTaipeiCompactDate()
   });
   const groups=new Map();
   for(const cohort of cohorts) {
-    if(!groups.has(cohort.modelKey))groups.set(cohort.modelKey,{modelKey:cohort.modelKey,benchmarkSpec:cohort.benchmarkSpec,
+    if(!groups.has(cohort.modelKey))groups.set(cohort.modelKey,{modelKey:cohort.modelKey,benchmarkSpec:cohort.benchmarkSpec,captureIdentity:cohort.captureIdentity,
       horizon:cohort.horizon,returnBasis:cohort.returnBasis,countGrain:'issued-signal',eligibleCount:0,pairedCount:0,signalDates:[],pairedDates:[],missingReasons:{},paired:[]});
     const group=groups.get(cohort.modelKey);group.eligibleCount+=cohort.eligibleCount;group.pairedCount+=cohort.pairedCount;
     if(cohort.eligibleCount)group.signalDates.push(cohort.tradeDate);if(cohort.pairedCount)group.pairedDates.push(cohort.tradeDate);
@@ -12703,9 +12713,9 @@ function selectSwingVerificationBatch(store, retryState, { asOf, now = Date.now(
 
 // 已結束的月份才宣稱完整涵蓋；交易日證據不依賴指數 close。
 // 每個原始日期列都須有效且屬於要求月份，不能 filter 後才驗完整性。
-async function getSwingHistoricalCalendar(from, through) {
+async function getSwingHistoricalCalendar(from, through, { includeSourceEvidence = false } = {}) {
   const months = [from.slice(0, 6), through.slice(0, 6)].filter((month, i, all) => all.indexOf(month) === i);
-  const tradingDays = [];
+  const tradingDays = [], monthEvidence = {};
   for (const month of months) {
     let state = swingHistoricalCalendarCache.get(month);
     if (!state) {
@@ -12717,12 +12727,14 @@ async function getSwingHistoricalCalendar(from, through) {
         if (key !== month && !cached.inFlight) swingHistoricalCalendarCache.delete(key);
       }
     }
-    const { value: rows } = await loadWithLastGood(state, { ttlMs: 24 * 60 * 60 * 1000, retryMs: SWING_VERIFY_RETRY_MS, load: async () => {
+    const { value, status } = await loadWithLastGood(state, { ttlMs: 24 * 60 * 60 * 1000, retryMs: SWING_VERIFY_RETRY_MS, load: async () => {
+      const requestedAt = new Date();
       const payload = await fetchJson(TAIEX_HISTORY_URL(month));
+      const observedAt = new Date();
       if (payload?.stat !== "OK" || !Array.isArray(payload.data) || !payload.data.length) {
         throw new Error("歷史交易日月份覆蓋不明");
       }
-      return payload.data.map(row => {
+      const rows = payload.data.map(row => {
         // 此官方欄位為民國 yyy/mm/dd；通用 toCompactDate 會剝掉任意文字且不驗日曆日期，
         // 不適合完整月份證據。指數 -- 不影響該日期確實開市的事實。
         const match = Array.isArray(row) && typeof row[0] === "string"
@@ -12733,15 +12745,27 @@ async function getSwingHistoricalCalendar(from, through) {
         }
         return { date };
       });
+      // 完整月資格按請求起點判定；跨月慢回應和last-good皆不能擴張原始覆蓋。
+      const requestedDay = toTaipeiCompactDate(requestedAt);
+      const taipei = new Date(requestedAt.getTime() + 8*60*60*1000);
+      const closedThrough = taipei.getUTCHours()*60+taipei.getUTCMinutes() >= 13*60+35 ? requestedDay : addDaysCompact(requestedDay,-1);
+      const completeMonth = month < requestedDay.slice(0,6);
+      const coveredThrough = completeMonth ? addDaysCompact(addMonthsCompact(month+'01',1),-1)
+        : rows.map(row=>row.date).filter(date=>date<=closedThrough).sort().at(-1) || null;
+      return {rows,evidence:{source:'TWSE FMTQIK',requestedAt:requestedAt.toISOString(),observedAt:observedAt.toISOString(),
+        coveredFrom:month+'01',coveredThrough,completeMonth}};
     } });
+    const rows = value?.rows;
     if (!rows?.length) throw new Error("歷史交易日無法確認");
     tradingDays.push(...rows.map(row => row.date));
+    monthEvidence[month] = {...value.evidence,status};
   }
   for (const [key, state] of swingHistoricalCalendarCache) {
     if (swingHistoricalCalendarCache.size <= 48) break;
     if (!months.includes(key) && !state.inFlight) swingHistoricalCalendarCache.delete(key);
   }
-  return { tradingDays: unique(tradingDays).sort(), holidayRows: [], coveredMonths: months };
+  return { tradingDays: unique(tradingDays).sort(), holidayRows: [], coveredMonths: months,
+    ...(includeSourceEvidence ? {monthEvidence} : {}) };
 }
 let swingVerifySummaryCache = { expiresAt: 0, value: null };
 // 摘要有 10 分鐘快取，任何改動驗證單的路徑都必須讓它失效。抽成具名函式的理由：
@@ -15924,7 +15948,7 @@ export {
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
   parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
-  fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
+  getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
   runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,
   summarizeFiniteMetric, classifyCohort, summarizeMatureVerification,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,

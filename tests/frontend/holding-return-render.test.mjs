@@ -13,6 +13,11 @@ test('候選池固定期間差以百分點顯示，配對訊號/池coverage分�
   model.meanDifference=null;const missing=app.evalIn(`renderVerificationBenchmarks(${JSON.stringify({models:[model],cohorts:[]})},'swing')`);
   assert.match(missing,/未定義/);assert.doesNotMatch(missing,/0\.00 個百分點/);
 });
+test('同benchmark版本跨模型明細保留原選股評估identity並跳脫',()=>{
+  const models=['selection-a','selection-b'].map((selectionVersion,i)=>({modelKey:selectionVersion,benchmarkSpec:{version:'frozen-pool-fixed-price-v1'},captureIdentity:{selectionVersion,evaluationVersion:`evaluation-${i}<img src=x>`,returnBasis:'adjusted-reference-price',costModelVersion:'cost-v1'}}));
+  const html=app.evalIn(`renderVerificationBenchmarks(${JSON.stringify({models,cohorts:[]})},'overnight')`);
+  assert.match(html,/selection-a/);assert.match(html,/selection-b/);assert.match(html,/evaluation-0&lt;img/);assert.match(html,/evaluation-1&lt;img/);assert.doesNotMatch(html,/<img src=x>/);
+});
 test('含息文案保留零/負值；缺金額不用百分比或0冒充',()=>{
   assert.match(app.evalIn(`holdingOutcomeText({netPnl:0,holdingReturnPct:0})`),/模型損益 0/);
   assert.match(app.evalIn(`holdingOutcomeText({netPnl:-5,holdingReturnPct:-5})`),/-5/);
