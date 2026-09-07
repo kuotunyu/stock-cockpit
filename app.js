@@ -5676,12 +5676,14 @@ function renderSignalVerification() {
           .map((row) => `
             <button class="verify-chip ${Number.isFinite(row.currentReturn) ? (row.currentReturn >= 0 ? "is-up" : "is-down") : ""}" data-overnight-code="${row.code}" type="button">
               <strong>${escapeHtml(row.name)}</strong>
-              <span>${formatSignedPercent(row.currentReturn)}</span>
+              <span>${row.holdingOutcomes ? '價格 ' : ''}${formatSignedPercent(row.currentReturn)}</span>
               <small>高 ${formatSignedPercent(row.highReturn)}${row.hitPlus2 ? " ✓" : ""}</small>
+              ${row.holdingOutcomes ? `<small class="holding-outcome ${toneFromNet(row.holdingOutcomes.close?.netPnl)}">${holdingOutcomeText(row.holdingOutcomes.close)}</small>` : ''}
             </button>
           `)
           .join("")}
       </div>
+      ${summary.holdingCoverage ? `<p>假設 1 股、不再投入：開盤含息淨報酬 ${formatSignedPercent(summary.holdingMetrics?.avgOpenReturnNet?.value)}；收盤含息淨報酬 ${formatSignedPercent(summary.holdingMetrics?.avgCloseReturnNet?.value)}。開盤 ${holdingCoverageText(summary.holdingCoverage.open)}；收盤 ${holdingCoverageText(summary.holdingCoverage.close)}。原價格觀察與觸價事件另列；模型成本為原始價款的 0.471%，未計個人股利稅／補充保費，公告應收不代表實際入帳。</p>` : ''}
       <small>觀察日依官方交易日序列判定；每檔日期必須完全相等。基準＝訊號日收盤價。「曾達／曾破」看觀察日最高／最低，是盤中曾觸及、不是可實現損益；勝率看開盤賣／收盤賣扣費稅後是否為正。盤中結果不會寫入正式長期統計。</small>
     </section>
   `;
@@ -5742,28 +5744,42 @@ function verificationIdentityNote(identity = {}) {
   return `${text}${Object.values(identity).some(value => String(value).includes('legacy-unknown')) || !identity.returnBasis || !identity.costModelVersion ? '；缺少模型證據，未補造歷史口徑' : ''}`;
 }
 
+function holdingOutcomeText(outcome) {
+  if (!Number.isFinite(outcome?.netPnl)) return '含息持有：未知（事件、來源或成本未完整）';
+  const pnl = `${outcome.netPnl > 0 ? '+' : ''}${formatNumber(outcome.netPnl, 3)}`;
+  return `含息持有 ${Number.isFinite(outcome.holdingReturnPct) ? formatSignedPercent(outcome.holdingReturnPct) : '報酬率未定義'}；模型損益 ${pnl} 元`;
+}
+
+function holdingCoverageText(coverage) {
+  if (!coverage) return '';
+  return `含息損益有效 ${coverage.validCount}/${coverage.totalCount}・報酬率有效 ${coverage.returnValidCount}/${coverage.totalCount}・缺 ${coverage.missingCount}・不支援 ${coverage.unsupportedCount}`;
+}
+
 function renderVerificationMeasurement(data, strategy) {
   const cohort = data.cohort;
   if (!cohort) return '';
   const head = cohort.headline || {};
+  const holding = head.identity?.returnBasis === 'cash-holding-return';
   const coverage = data.captureCoverage || {};
   const labels = { avgResultPctNet: '歷史平均淨報酬', netProfitRate: '淨獲利率', targetHitRate: '達標率',
     avgOpenReturn: '開盤價格報酬', avgCloseReturn: '收盤價格報酬', avgHighReturn: '最高價格報酬',
     avgOpenReturnNet: '開盤觀察淨報酬', avgCloseReturnNet: '收盤觀察淨報酬', hitPlus2: '曾達+2%', brokeMinus2: '曾破−2%', winAtOpen: '開盤觀察淨獲利率', winAtClose: '收盤觀察淨獲利率' };
   return `<div class="verification-measurement">
-    <p>價格觀察・${strategy === 'swing' ? '訊號日後 15 個官方交易日窗口' : '下一實際交易日完整觀察'}；非可成交回測或帳戶收益。
+    <p>${holding ? '假設 1 股含息持有結果，並列價格觀察' : '價格觀察'}・${strategy === 'swing' ? '訊號日後 15 個官方交易日窗口' : '下一實際交易日完整觀察'}；非可成交回測或帳戶收益。
       已發 ${head.issued || 0} 筆／${head.signalDays || 0} 個訊號日・成熟 ${head.matureCount || 0}・未成熟 ${head.immatureCount || 0}・成熟未知 ${head.unknownCount || 0}。
       完整紀錄自 ${escapeHtml(coverage.fullRecordStartDate || '尚未開始')}；採集連續覆蓋仍須核對官方日曆。</p>
     <details class="verification-denominators"><summary>分母、模型與來源</summary>
       <p>有效部分為條件式統計，缺漏未必隨機；0 訊號日是採集成功，不是收益樣本日。日叢集區間仍假設日間獨立；波段跨日持有重疊不代表精度保證。</p>
+      ${holding ? '<p>每筆固定假設 1 股、股利不再投入；成本＝原始價款 × 0.471%，報酬分母為原始價款。公告股利以假設應收估值，不代表已收到現金；未計個人股利稅與補充保費。來源範圍為官方除權息，配股欠可處分股數／零碎結算證據、現增參與未知或成本缺漏時不產生精確淨值。價格「曾達／曾破」仍只描述觸價事件。已結案的含息未知結果依當次證據保存，不會自動補算；原價格仍可查閱。</p>' : ''}
       ${strategy === 'swing' ? `<p>成熟日曆：${escapeHtml(cohort.calendar?.source || '官方月份覆蓋未知')}；已確認至 ${escapeHtml(cohort.calendar?.through || '--')}。足夠已知交易日可證成熟，但缺連續覆蓋時不宣稱精確總天數。</p>` : ''}
       <p>採集 ${coverage.completeCount ?? '--'}/${coverage.expectedCount ?? '--'} 個已知官方交易日；${escapeHtml(coverage.expectedDateReason || '日曆覆蓋未知')}。
         舊紀錄 ${data.population?.legacy?.samples || 0} ${strategy === 'swing' ? '筆驗證單' : '份快照'}，無完整 issued／未進場分母，原證據保留。</p>
       ${(cohort.models || []).map(model => `<div class="verification-model"><strong>${escapeHtml(model.identity?.entryModel || '模型未知')}</strong>
         <p>${verificationIdentityNote(model.identity)}</p>
+        ${model.holdingCoverage ? `<p>${strategy === 'swing' ? holdingCoverageText(model.holdingCoverage) : `開盤 ${holdingCoverageText(model.holdingCoverage.open)}；收盤 ${holdingCoverageText(model.holdingCoverage.close)}`}</p>` : ''}
         <p>已發 ${model.issued || 0}・成熟 ${model.matureCount || 0}・未成熟 ${model.immatureCount || 0}・未知 ${model.unknownCount || 0}；未進場 ${model.noEntry || 0}／待補 ${model.pending || 0}／已估值 ${model.resolved ?? model.signals ?? 0}／未解 ${model.unresolved || 0}；分盤 ${model.periodicCallSamples || 0} 另列。</p>
         ${model.resultBasis === 'original-close-observation-exit-and-window' ? '<p>次開價格觀察沿用原收盤退出與窗口；發布時間不明者不進有效前向結果，並非完整交易模擬。</p>' : ''}
-        ${Object.entries(model.metricCoverage || {}).filter(([key]) => labels[key]).map(([key,metric]) => `<p>${labels[key]}：${verificationMetricValue(metric,key,strategy)}；${verificationMetricNote(metric)}${metric.reason ? `・${escapeHtml(metric.reason)}` : ''}</p>`).join('')}
+        ${Object.entries(model.metricCoverage || {}).filter(([key]) => labels[key]).map(([key,metric]) => `<p>${model.identity?.returnBasis === 'cash-holding-return' && /Net$|netProfitRate|winAt/.test(key) ? labels[key].replace('觀察','含息持有').replace('歷史平均','含息持有平均') : labels[key]}：${verificationMetricValue(metric,key,strategy)}；${verificationMetricNote(metric)}${metric.reason ? `・${escapeHtml(metric.reason)}` : ''}</p>`).join('')}
         ${Object.entries(model.missingReasons || {}).map(([reason,count]) => `<p>${escapeHtml(reason)}：${count}</p>`).join('')}
       </div>`).join('')}
       ${(data.modelGroups || []).length ? `<p class="verification-saved-models">其他已存觀察模型：${data.modelGroups.map(group => `${verificationIdentityNote(group.identity)} ${group.samples ?? group.days ?? 0} ${strategy === 'swing' ? '筆' : '日'}`).join('；')}。其舊母體結果與原明細保留，不併入正式成熟比較。</p>` : ''}
@@ -5807,6 +5823,7 @@ function renderVerifyHistory() {
       `)
     .join("");
   const totals = data.cohort?.headline || data.totals;
+  const holding = totals?.identity?.returnBasis === 'cash-holding-return';
   // 累計未滿 minDays 不染色、明講「累積中」；達到後附以「日」為叢集的 95% 信賴區間，染色看下界 ≥50%。
   // 15 天的區間約 ±8 個百分點——50% 與 57% 分不開，卻一個染色一個不染，那正是舊畫面的問題。
   const minDays = Number(totals?.minDays) || 20;
@@ -5827,18 +5844,18 @@ function renderVerifyHistory() {
     <section class="verify-history" aria-label="實際驗證紀錄">
       <header>
         <div>
-          <strong>訊號價格觀察紀錄</strong>
-          <span>每筆訊號只用官方認定的實際下一交易日對答案；部分資料不進累計。淨獲利率是開盤／收盤價格觀察扣模型費稅後為正的比例；「曾達／曾破」只是盤中曾觸及。各欄有效觀察未滿 ${minDays} 天不當結論。</span>
+          <strong>${holding ? '假設含息持有與價格觀察紀錄' : '訊號價格觀察紀錄'}</strong>
+          <span>每筆訊號只用官方認定的實際下一交易日對答案；部分資料不進累計。${holding ? '淨獲利率按完整模型含息淨損益是否為正計算' : '淨獲利率是開盤／收盤價格觀察扣模型費稅後為正的比例'}；「曾達／曾破」只是盤中曾觸及。各欄有效觀察未滿 ${minDays} 天不當結論。</span>
         </div>
         ${totals ? `
           <div class="verify-stats">
             <span>累計 ${totals.days} 天 / ${totals.signals} 檔${enoughDays ? "" : `・累積中 ${totals.days}/${minDays} 天`}</span>
-            <span class="${ciTone(totals.ci?.winAtOpen,'winAtOpen')}" title="${verificationMetricNote(totals.metricCoverage?.winAtOpen)}">${glossLink('開盤觀察淨獲利率','開盤賣勝率')} ${mainRate('winAtOpen')}${ciText(totals.ci?.winAtOpen,'winAtOpen')}</span>
-            <span class="${ciTone(totals.ci?.winAtClose,'winAtClose')}" title="${verificationMetricNote(totals.metricCoverage?.winAtClose)}">${glossLink('收盤觀察淨獲利率','收盤賣勝率')} ${mainRate('winAtClose')}${ciText(totals.ci?.winAtClose,'winAtClose')}</span>
+            <span class="${ciTone(totals.ci?.winAtOpen,'winAtOpen')}" title="${verificationMetricNote(totals.metricCoverage?.winAtOpen)}">${glossLink(holding ? '開盤含息淨獲利率' : '開盤觀察淨獲利率',holding ? '假設含息持有' : '開盤賣勝率')} ${mainRate('winAtOpen')}${ciText(totals.ci?.winAtOpen,'winAtOpen')}</span>
+            <span class="${ciTone(totals.ci?.winAtClose,'winAtClose')}" title="${verificationMetricNote(totals.metricCoverage?.winAtClose)}">${glossLink(holding ? '收盤含息淨獲利率' : '收盤觀察淨獲利率',holding ? '假設含息持有' : '收盤賣勝率')} ${mainRate('winAtClose')}${ciText(totals.ci?.winAtClose,'winAtClose')}</span>
             <span class="${ciTone(totals.ci?.hitPlus2,'hitPlus2')}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">曾達+2% ${mainRate('hitPlus2')}${ciText(totals.ci?.hitPlus2,'hitPlus2')}</span>
             <span title="觀察日最低價曾碰到 −2%">曾破−2% ${mainRate('brokeMinus2')}</span>
-            <span>平均開盤 ${formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
-            <span>平均隔日收 ${formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
+            <span>平均開盤 ${holding ? `價格 ${formatSignedPercent(totals.avgOpenReturn)}；含息淨 ${formatSignedPercent(totals.avgOpenReturnNet)}` : formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
+            <span>平均隔日收 ${holding ? `價格 ${formatSignedPercent(totals.avgCloseReturn)}；含息淨 ${formatSignedPercent(totals.avgCloseReturnNet)}` : formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
           </div>
         ` : ""}
       </header>
@@ -6447,7 +6464,8 @@ function renderSwingVerifyPanel() {
         return `<div class="sv-chip"><div class="sv-chip-top"><strong>${escapeHtml(swingScenarioName(s.scenario))}</strong>
           <span class="sv-rate"><small>淨獲利率</small> ${rate}</span></div>
           <small>成熟 ${s.matureCount || 0}・未成熟 ${s.immatureCount || 0}・未知 ${s.unknownCount || 0}；達標率 ${s.targetHitRate == null ? '--' : `${formatNumber(s.targetHitRate,1)}%`}；已估值 ${s.continuousResolved || 0}（達標 ${s.wins || 0}・停損 ${s.losses || 0}・超時 ${s.expired || 0}）・待補 ${s.pending || 0}</small>
-          <small>歷史平均淨報酬 ${formatSignedPercent(s.avgResultPctNet)}・${verificationMetricNote(s.metricCoverage?.avgResultPctNet)}</small>
+          <small>${data.cohort?.headline?.identity?.returnBasis === 'cash-holding-return' ? '含息持有平均淨報酬' : '歷史平均淨報酬'} ${formatSignedPercent(s.avgResultPctNet)}・${verificationMetricNote(s.metricCoverage?.avgResultPctNet)}</small>
+          ${s.holdingCoverage ? `<small>${holdingCoverageText(s.holdingCoverage)}</small>` : ''}
           ${swingDistributionLine({ ...s, withPeriodicCall: null })}
           ${Object.entries(s.byRegime || {}).map(([key,value]) => `<small>${key === 'aboveMa60' ? '季線上' : key === 'belowMa60' ? '季線下' : '位階未知'}：有效 ${value.metricCoverage?.netProfitRate?.validCount || 0} 筆／${value.metricCoverage?.netProfitRate?.validDays || 0} 日，淨獲利率 ${value.netProfitRate == null ? '--' : `${formatNumber(value.netProfitRate,1)}%`}</small>`).join('')}
           ${s.periodicCallSamples ? `<small>含處置股觀察：${verificationMetricNote(s.withPeriodicCall?.metricCoverage?.avgResultPctNet)}</small>` : ''}
@@ -6485,7 +6503,7 @@ function renderSwingVerifyPanel() {
           <span>${r.resolvedAt ? `${String(r.resolvedAt).slice(4, 6)}/${String(r.resolvedAt).slice(6, 8)}` : "--"}</span>
           <span class="sv-name">${escapeHtml(r.name || r.code)} ${r.code}</span>
           <span>${escapeHtml(swingScenarioName(r.scenario))}</span>
-          <span class="sv-outcome ${tone}">${label} ${r.resultPct != null ? `${r.resultPct >= 0 ? "+" : ""}${r.resultPct}%` : ""}</span>
+          <span class="sv-outcome ${tone}">${label} ${r.holdingOutcome ? '價格 ' : ''}${r.resultPct != null ? (r.holdingOutcome ? formatSignedPercent(r.resultPct) : `${r.resultPct >= 0 ? '+' : ''}${r.resultPct}%`) : ''}${r.holdingOutcome ? `<small class="holding-outcome ${toneFromNet(r.holdingOutcome.netPnl)}">${holdingOutcomeText(r.holdingOutcome)}</small>` : ''}</span>
         </div>`;
     })
     .join("");
@@ -6493,7 +6511,7 @@ function renderSwingVerifyPanel() {
   // jsdom 沒有 matchMedia → 視為桌機。
   const foldOpen = !(typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches);
   const foldSummary = (() => {
-    if (measured) return `成熟訊號價格觀察・${data.cohort.headline?.matureCount || 0} 筆・展開看場景`;
+    if (measured) return `成熟訊號${data.cohort.headline?.identity?.returnBasis === 'cash-holding-return' ? '假設含息持有' : '價格觀察'}・${data.cohort.headline?.matureCount || 0} 筆・展開看場景`;
     const first = scenarios.find((s) => s.samples > 0) || scenarios[0];
     if (!first) return "場景勝率";
     const resolved = Number(first.continuousResolved ?? (first.wins + first.losses + first.expired)) || 0;
@@ -6503,7 +6521,7 @@ function renderSwingVerifyPanel() {
   })();
   panel.innerHTML = `
     <div class="sv-head">
-      <strong>${measured ? '場景成績（成熟訊號價格觀察）' : '場景勝率（前向驗證）'}</strong>
+      <strong>${measured ? `場景成績（成熟訊號${data.cohort.headline?.identity?.returnBasis === 'cash-holding-return' ? '假設含息持有' : '價格觀察'}）` : '場景勝率（前向驗證）'}</strong>
       <small title="每天的選股依官方日 K 逐日對答案：先碰目標＝達標、先碰結構停損＝停損；同一天兩邊都碰到，保守記停損。漏開 App 會按日期補判，中間缺 K 則停住、不跳日。&#10;處置期間的標的是分盤集合競價（每 5 或 20 分鐘撮合一次），日 K 的最高／最低價只是幾十次撮合的極值，掛在停損／目標的單未必真的撮得到；這些樣本不進主要比較，另列分盤撮合筆數。&#10;除權息當天若官方比率還沒發布（計算結果表約次一營業日才有），該單會暫停推進而不是拿事件前的停損價去比事件後的價格；等比率到齊會自動接著判，觀察天數不會被吃掉。">官方日 K 逐日補驗・雙觸保守記停損${data.dataGapCount ? `・${data.dataGapCount} 筆待補缺口` : ""}${data.corporateActionPendingCount ? `・${data.corporateActionPendingCount} 筆等官方除權息比率` : ""}${data.periodicCallCount ? `・${data.periodicCallCount} 筆分盤撮合` : ""}${data.haltedCount ? `・${data.haltedCount} 筆停牌中` : ""}${data.deferredExitCount ? `・${data.deferredExitCount} 筆跌停鎖死順延出場` : ""}${legacySamples ? `・舊版 ${legacySamples} 筆另存` : ""}${!measured && data.allVersions && data.allVersions.versions > 1 ? `・全版本合併 ${data.allVersions.winRate != null ? `${data.allVersions.winRate}%` : `${data.allVersions.wins}/${data.allVersions.resolved}`}（${data.allVersions.resolved} 筆結案）` : ""}</small>
     </div>
     ${renderVerificationMeasurement(data, 'swing')}
@@ -12598,6 +12616,7 @@ const GLOSSARY = [
   { term: "還原股價（除權息）", aliases: ["還原股價", "除權息", "除息", "除權"], cat: "風險與制度", def: "除權息當天股價會因配息／配股產生制度性跳空，<strong>不等於真的大跌</strong>。App 優先用官方現金股利、股票股利與現增資料還原歷史價；舊區段若只有大跳空可推估，會明示「<strong>疑似／估算還原</strong>」，不把推測冒充官方事件。官方公告欄位未齊時，策略雷達會暫停該檔判定，避免錯算均線。<br><strong>偵測範圍的界線</strong>：官方只提供除權息的機器可讀資料，<strong>沒有減資、面額變更、股票分割的端點</strong>。這幾類事件靠「跳空超過 10.5%」推估——減資 10% 以上與所有股票分割都會被抓到並標成估算，但<strong>幅度小於 10.5% 的減資偵測不到</strong>，那段圖會保留原始跳空。所以技術分析頁寫「沒有偵測到公司行動」是指<strong>沒查到</strong>，不是保證沒發生。" },
   { term: "流動性", aliases: ["流動性", "滑價", "低流動性"], cat: "風險與制度", def: "一檔股票好不好買賣、進出會不會大幅影響價格。量太小（低流動性）容易<strong>滑價</strong>、想賣卻賣不掉，不適合波段，所以策略雷達只掃<strong>流動性前 240 檔</strong>（這 240 檔依當日成交量<strong>每個交易日重選</strong>，不是固定名單）。" },
   // —— 成績單與決策（第二輪：這些數字以前只在 title 裡解釋，觸控與讀屏拿不到）——
+  { term: '假設含息持有', aliases: ['含息持有','含息淨獲利率'], cat: '成績單與決策', def: '每筆新訊號固定假設 1 股，保存原始價格與風險，股利不再投入。含息損益包含退出價款與公告假設應收股利，減原始投入及模型成本；成本是原始價款的 0.471%，未計個人股利稅與補充保費。新股須有退出前可處分證據；現增追加投入只列絕對損益，未定義多時點報酬率。這不是實際成交、實際入帳或帳戶收益。已保存為未知的含息結果不會自動補算；可檢視原價格觀察與缺漏原因。' },
   { term: "開盤賣勝率／收盤賣勝率", aliases: ["開盤賣勝率", "收盤賣勝率", "勝率"], cat: "成績單與決策", def: "隔日沖成績單的勝率：訊號日收盤至<strong>實際下一交易日</strong>的開盤價（或收盤價）之價格觀察，扣掉一買一賣的手續費與證交稅（來回約 0.471%）後<strong>淨報酬 > 0</strong> 才算淨獲利；並非可成交回測或帳戶收益。「盤中曾達 +2%／曾破 −2%」只是盤中曾觸及的價位，不是可實現損益，不要當勝率讀。" },
   { term: "信賴區間（成績單的括號）", aliases: ["信賴區間", "區間"], cat: "成績單與決策", def: "括號裡的「區間 60～90%」是 95% 信賴區間：同一批條件再來一次，真實勝率有 95% 的機會落在這個範圍。本 App 以「日」為單位算（同一天選出的幾十檔共享大盤走勢，不能當獨立樣本），未滿 20 天不顯示。<strong>看下界</strong>：下界高於 50% 才染色。" },
   { term: "獲利因子（PF）", aliases: ["獲利因子", "PF"], cat: "成績單與決策", def: "所有獲利單的報酬總和 ÷ 所有虧損單的虧損總和。<strong>大於 1</strong> 代表賺的比賠的多，1.5 以上算健康。它看的是「幅度」不是「次數」：勝率不高但賺大賠小的策略，獲利因子仍可能很好。" },

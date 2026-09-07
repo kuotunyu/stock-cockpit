@@ -124,7 +124,7 @@ test("舊年度跨年 holiday：查原月份、按實際下一交易日結案，
   assert.equal(result.daysHeld,1); assert.equal(result.dataGap,undefined);
   assert.equal(result.evaluationApplied.kind,"retrospective-legacy-evidence");
   assert.equal(result.evaluationApplied.scope,"this-advance-only");
-  assert.equal(result.evaluationApplied.evaluationVersion,mod.currentVerificationIdentity("swing").evaluationVersion);
+  assert.equal(result.evaluationApplied.evaluationVersion,"swing-price-observation-v1");
   assert.equal(db.swingVerification[old][0].evaluationApplied,undefined);
   assert.equal(db.swingVerification[old][0].status,"win");
   const requests=mock.calls.slice(before).map(c=>new URL(c.url));

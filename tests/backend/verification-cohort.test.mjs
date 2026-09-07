@@ -28,6 +28,7 @@ test('成熟只看訊號後15官方交易日，快贏快輸不提前，日曆不
   assert.equal(mod.classifyCohort({tradeDate:'20260901'}, {asOf:'20260923',tradingDates:days,maxSessions:15}).ageSessions,null);
 });
 
+const holding = resultPct => mod.calculateHoldingOutcome({ initialPosition:{date:days[0],price:100,shares:1},exit:{date:days[1],price:100+resultPct},events:[],eventCoverage:'complete',costs:{model:'initial-notional-flat-total-v1',total:0.471} });
 function fixture() {
   const db = {};
   const date = '2026-09-01';
@@ -38,7 +39,7 @@ function fixture() {
     inputEvidence:[{code:'2330',exchange:'TWSE',outcome:'matched'}],
     picks:['fastWin','fastLoss','expiry','gap'].map(key=>({code:'2330',exchange:'TWSE',scenario:{key},plan:{entry:100,structuralStop:95,target:110}})) });
   const entries = db.swingVerification['20260901'];
-  for (const [i,e] of entries.entries()) Object.assign(e, { status:['win','loss','expired','pending'][i], resultPct:[10,-5,2,null][i], daysHeld:i===2?15:1, resolvedAt:days[i===2?15:1], fillModel:'continuous' });
+  for (const [i,e] of entries.entries()) Object.assign(e, { status:['win','loss','expired','pending'][i], resultPct:[10,-5,2,null][i], holdingOutcome:i<3?holding([10,-5,2][i]):null, daysHeld:i===2?15:1, resolvedAt:days[i===2?15:1], fillModel:'continuous' });
   entries[3].dataGap={from:'20260902'};
   return {db,p};
 }
@@ -74,7 +75,7 @@ test('成熟缺資料補齊後只改有效coverage；分盤/未知regime/跨版�
   assert.equal(before.headline.scenarios.find(s=>s.scenario==='fastWin').withPeriodicCall.metricCoverage.avgResultPct.validCount,1);
   assert.equal(before.headline.scenarios.find(s=>s.scenario==='fastLoss').byRegime.belowMa60.metricCoverage.avgResultPct.validCount,1);
   assert.equal(before.headline.scenarios.find(s=>s.scenario==='expiry').byRegime.unknown.metricCoverage.avgResultPct.validCount,1);
-  Object.assign(entries[3],{status:'expired',resultPct:0,dataGap:null});
+  Object.assign(entries[3],{status:'expired',resultPct:0,holdingOutcome:holding(0),dataGap:null});
   const after=mod.summarizeMatureVerification(db,'swing',{asOf:'20260923',calendar});
   assert.equal(after.headline.issued,before.headline.issued);
   assert.equal(after.headline.metricCoverage.avgResultPct.validCount,3);

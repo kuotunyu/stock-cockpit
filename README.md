@@ -126,15 +126,20 @@ sequenceDiagram
 
 API 的 `publication` 提供 captureId、版本身份、輸入指紋、request scope、來源日期精度與本機取得／發布時間；寫入失敗回 `kind: "not-persisted"` 並保留重試提示。正式身份與全部修訂保存在主 DB 的 `verificationPublications`，與訊號／驗證單同次原子提交及備份。來源只有日期時不補造時分秒；週一才取得週五清單，不代表週五已能決策。 發布先原子保存清單與 `publicationStartedAt` 下界，再一次性補存真正可讀後的 `availableConfirmedAt` 上界；`publishedAt`／`decisionAvailableAt` 採此保守上界並標 `confirmed-available-upper-bound`。補證失敗不撤銷正式清單，時間保留 null 與原因；之後讀取時用當下真實時間補證，不能回填。跨開盤的提交區間不能直接認定必定晚發布。
 
-評估 metadata 分為 `selectionVersion`、`evaluationVersion`、`costModelVersion`、`cohortPolicyVersion`、`entryModel`、`returnBasis`（schema 2），另保留 `formulaVersion` 相容。此次沿用的價格觀察算式為 `overnight-price-observation-v1`／`swing-price-observation-v1`，成本為固定扣 0.471 個百分點的 `flat-round-trip-0.471pct-v1`，母體政策為 `first-canonical-publication-v1`。這些仍是收盤基準的還原座標價格觀察，並非成交或帳戶含息實績。
+評估 metadata 分為 `selectionVersion`、`evaluationVersion`、`costModelVersion`、`cohortPolicyVersion`、`entryModel`、`returnBasis`（schema 2），另保留 `formulaVersion` 相容。舊價格觀察算式為 `overnight-price-observation-v1`／`swing-price-observation-v1`，成本為固定扣 0.471 個百分點的 `flat-round-trip-0.471pct-v1`，母體政策為 `first-canonical-publication-v1`。這些仍是收盤基準的還原座標價格觀察，並非成交或帳戶含息實績。
 
 成績單的 `modelGroups`／`selectedModelKey` 保留各原觀察模型，主卡使用 `cohort.headline`／`cohort.selectedModelKey` 的正式母體比較，不混算新版與舊版。缺少舊 metadata 標 `legacy-unknown`，未知成本不補算淨值，也不把原始勝負布林當成有效淨獲利率分母或 CI。已有 final 觀察保留；舊訊號補算另存 `observationRevisions`，標記事後觀察與本次實際模型，不能補成當時正式發布。舊波段 pending 的 `evaluationApplied` 只證明本次補驗套用的模型，不回填原始進場或當時可得時間。
 
+新建立的正式訊號採 `overnight-hypothetical-holding-v1`／`swing-hypothetical-holding-v1`，`returnBasis=cash-holding-return`。每筆固定 **1 股假設部位**，建立時保存原始日期、價格、投入與風險金額；這不是使用者實際成交。股利不再投入，公告現金股利以假設應收價值計入，支付只改分類、不重複加收益。產品成本 `initial-notional-flat-0.471pct-v1` 為原始價款 × 0.471%，分母仍為原始價款；未計個人股利稅與補充保費。100 元買 1 股、配息 5 元、104.5 元退出，零成本持有報酬為 9.5%，原價格比例觀察為 10%；套產品成本後含息模型為 9.029%。
+
+新 API 保留 `resultPct`／隔日 `openReturn` 等價格欄位，含息結果另放波段 `holdingOutcome`、隔日 `holdingOutcomes.open/close`。`cohort` 的含息模型淨欄位使用含息結果，淨獲利率按完整 `netPnl > 0`，與報酬率各有分母；`holdingCoverage` 揭露未知與不支援。新股必須有退出前可處分股數和零碎結算證據；現增參與及投入缺證保持未知，有額外投入時只給絕對損益、不編造多時點報酬率。TWSE 月結果與 [TPEx 歷史除權息計算結果](https://www.tpex.org.tw/zh-tw/announce/market/ex/cal.html) 的覆蓋僅限官方除權息；抓取失敗不等於無事件。
+
+已知舊價格模型 pending 仍依原規則續驗；舊 final／identity 不覆寫、不反推原價。次開另維持原價格模型與退出窗口，不產生次開含息收益。已結案或 final 的含息未知結果依當次證據保存，**本版不會自動補算**；原始部位、退出與缺漏原因可供後續明示修訂模型使用，目前可查閱獨立價格觀察。切回價格讀取不能覆寫新事件證據。
 成績單逐欄提供 `metricCoverage`：`value`、`validCount`、`totalCount`、`missingCount`、`reason` 與有效日期數 `validDays`；合法 0 保留，空值不當 0 或虧損。開盤缺值不借用收盤筆數或日期計算平均、淨獲利率、最低樣本門檻或日叢集 CI。完整零訊號日算採集成功，不進收益 CI；區間仍受日間相依限制，不能視為精度保證。
 
 波段主比較採 `mature-issued-15-official-sessions-v1`：首次正式訊號日之後已滿 15 個官方交易日的同批訊號，無論快速達標、停損或超時，一起到期才納入。日曆使用有界月份的 TWSE FMTQIK 官方日期；不足時成熟狀態未知；若只能證明至少 15 日，成熟可確定但精確 `ageSessions` 為 null。成熟仍可能有缺 K／公司行動待補，平均只代表有效部分的條件式價格觀察。達標率、淨獲利率與歷史平均淨報酬分開；超時淨正也屬淨獲利，分盤撮合另列。隔日沖主比較為 `complete-issued-next-session-v1`，限完整正式下一交易日觀察。模型展開區可查通過各欄門檻的結果、完整模型身份及缺證據原因；既有最長連虧與最差單日保留在原結案口徑，與成熟主比較分開。這些是摘要投影的母體版本，不改寫保存的發布身份。
 
-兩套主卡保留最近結案／逐日觀察，並在「分母、模型與來源」展開區揭露完整紀錄起點、缺覆蓋、模型及原結案口徑。舊 `totals`／`scenarios` API 欄位相容保留並修正缺值分母，不補造歷史 issued。觀察值不代表可成交回測、含現金流持有報酬或帳戶收益。
+兩套主卡保留最近結案／逐日觀察，並在「分母、模型與來源」展開區揭露完整紀錄起點、缺覆蓋、模型及原結案口徑。舊 `totals`／`scenarios` API 欄位相容保留並修正缺值分母，不補造歷史 issued。價格觀察不等於含息報酬；兩者都不代表可成交回測或帳戶收益。
 
 單日隔日驗證與歷史成績單同日優先使用首次正式 capture；無正式發布才顯示標示身份的 legacy 觀察，兩者共用完整觀察 memo。已知不支援的波段 evaluation／entry／return 模型保留原證據，以 `evaluationUnavailable` 與摘要 `unavailableCount` 揭露停等，不借用目前算式結案。隔日逐檔 `sourceEvidence` 分開官方成功、確認空資料及失敗，連同備援狀態判定採集完整性；已確認空資料不等於來源故障。
 

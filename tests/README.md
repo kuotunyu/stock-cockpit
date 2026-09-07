@@ -181,3 +181,13 @@ node --test tests/backend/verification-publication.test.mjs tests/backend/verifi
 ```
 
 T05 成績單瀏覽器覆蓋包含隔日新 `cohort`／`captureCoverage`：375／768／1280／1440 px 各測原字體及 200% 文字放大，釘開盤僅 1 有效日、收盤 20 日、觸及 19 日及全缺欄位的不同門檻。主摘要與分母區需在 viewport 內，只有逐日明細獨立橫捲；原生 details 以 Enter 展開／收合並精確保留 summary 焦點。fixture 自驗每模型 issued 四狀態等式、完整 modelKey、raw metric 與顯示門檻分離；保留既有現代波段與 legacy fallback、登入失效、refresh 草稿檢查。這是成績單範圍驗證；375 px／200% 固定底部導覽文字互疊已移交後續手機可及性工作，不能宣稱全站控制項皆已通過 200%。
+
+### T06 假設含息持有
+
+`verification-holding-return` 手算現金股利與兩個成本分母，涵蓋不再投入、配股／零碎結算、明確交付日期、現增、同事件重跑、應收轉支付、未知股數及事件coverage。`verification-holding-source` 驗 TPEx exDailyQ 的 schema／date／count／成功空清單、每仟股單位及有界single-flight。既有 corporate-actions／swing-verify 增加新舊模型與不可變原始部位的真接線，T05 合成 final fixture 明確提供含息證據。
+
+新 cash identity：`swing-hypothetical-holding-v1`／`overnight-hypothetical-holding-v1`、`initial-notional-flat-0.471pct-v1`、`cash-holding-return`。原價格欄位保留；cash 欄位缺失不能套價格公式補造。`holding-return-render` 驗未知／零／負與模型文字；Chromium `holding-return` 在兩頁四尺寸、100%／200%字體驗模型區域與原生details鍵盤，保留既有價格fixture回歸。固定底部導覽200%重疊仍屬後續手機可及性工作。
+
+```powershell
+node --test tests/backend/verification-holding-return.test.mjs tests/backend/verification-holding-source.test.mjs tests/backend/verification-corporate-actions.test.mjs tests/backend/swing-verify.test.mjs
+```

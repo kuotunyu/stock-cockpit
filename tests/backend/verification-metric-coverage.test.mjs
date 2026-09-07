@@ -18,6 +18,7 @@ assert.equal(initLogs.length, 1);
 assert.match(initLogs[0], /^\[Stock1\] Created initial admin user "admin"\./);
 const iso = x => `${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`;
 
+const holding = value => value === null ? null : mod.calculateHoldingOutcome({initialPosition:{date:compactTradingDay(-2),price:100,shares:1},exit:{date:compactTradingDay(-1),price:100+value},events:[],eventCoverage:'complete',costs:{model:'initial-notional-flat-total-v1',total:0.471}});
 test('I2：未知成本原true/false不升格有效淨勝負，原memo不改寫', async () => {
   const snapshots=[true,false].map((win,i)=>({asOf:iso(compactTradingDay(-8+i)),formulaVersion:mod.OVERNIGHT_FORMULA_VERSION,
     picks:[{code:'2330',exchange:'TWSE',price:100}],observed:{complete:true,status:'final',formulaVersion:mod.OVERNIGHT_FORMULA_VERSION,
@@ -53,7 +54,7 @@ test('合法已存final：不同日/欄位有效筆數加權，缺開盤不是�
     picks: values.map((_, j) => ({ code: String(2330 + j), exchange: 'TWSE', price: 100 })),
     observed: { complete: true, status: 'final', formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, identity: mod.currentVerificationIdentity('overnight'),
       observationDate: iso(compactTradingDay(i - 4)), warnings: [], rows: values.map((value,j) => ({
-        code: String(2330+j), verified: true, openReturn: value, highReturn: 12, currentReturn: 1,
+        code: String(2330+j), verified: true, holdingOutcomes:{open:holding(value),close:holding(1)}, openReturn: value, highReturn: 12, currentReturn: 1,
         hitPlus2: true, brokeMinus2: false, winAtOpen: value > 0, winAtClose: true,
       })) },
   }));
@@ -81,7 +82,7 @@ test('真history主成績只接正式manifest；完整0訊號算採集但不算�
       const snapshot=db.signalSnapshots.find(s=>s.captureId===p.captureId);
       snapshot.observed={complete:true,status:'final',formulaVersion:p.identity.selectionVersion,identity:p.identity,inputFingerprint:p.inputFingerprint,
         observationDate:iso(compactTradingDay(offset+1)),warnings:[],rows:values.map((value,i)=>({code:String(2330+i),verified:true,
-          openReturn:value,currentReturn:0,highReturn:12,lowReturn:-1,hitPlus2:true,brokeMinus2:false,winAtOpen:value===10,winAtClose:false}))};
+          holdingOutcomes:{open:holding(value),close:holding(0)},openReturn:value,currentReturn:0,highReturn:12,lowReturn:-1,hitPlus2:true,brokeMinus2:false,winAtOpen:value===10,winAtClose:false}))};
     }
   });
   const result=await mod.buildVerificationHistory();

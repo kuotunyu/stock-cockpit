@@ -431,3 +431,26 @@ test("隔日沖驗證：歸檔沒有事件時，價差再大也不可自作主�
   assert.equal(row.openReturn, 3, "基準必須維持訊號日收盤 100");
   assert.equal(row.lowReturn, -3);
 });
+test('隔日新cash模型：手算含息與價格座標並列，未知事件不抹掉其他完整持有結果',async()=>{
+  const history=await mod.loadFundamentalsHistory();
+  history.corporateActionResultMonths[D1.slice(0,6)]={status:'ok',rows:2,codes:2,observedAt:new Date().toISOString(),sealed:true};
+  const picks=['2882','6488'].map(code=>({code,exchange:'TWSE',price:100,holdingPosition:{date:D0,price:100,shares:1,quantitySource:'normalized-one-share-assumption-v1'}}));
+  try {
+    const result=await mod.observeSignalSnapshot({asOf:D0,identity:mod.currentVerificationIdentity('overnight'),picks},{
+      reference:{byCode:new Map(picks.map(p=>[p.code,{...p,rawDate:D1,open:100,high:104.5,low:96,price:104.5}])),warnings:[]},calendar});
+    assert.equal(result.complete,true);assert.equal(result.rows[0].currentReturn,10);
+    assert.equal(result.rows[0].holdingOutcomes.close.netPnl,9.029);
+    assert.equal(result.rows[0].holdingOutcomes.open.netPnl,4.529);
+    assert.equal(result.rows[1].holdingOutcomes.close.netPnl,null);
+    assert.equal(result.rows[1].verified,true);
+  } finally { delete history.corporateActionResultMonths[D1.slice(0,6)]; }
+});
+test('上櫃價格ratio=1不能證明無現增；monetary完整表有事件仍保持參與未知',()=>{
+  const entry={...pendingEntry('5488'),exchange:'TPEx',identity:mod.currentVerificationIdentity('swing'),daysHeld:0,target:104,
+    holdingPosition:{date:D0,price:100,shares:1},holdingEvents:[],holdingCoverage:[]};
+  const event={id:`5488:${D1}`,code:'5488',exDate:D1,kind:'dividend',source:'TPEx-exDailyQ',cashDividend:0,stockRatio:0,subscriptionRatio:0.1,subscriptionPrice:100};
+  replaySwingVerificationHistory(entry,[priorDay,officialRow({rawDate:D1,open:100,high:105,low:99,close:104,exchangePreviousClose:100})],D1,
+    {...calendar,holdingMonths:new Map([[D1.slice(0,6),{status:'complete',coveredThrough:D1,events:[event]}]])});
+  assert.equal(entry.status,'win');assert.equal(entry.resultPct,4);assert.equal(entry.holdingOutcome.netPnl,null);
+  assert.ok(entry.holdingOutcome.missingReasons.includes('subscription-participation-or-settlement-missing'));
+});

@@ -9806,3 +9806,6 @@ body.is-locked .app-shell {
 .verification-saved-models { overflow-wrap: anywhere; }
 
 .verify-history-row > span { min-width: 0; overflow-wrap: anywhere; }
+.holding-outcome { display: block; color: var(--muted); font-weight: 500; }
+.holding-outcome.positive { color: var(--up-text); }
+.holding-outcome.negative { color: var(--down-text); }

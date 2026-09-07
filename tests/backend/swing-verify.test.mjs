@@ -370,7 +370,7 @@ test("regime 分層：建單時記錄大盤位階（精簡版），summary 依�
 test("分佈指標：PF／中位數／最長連虧／最差單日；處置股（分盤）不進 headline 分母、另列 withPeriodicCall", async () => {
   const db = await mod.loadDb();
   const day = compactTradingDay(-10);
-  const resolved = (code, status, resultPct, resolvedAt, extra = {}) => makeEntry({ identity:mod.currentVerificationIdentity("swing"), code, status, resultPct, resolvedAt, daysHeld: 3, lastChecked: resolvedAt, ...extra });
+  const resolved = (code, status, resultPct, resolvedAt, extra = {}) => makeEntry({ identity:{...mod.currentVerificationIdentity("swing"),evaluationVersion:'swing-price-observation-v1',costModelVersion:'flat-round-trip-0.471pct-v1',returnBasis:'adjusted-reference-price'}, code, status, resultPct, resolvedAt, daysHeld: 3, lastChecked: resolvedAt, ...extra });
   const entries = [];
   // 21 筆連續競價：前 3 筆同一天停損（最長連虧 3、最差單日），之後 11 勝（+5）／7 負（−3）交錯
   const d = (offset) => compactTradingDay(-9 + offset);
@@ -498,7 +498,7 @@ test("口徑並陳：第一根推進記 nextOpen，結案並陳 resultPctNextOpe
 
   const db = await mod.loadDb();
   const day = compactTradingDay(-10);
-  const resolved = (code, status, resultPct, resultPctNextOpen, extra = {}) => makeEntry({ identity:mod.currentVerificationIdentity("swing"), code, status, resultPct, resultPctNextOpen, resolvedAt: day, daysHeld: 2, lastChecked: day, ...extra });
+  const resolved = (code, status, resultPct, resultPctNextOpen, extra = {}) => makeEntry({ identity:{...mod.currentVerificationIdentity("swing"),evaluationVersion:'swing-price-observation-v1',costModelVersion:'flat-round-trip-0.471pct-v1',returnBasis:'adjusted-reference-price'}, code, status, resultPct, resultPctNextOpen, resolvedAt: day, daysHeld: 2, lastChecked: day, ...extra });
   db.swingVerification = {
     [day]: [
       resolved("A1", "win", 5, 3.2),
@@ -572,4 +572,14 @@ test("次日開盤口徑遇除權息：applySwingCorporateAction 同步乘 nextO
   assert.equal(entry.status, "win");
   assert.equal(entry.resultPct, 10, "收盤進場：104.5/95");
   assert.equal(entry.resultPctNextOpen, Math.round(((104.5 - 95.95) / 95.95) * 10000) / 100, "8.91%，不是未調整的 3.47%");
+});
+test('新publication固定假設股數/原價；重跑不改原始部位，next-open仍舊價格身份',()=>{
+  const day=compactTradingDay(-1),db={};
+  const pub=mod.publishVerification(db,'swing',{asOf:day,formulaVersion:mod.SWING_FORMULA_VERSION,requestScope:{maxCandidates:240,scenarioKey:'',limit:40},coverage:{complete:true},scanQuality:{reliable:true,candidateCount:1,completedCount:1},
+    picks:[{code:'2330',exchange:'TWSE',scenario:{key:'midBandDefense'},plan:{entry:100,structuralStop:95,target:110}}]});
+  const e=db.swingVerification[day][0];assert.equal(e.holdingPosition.shares,1);assert.equal(e.holdingPosition.initialNotional,100);
+  assert.equal(e.holdingPosition.originalRiskMoney,5);assert.equal(e.holdingPosition.quantitySource,'normalized-one-share-assumption-v1');
+  const before=structuredClone(e.holdingPosition);mod.applySwingCorporateAction(e,0.95,compactTradingDay(0));assert.deepEqual(e.holdingPosition,before);
+  const next=db.verificationCaptures[pub.captureId].populationModels.find(m=>m.identity.entryModel==='next-open-price-observation');
+  assert.equal(next.identity.returnBasis,'adjusted-reference-price');assert.equal(next.identity.costModelVersion,'flat-round-trip-0.471pct-v1');
 });

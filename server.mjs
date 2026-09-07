@@ -8394,7 +8394,7 @@ function classifyCohort(capture, { asOf, tradingDates, maxSessions = 15 }) {
   return { mature: knownSessions >= maxSessions, ageSessions: knownSessions, reason: knownSessions >= maxSessions ? null : 'window-not-complete' };
 }
 
-function overnightMetricCoverage(rows, knownCost = true) {
+function overnightMetricCoverage(rows, knownCost = true, holding = false) {
   const price = (row, field) => Number.isFinite(row[field]) ? row[field] : null;
   const event = (row, field, evidence) => Number.isFinite(price(row, evidence)) && typeof row[field] === 'boolean' ? Number(row[field]) : null;
   return Object.fromEntries(Object.entries({
@@ -8402,11 +8402,12 @@ function overnightMetricCoverage(rows, knownCost = true) {
     avgHighReturn: row => price(row, 'highReturn'),
     hitPlus2: row => event(row, 'hitPlus2', 'highReturn'), brokeMinus2: row => event(row, 'brokeMinus2', 'lowReturn'),
     // 原布林不改寫；只有成本模型已知且相應價格有效時才衍生淨勝負分母。
-    winAtOpen: row => knownCost ? event(row, 'winAtOpen', 'openReturn') : null, winAtClose: row => knownCost ? event(row, 'winAtClose', 'currentReturn') : null,
-    avgOpenReturnNet: row => knownCost ? netReturnPct(price(row, 'openReturn')) : null,
-    avgCloseReturnNet: row => knownCost ? netReturnPct(price(row, 'currentReturn')) : null,
+    winAtOpen: row => holding ? (Number.isFinite(row.holdingOutcomes?.open?.netPnl) ? Number(row.holdingOutcomes.open.netPnl > 0) : null) : knownCost ? event(row, 'winAtOpen', 'openReturn') : null,
+    winAtClose: row => holding ? (Number.isFinite(row.holdingOutcomes?.close?.netPnl) ? Number(row.holdingOutcomes.close.netPnl > 0) : null) : knownCost ? event(row, 'winAtClose', 'currentReturn') : null,
+    avgOpenReturnNet: row => holding ? row.holdingOutcomes?.open?.holdingReturnPct ?? null : knownCost ? netReturnPct(price(row, 'openReturn')) : null,
+    avgCloseReturnNet: row => holding ? row.holdingOutcomes?.close?.holdingReturnPct ?? null : knownCost ? netReturnPct(price(row, 'currentReturn')) : null,
   }).map(([key, read]) => [key, { ...datedMetric(rows, read, 'observationDate'),
-    ...(!knownCost && ['winAtOpen','winAtClose','avgOpenReturnNet','avgCloseReturnNet'].includes(key) ? { reason: 'legacy-unknown-cost-model' } : {}) }]));
+    ...(!knownCost && !holding && ['winAtOpen','winAtClose','avgOpenReturnNet','avgCloseReturnNet'].includes(key) ? { reason: 'legacy-unknown-cost-model' } : {}) }]));
 }
 
 function aggregateOvernightRecords(records) {
@@ -8640,7 +8641,93 @@ function verificationModelKey(identity) {
   return stableJson(verificationIdentity(identity));
 }
 
-function currentVerificationIdentity(strategy) {
+// 不把還原座標報酬當作貨幣損益；費用與事件完整性由呼叫者顯式提供。
+function calculateHoldingOutcome({ initialPosition = {}, exit = {}, events = [], costs = {}, eventCoverage = 'unknown' } = {}) {
+  const missingReasons = [];
+  // toCompactDate 的通用預設是今天；貨幣證據缺日期時絕不能沿用該預設。
+  const holdingDate = value => value == null || value === '' ? '' : toCompactDate(value);
+  const finite = value => typeof value === 'number' && Number.isFinite(value);
+  const nonnegative = value => finite(value) && value >= 0;
+  const start = holdingDate(initialPosition.date), end = holdingDate(exit.date);
+  const evidence = { initialPosition: cloneJson(initialPosition), exit: cloneJson(exit), costs: cloneJson(costs),
+    eventCoverage, inputEvents: cloneJson(events), events: [], initialNotional: null, initialInvestment: null, originalRiskMoney: null,
+    finalShares: null, cashPaid: 0, cashReceivable: 0, additionalInvestment: 0, grossHoldingReturnPct: null };
+  const unavailable = status => ({ status, netPnl: null, holdingReturnPct: null, returnBasis: 'cash-holding-return', missingReasons: unique(missingReasons), evidence });
+  if (!isValidCompactCalendarDate(start) || !isValidCompactCalendarDate(end) || end < start) missingReasons.push('position-or-exit-date-missing');
+  if (!(finite(initialPosition.price) && initialPosition.price > 0 && finite(initialPosition.shares) && initialPosition.shares > 0)) missingReasons.push('initial-position-missing');
+  if (!(finite(exit.price) && exit.price > 0)) missingReasons.push('exit-price-missing');
+  if (eventCoverage !== 'complete') missingReasons.push('corporate-action-coverage-unknown');
+  if (missingReasons.length) return unavailable('unpriced');
+  const notional = initialPosition.price * initialPosition.shares;
+  evidence.initialNotional = notional;
+  evidence.originalRiskMoney = finite(initialPosition.originalStop) ? (initialPosition.price - initialPosition.originalStop) * initialPosition.shares : null;
+  let totalCost = null, buyFee = 0;
+  if (costs.model === 'explicit-cash-fees-v1') {
+    if (['buyFee','sellFee','tax'].every(key => nonnegative(costs[key]))) {
+      buyFee = costs.buyFee; totalCost = costs.buyFee + costs.sellFee + costs.tax;
+    } else missingReasons.push('explicit-cash-fees-incomplete');
+  } else if (costs.model === 'initial-notional-flat-total-v1' && nonnegative(costs.total)) totalCost = costs.total;
+  else missingReasons.push('cost-model-or-total-missing');
+  evidence.initialInvestment = totalCost === null ? null : notional + buyFee;
+  let shares = initialPosition.shares, unsupported = false;
+  const pendingShares = [];
+  const revisions = new Map();
+  for (const event of events) {
+    const key = event.id || event.exDate;
+    const previous = revisions.get(key);
+    if (!previous || (event.revision || 0) >= (previous.revision || 0)) revisions.set(key, event);
+  }
+  for (const event of [...revisions.values()].sort((a,b) => String(a.exDate).localeCompare(String(b.exDate)))) {
+    const day = holdingDate(event.exDate);
+    if (!day || !event.source) { missingReasons.push('event-evidence-missing'); continue; }
+    if (event.status === 'withdrawn' || day <= start || day > end) continue;
+    for (const credit of pendingShares) if (!credit.applied && credit.date < day) { shares += credit.shares; credit.applied = true; }
+    if (pendingShares.some(credit => !credit.applied) && !Number.isFinite(event.eligibleShares)) missingReasons.push('event-eligibility-unproven');
+    const eligibleShares = Number.isFinite(event.eligibleShares) && event.eligibleShares >= 0 ? event.eligibleShares : shares;
+    const applied = { ...cloneJson(event), eligibleShares };
+    evidence.events.push(applied);
+    if (!['cash-dividend','stock-dividend','subscription','dividend'].includes(event.kind)) {
+      unsupported = true; missingReasons.push('unsupported-corporate-action'); continue;
+    }
+    if (['cash-dividend','dividend'].includes(event.kind)) {
+      if (!nonnegative(event.cashDividend)) missingReasons.push('cash-dividend-missing');
+      else {
+        const amount = eligibleShares * event.cashDividend;
+        applied.cashEntitlement = amount;
+        if (holdingDate(event.paymentDate) && holdingDate(event.paymentDate) <= end) evidence.cashPaid += amount;
+        else evidence.cashReceivable += amount;
+      }
+    }
+    if (event.kind === 'stock-dividend' || (event.kind === 'dividend' && event.stockRatio !== 0)) {
+      const settlement = event.stockSettlement;
+      if (!settlement?.source || !nonnegative(settlement.shares) || !Number.isInteger(settlement.shares) || !nonnegative(settlement.cashInLieu)
+        || !isValidCompactCalendarDate(holdingDate(settlement.availableDate)) || holdingDate(settlement.availableDate) < day
+        || holdingDate(settlement.availableDate) > end) missingReasons.push('stock-settlement-unproven');
+      else { pendingShares.push({ date: holdingDate(settlement.availableDate), shares: settlement.shares }); evidence.cashReceivable += settlement.cashInLieu; }
+    }
+    if (event.kind === 'subscription' || (event.kind === 'dividend' && event.subscriptionRatio !== 0)) {
+      if (event.participation === false) continue;
+      if (event.participation !== true || !nonnegative(event.subscriptionShares) || !Number.isInteger(event.subscriptionShares)
+        || !nonnegative(event.subscriptionInvestment) || !isValidCompactCalendarDate(holdingDate(event.subscriptionAvailableDate))
+        || holdingDate(event.subscriptionAvailableDate) < day || holdingDate(event.subscriptionAvailableDate) > end) missingReasons.push('subscription-participation-or-settlement-missing');
+      else { pendingShares.push({ date: holdingDate(event.subscriptionAvailableDate), shares: event.subscriptionShares }); evidence.additionalInvestment += event.subscriptionInvestment; }
+    }
+  }
+  for (const credit of pendingShares) if (!credit.applied) shares += credit.shares;
+  evidence.finalShares = shares;
+  if (unsupported) return unavailable('unsupported');
+  if (missingReasons.some(reason => !['explicit-cash-fees-incomplete','cost-model-or-total-missing'].includes(reason))) return unavailable('unpriced');
+  const grossPnl = exit.price * shares + evidence.cashPaid + evidence.cashReceivable - notional - evidence.additionalInvestment;
+  evidence.grossPnl = roundTo(grossPnl, 10);
+  evidence.grossHoldingReturnPct = evidence.additionalInvestment ? null : grossPnl / notional * 100;
+  if (totalCost === null) return unavailable('unpriced');
+  const netPnl = roundTo(grossPnl - totalCost, 10);
+  if (evidence.additionalInvestment) missingReasons.push('multiple-cash-flow-return-undefined');
+  return { status: 'complete', netPnl, holdingReturnPct: evidence.additionalInvestment ? null : netPnl / evidence.initialInvestment * 100,
+    returnBasis: 'cash-holding-return', missingReasons, evidence };
+}
+
+function priceVerificationIdentity(strategy) {
   return verificationIdentity({
     snapshotSchemaVersion: 2,
     selectionVersion: strategy === 'swing' ? SWING_FORMULA_VERSION : OVERNIGHT_FORMULA_VERSION,
@@ -8649,6 +8736,90 @@ function currentVerificationIdentity(strategy) {
     cohortPolicyVersion: 'first-canonical-publication-v1',
     entryModel: 'signal-close-observation', returnBasis: 'adjusted-reference-price',
   });
+}
+
+function currentVerificationIdentity(strategy) {
+  return { ...priceVerificationIdentity(strategy), evaluationVersion: `${strategy}-hypothetical-holding-v1`,
+    costModelVersion: 'initial-notional-flat-0.471pct-v1', returnBasis: 'cash-holding-return' };
+}
+
+function isHoldingIdentity(input) { return verificationIdentity(input).returnBasis === 'cash-holding-return'; }
+function knownPriceCost(input) { return verificationIdentity(input).costModelVersion === 'flat-round-trip-0.471pct-v1'; }
+function holdingOutcomeCoverage(outcomes) {
+  const valued = outcomes.filter(outcome => Number.isFinite(outcome?.netPnl));
+  return { totalCount: outcomes.length, validCount: valued.length, missingCount: outcomes.length - valued.length,
+    returnValidCount: outcomes.filter(outcome => Number.isFinite(outcome?.holdingReturnPct)).length,
+    unsupportedCount: outcomes.filter(outcome => outcome?.status === 'unsupported').length,
+    missingReasons: Object.fromEntries(unique(outcomes.flatMap(outcome => outcome?.missingReasons || ['holding-outcome-missing']))
+      .map(reason => [reason, outcomes.filter(outcome => (outcome?.missingReasons || ['holding-outcome-missing']).includes(reason)).length])) };
+}
+function createHypotheticalHoldingPosition(date, price, originalStop = null) {
+  return { date: toCompactDate(date), price, shares: 1, originalStop,
+    initialNotional: price, originalRiskMoney: Number.isFinite(originalStop) ? price - originalStop : null,
+    quantitySource: 'normalized-one-share-assumption-v1', source: 'frozen-signal-price',
+    eligibilityRule: 'held-before-ex-date', reinvestment: false };
+}
+function modelHoldingOutcome(position, exit, events, coverage, costModelVersion) {
+  return calculateHoldingOutcome({ initialPosition: position || {}, exit, events, eventCoverage: coverage,
+    costs: { model: 'initial-notional-flat-total-v1', total: position && costModelVersion === 'initial-notional-flat-0.471pct-v1' ? position.price * position.shares * VERIFY_ROUND_TRIP_COST_PCT / 100 : null,
+      source: 'initial-notional-flat-0.471pct-v1', note: '原始價款乘0.471%；非實際費稅；未計個人股利稅與補充保費' } });
+}
+
+// 公告是模型應收假設，不能作為已支付或可處分新股的證據。
+function holdingActionEvidence(code, date, detected = false) {
+  const withdrawn = fundamentalsHistory?.dividends?.[cleanCode(code)]?.[date];
+  const actions = withdrawn?.status === 'withdrawn' ? [{ exDate: date, ...withdrawn }] : corporateActionHistoryForCode(code, date, date);
+  if (!actions.length) return detected ? [{ id: `${code}:${date}`, exDate: date, kind: 'unknown', source: 'official-price-event' }] : [];
+  return actions.map(action => ({ ...cloneJson(action), id: `${code}:${action.exDate}`, source: action.source || 'official-dividend-archive',
+    kind: action.kind === '除息' ? 'cash-dividend' : 'dividend',
+    valuationBasis: 'announced-dividend-receivable-assumption',
+    // 純除息種類能證無配股；含權缺欄不能以0補齊。
+    ...(action.kind === '除息' ? { stockRatio: 0, subscriptionRatio: 0 } : {}) }));
+}
+
+const TPEX_HOLDING_FIELDS = ['除權息日期','代號','名稱','除權息前收盤價','除權息參考價','權值','息值','權值+息值','權/息','漲停價','跌停價','開始交易基準價','減除股利參考價','現金股利','每仟股無償配股','現金增資股數','現金增資認購價','公開承銷股數','員工認購股數','原股東認購股數','按持股比例仟股認購'];
+function parseTpexHoldingActions(payload, from, through) {
+  const table = payload?.tables?.[0];
+  const invalid = () => { throw new Error('上櫃歷史除權息表不完整'); };
+  if (payload?.stat !== 'ok' || payload.date !== `${from}~${through}` || payload.tables.length !== 1
+    || stableJson(table?.fields) !== stableJson(TPEX_HOLDING_FIELDS) || !Array.isArray(table.data)
+    || table.totalCount !== table.data.length) return invalid();
+  const seen = new Set();
+  return table.data.map(row => {
+    const date = toCompactDate(row?.[0]), code = cleanCode(row?.[1]);
+    if (!Array.isArray(row) || row.length !== 21 || typeof row[0] !== 'string' || !row[0] || !isValidCompactCalendarDate(date) || date < from || date > through
+      || !SECURITY_CODE_PATTERN.test(code) || seen.has(`${code}:${date}`)) return invalid();
+    seen.add(`${code}:${date}`);
+    const number = index => { const value = parseNumber(row[index]); if (value === null || value < 0) return invalid(); return value; };
+    return { id: `${code}:${date}`, code, exDate: date, kind: row[8] === '除息' ? 'cash-dividend' : ['除權','除權息'].includes(row[8]) ? 'dividend' : 'unknown',
+      cashDividend: number(13), stockRatio: number(14) / 1000, subscriptionRatio: number(20) / 1000,
+      subscriptionPrice: number(16), source: 'TPEx-exDailyQ', valuationBasis: 'announced-dividend-receivable-assumption' };
+  });
+}
+const tpexHoldingMonths = new Map();
+const tpexHoldingFlights = new Map();
+async function getTpexHoldingActionMonth(month) {
+  if (!/^\d{6}$/.test(month)) return { status: 'unavailable', events: null, reason: 'invalid-month' };
+  const cached = tpexHoldingMonths.get(month);
+  if (cached?.expiresAt > Date.now()) return cached.value;
+  if (tpexHoldingFlights.has(month)) return tpexHoldingFlights.get(month);
+  const task = (async () => {
+    let value;
+    const from = `${month}01`, through = addDaysCompact(addMonthsCompact(from, 1), -1);
+    const slash = date => `${date.slice(0,4)}/${date.slice(4,6)}/${date.slice(6,8)}`;
+    try {
+      const payload = await fetchJson(`https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ?startDate=${slash(from)}&endDate=${slash(through)}&response=json`, { timeoutMs: 20000 });
+      value = { status: 'complete', events: parseTpexHoldingActions(payload, from, through), from, through,
+        coveredThrough: [through, toTaipeiCompactDate()].sort()[0],
+        scope: 'official-ex-right-dividend-only', source: 'TPEx-exDailyQ', observedAt: new Date().toISOString() };
+    } catch (error) { value = { status: 'unavailable', events: null, from, through, reason: 'corporate-action-source-unavailable', error: error.message }; }
+    tpexHoldingMonths.delete(month);
+    tpexHoldingMonths.set(month, { value, expiresAt: Date.now() + (value.status === 'complete' ? 5 * 60 * 1000 : 60 * 1000) });
+    while (tpexHoldingMonths.size > 12) tpexHoldingMonths.delete(tpexHoldingMonths.keys().next().value);
+    return value;
+  })().finally(() => tpexHoldingFlights.delete(month));
+  tpexHoldingFlights.set(month, task);
+  return task;
 }
 
 function migrateVerificationMetadata(input) {
@@ -8822,7 +8993,8 @@ async function verificationMeasurementSummary(strategy, calendar = null) {
 
 function issuedVerificationIdentity(capture, nextOpen = false) {
   return { ...verificationIdentity(capture), cohortPolicyVersion: 'first-canonical-issued-manifest-v1',
-    ...(nextOpen ? { entryModel: 'next-open-price-observation', evaluationVersion: 'swing-next-open-price-observation-v1' } : {}) };
+    ...(nextOpen ? { entryModel: 'next-open-price-observation', evaluationVersion: 'swing-next-open-price-observation-v1',
+      returnBasis: 'adjusted-reference-price', costModelVersion: 'flat-round-trip-0.471pct-v1' } : {}) };
 }
 
 // 只投影同一份已提交DB；沒有另一套狀態寫入器，時間補證與T02補驗不會互相覆蓋。
@@ -8877,11 +9049,11 @@ function summarizeVerificationPopulation(db, strategy, { asOf = toTaipeiCompactD
 }
 
 function swingMetricCoverage(rows, identity) {
-  const knownCost = identity.costModelVersion === currentVerificationIdentity('swing').costModelVersion;
-  const gross = row => row.status === 'resolved' && Number.isFinite(row.resultPct) ? row.resultPct : null;
-  const net = row => knownCost ? netReturnPct(gross(row)) : null;
+  const knownCost = knownPriceCost(identity), holding = isHoldingIdentity(identity);
+  const gross = row => row.status !== 'resolved' ? null : holding ? row.holdingOutcome?.evidence?.grossHoldingReturnPct ?? null : Number.isFinite(row.resultPct) ? row.resultPct : null;
+  const net = row => row.status !== 'resolved' ? null : holding ? row.holdingOutcome?.holdingReturnPct ?? null : knownCost ? netReturnPct(gross(row)) : null;
   return Object.fromEntries(Object.entries({ avgResultPct: gross, avgResultPctNet: net,
-    netProfitRate: row => Number.isFinite(net(row)) ? (net(row) > 0 ? 100 : 0) : null,
+    netProfitRate: row => holding ? (row.status === 'resolved' && Number.isFinite(row.holdingOutcome?.netPnl) ? (row.holdingOutcome.netPnl > 0 ? 100 : 0) : null) : Number.isFinite(net(row)) ? (net(row) > 0 ? 100 : 0) : null,
     targetHitRate: row => row.status === 'resolved' && ['win','loss','expired'].includes(row.exitReason) ? (row.exitReason === 'win' ? 100 : 0) : null,
     avgDaysHeld: row => row.status === 'resolved' && Number.isFinite(row.daysHeld) ? row.daysHeld : null,
   }).map(([key, read]) => [key, datedMetric(rows, read)]));
@@ -8894,7 +9066,7 @@ function summarizeSwingCohortRows(rows, identity) {
   const profit = metricCoverage.netProfitRate;
   const target = metricCoverage.targetHitRate;
   const valued = eligible.filter(row => row.status === 'resolved' && Number.isFinite(row.resultPct));
-  const net = valued.map(row => identity.costModelVersion === currentVerificationIdentity('swing').costModelVersion ? netReturnPct(row.resultPct) : null).filter(Number.isFinite);
+  const net = valued.map(row => isHoldingIdentity(identity) ? row.holdingOutcome?.holdingReturnPct : knownPriceCost(identity) ? netReturnPct(row.resultPct) : null).filter(Number.isFinite);
   const up = net.filter(value => value > 0).reduce((sum,value) => sum + value,0);
   const down = net.filter(value => value < 0).reduce((sum,value) => sum - value,0);
   return { issued: rows.length, samples: rows.length, signalDays: new Set(rows.map(row => row.tradeDate)).size,
@@ -8905,14 +9077,15 @@ function summarizeSwingCohortRows(rows, identity) {
     wins: valued.filter(row => row.exitReason === 'win').length, losses: valued.filter(row => row.exitReason === 'loss').length,
     expired: valued.filter(row => row.exitReason === 'expired').length, continuousResolved: valued.length,
     stalled: mature.filter(row => row.stalled).length, periodicCallSamples: mature.filter(row => row.periodic).length,
-    netProfits: net.filter(value => value > 0).length,
+    netProfits: isHoldingIdentity(identity) ? valued.filter(row => Number.isFinite(row.holdingOutcome?.netPnl) && row.holdingOutcome.netPnl > 0).length : net.filter(value => value > 0).length,
+    ...(isHoldingIdentity(identity) ? { holdingCoverage: holdingOutcomeCoverage(eligible.filter(row => row.status === 'resolved').map(row => row.holdingOutcome)) } : {}),
     netProfitRate: profit.validCount >= WIN_RATE_MIN_SAMPLES ? roundTo(profit.value) : null,
     targetHitRate: target.validCount >= WIN_RATE_MIN_SAMPLES ? roundTo(target.value) : null,
     // winRate只作相容alias，明示它是達標率；新UI使用netProfitRate。
     winRate: target.validCount >= WIN_RATE_MIN_SAMPLES ? roundTo(target.value) : null,
     winRateMinSamples: WIN_RATE_MIN_SAMPLES,
     avgResultPct: metricCoverage.avgResultPct.value, avgResultPctNet: metricCoverage.avgResultPctNet.value,
-    avgDaysHeld: metricCoverage.avgDaysHeld.value, profitFactorNet: down > 0 ? roundTo(up/down) : null,
+    avgDaysHeld: metricCoverage.avgDaysHeld.value, profitFactorNet: !isHoldingIdentity(identity) && down > 0 ? roundTo(up/down) : null,
     medianResultPctNet: median(net), metricCoverage,
     missingReasons: Object.fromEntries([...new Set(mature.filter(row => row.reason).map(row => row.reason))].map(reason => [reason, mature.filter(row => row.reason === reason).length])),
   };
@@ -8942,7 +9115,7 @@ function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, popula
       return { ...row, cohort, regime: regimeBucket(entry?.regime || snapshot?.regime),
         periodic: Boolean(entry?.fillModel && entry.fillModel !== 'continuous'),
         exitReason: entry?.status || null, resultPct: nextOpen ? entry?.resultPctNextOpen ?? null : entry?.resultPct ?? null,
-        daysHeld: entry?.daysHeld ?? null,
+        daysHeld: entry?.daysHeld ?? null, holdingOutcome: nextOpen ? null : entry?.holdingOutcome ?? null,
         ...(strategy === 'overnight' ? { performance: perf || null, observationDate: observed?.observationDate || null } : {}) };
     });
     if (strategy === 'swing') {
@@ -8955,20 +9128,22 @@ function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, popula
           withPeriodicCall: summarizeSwingCohortRows(subset.map(row => ({ ...row, periodic: false })), identity) };
       });
       return { ...summary, identity, modelKey: verificationModelKey(identity), populationModelKey: model.modelKey,
-        resultBasis: model.resultBasis || 'signal-close-price-observation', rows, scenarios };
+        resultBasis: model.resultBasis || (isHoldingIdentity(identity) ? 'hypothetical-one-share-cash-holding' : 'signal-close-price-observation'), rows, scenarios };
     }
     const matured = rows.filter(row => row.cohort.mature);
     const mature = matured.filter(row => row.status === 'resolved');
     const records = [...new Set(mature.map(row => row.captureId))].map(captureId => {
       const subset = mature.filter(row => row.captureId === captureId);
       return { observationDate: subset[0].observationDate, regime: subset[0].regime, verified: subset.length,
-        metricCoverage: overnightMetricCoverage(subset.map(row => ({ ...row.performance, observationDate: row.observationDate })), identity.costModelVersion === current.costModelVersion) };
+        metricCoverage: overnightMetricCoverage(subset.map(row => ({ ...row.performance, observationDate: row.observationDate })), knownPriceCost(identity), isHoldingIdentity(identity)) };
     });
     const total = aggregateOvernightRecords(records);
     return { ...total, identity, modelKey: verificationModelKey(identity), populationModelKey: model.modelKey,
       issued: rows.length, matureCount: matured.length, immatureCount: rows.length - matured.length, unknownCount: 0,
       ...Object.fromEntries(['noEntry','pending','resolved','unresolved'].map(status => [status, rows.filter(row => row.status === status).length])),
       signalDays: new Set(rows.map(row => row.tradeDate)).size, rows,
+      ...(isHoldingIdentity(identity) ? { holdingCoverage: Object.fromEntries(['open','close'].map(key => [key,
+        holdingOutcomeCoverage(mature.map(row => row.performance?.holdingOutcomes?.[key]))])) } : {}),
       byRegime: Object.fromEntries(['aboveMa60','belowMa60','unknown'].map(bucket => [bucket, aggregateOvernightRecords(records.filter(record => record.regime === bucket))])) };
   });
   return { policy, asOf: compactToIsoDate(toCompactDate(asOf)), maxSessions: strategy === 'swing' ? SWING_VERIFY_MAX_DAYS : 1,
@@ -9043,7 +9218,10 @@ function publishVerification(db, strategy, body) {
     scanQuality: cloneJson(body.scanQuality || {}), warnings: cloneJson(body.warnings || []), regime: cloneJson(body.regime || null),
     degraded: (body.scanQuality?.coverageRate ?? 100) < 100 || body.scanQuality?.corporateActionResultsComplete === false || Boolean(body.warnings?.length),
     inputEvidence: cloneJson(body.inputEvidence || null),
-    signals: picks.map(pick => ({ ...cloneJson(pick), signalId: createHash('sha256').update(stableJson({
+    signals: picks.map(pick => ({ ...cloneJson(pick),
+      ...(isHoldingIdentity(identity) ? { holdingPosition: createHypotheticalHoldingPosition(tradeDate,
+        strategy === 'swing' ? pick.plan?.entry : pick.price, strategy === 'swing' ? pick.plan?.structuralStop : null) } : {}),
+      signalId: createHash('sha256').update(stableJson({
       captureId, exchange: pick.exchange || 'legacy-unknown', code: pick.code, group: pick.group || pick.scenario?.key || 'unknown',
     })).digest('hex') })),
   };
@@ -9576,6 +9754,8 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
   // 下面判定除權息基準要查官方歸檔，先確保它已載入（未載入時 corporateActionHistoryForCode 只會回空陣列）。
   await loadFundamentalsHistory();
   const actionBaseByCode = await resolveObservationActionBases(picks, observationCompact, reference);
+  const tpexHoldingMonth = isHoldingIdentity(snapshot) && picks.some(pick => (pick.exchange || reference.byCode.get(pick.code)?.exchange) === 'TPEx')
+    ? await getTpexHoldingActionMonth(observationCompact.slice(0,6)) : null;
   const evidenceWarnings = [...evidenceByCode.values()].map((evidence) => evidence.warning).filter(Boolean);
   const rows = picks.map((pick) => {
     const evidence = evidenceByCode.get(pick.code);
@@ -9585,7 +9765,7 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
       return { ...pick, verified: false, pendingReason: evidence?.status || "missing" };
     }
     // 觀察日若是除權息日，價格會機械性跳空，拿訊號日原始收盤當基準會直接記成大跌
-    //（配息 5% 就必然觸發 brokeMinus2）。基準價要換成事件後的同一尺度，報酬才是含息總報酬。
+    //（配息 5% 就必然觸發 brokeMinus2）。價格觀察換成事件後的同一尺度；含息持有另算貨幣結果。
     //
     // **絕不可用 `bar.previousClose`**（2026-07-27 實測 20260724 的 18 筆真實事件）：
     //   整批當日收盤／上市：`Change` 是 `"0.0000"` 哨兵（12/12）→ previousClose ＝ 當日收盤，
@@ -9616,6 +9796,21 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
     const lowReturn = pct((bar.low ?? NaN) - base, base);
     const closeValue = evidence.phase === "intraday" ? bar.current : bar.close;
     const currentReturn = pct((closeValue ?? NaN) - base, base);
+    let holdingOutcomes;
+    if (isHoldingIdentity(snapshot)) {
+      const exchange = pick.exchange || reference.byCode.get(pick.code)?.exchange;
+      const events = exchange === 'TPEx' && tpexHoldingMonth?.status === 'complete'
+        ? tpexHoldingMonth.events.filter(event => event.code === pick.code && event.exDate === observationCompact)
+        : holdingActionEvidence(pick.code, observationCompact, Boolean(action));
+      const covered = exchange === 'TPEx' ? tpexHoldingMonth?.status === 'complete' && observationCompact <= tpexHoldingMonth.coveredThrough
+        : exchange === 'TWSE' && corporateActionResultMonthCovered(observationCompact);
+      const coverage = evidence.phase !== 'intraday' && covered ? 'complete' : 'unknown';
+      holdingOutcomes = Object.fromEntries([['open',bar.open],['close',closeValue]].map(([key,price]) => [key,
+        modelHoldingOutcome(pick.holdingPosition, { date: observationCompact, price, source: evidence.source }, events, coverage, verificationIdentity(snapshot).costModelVersion)]));
+      for (const outcome of Object.values(holdingOutcomes)) outcome.evidence.coverageSource = {
+        source: exchange === 'TPEx' ? 'TPEx-exDailyQ' : 'TWSE-TWT49U', scope: 'official-ex-right-dividend-only',
+        status: coverage, observationDate: observationCompact, observedAt: tpexHoldingMonth?.observedAt || generatedAt };
+    }
     return {
       ...pick,
       verified: true,
@@ -9624,6 +9819,7 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
       highReturn,
       lowReturn,
       currentReturn,
+      ...(holdingOutcomes ? { holdingOutcomes, priceObservationIdentity: priceVerificationIdentity('overnight') } : {}),
       hitPlus2: highReturn !== null && highReturn >= 2,
       brokeMinus2: lowReturn !== null && lowReturn <= -2,
       // 可執行勝率（同 nextDayPerformance）：淨報酬 > 0 才算贏；盤中階段 currentReturn 是現價。
@@ -9681,7 +9877,7 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
 // 快照裡落盤的 final 觀察結果（只有 complete 且同一公式版本的才用；版本一換就整份重觀察）。
 function observationIdentityFor(snapshot) {
   if (snapshot.captureId) return verificationIdentity(snapshot);
-  return { ...currentVerificationIdentity('overnight'), selectionVersion: verificationIdentity(snapshot).selectionVersion,
+  return { ...priceVerificationIdentity('overnight'), selectionVersion: verificationIdentity(snapshot).selectionVersion,
     cohortPolicyVersion: 'legacy-unknown' };
 }
 
@@ -9724,7 +9920,7 @@ async function verificationObservation(snapshot, options) {
     expectedSignals: snapshot.picks.length, verifiedSignals: stored.rows.filter(row => row.verified).length,
     pendingSignals: stored.rows.filter(row => !row.verified).length,
     rows: stored.rows.map((row,index) => ({ ...snapshot.picks[index], ...row })) };
-  else if (snapshot.captureId && verificationModelKey(snapshot) !== verificationModelKey(currentVerificationIdentity('overnight'))) {
+  else if (snapshot.captureId && ![currentVerificationIdentity('overnight'), priceVerificationIdentity('overnight')].some(identity => verificationModelKey(snapshot) === verificationModelKey(identity))) {
     observed = { identity: verificationIdentity(snapshot), available: false, status: 'unavailable', complete: false,
       unavailableReason: 'unsupported-verification-model', rows: [], warnings: ['此評估模型目前不支援補算，保留原版本與輸入。'] };
   } else observed = { ...await observeSignalSnapshot(snapshot, options),
@@ -9750,7 +9946,7 @@ async function persistFinalObservations(entries) {
     openReturn: Number.isFinite(row.openReturn) ? row.openReturn : null,
     highReturn: Number.isFinite(row.highReturn) ? row.highReturn : null,
     currentReturn: Number.isFinite(row.currentReturn) ? row.currentReturn : null,
-    ...Object.fromEntries(['currentPrice', 'lowReturn', 'openReturnNet', 'currentReturnNet', 'observationPhase', 'adjustedBase', 'signalClose']
+    ...Object.fromEntries(['currentPrice', 'lowReturn', 'openReturnNet', 'currentReturnNet', 'observationPhase', 'adjustedBase', 'signalClose', 'holdingOutcomes', 'priceObservationIdentity']
       .filter(key => key in row).map(key => [key, row[key]])),
     observationSource: row.observationSource || "",
     ...(row.corporateActionAdjusted ? { corporateActionAdjusted: true } : {}),
@@ -9855,7 +10051,7 @@ async function buildVerificationHistory() {
     const snapshot = snapshots[index];
     const perfs = observed.rows.filter((row) => row.verified);
     const metricCoverage = overnightMetricCoverage(perfs.map(row => ({ ...row, observationDate: observed.observationDate })),
-      (observed.identity || verificationIdentity(snapshot)).costModelVersion === currentVerificationIdentity('overnight').costModelVersion);
+      knownPriceCost(observed.identity || snapshot), isHoldingIdentity(observed.identity || snapshot));
     const count = field => (metricCoverage[field].value ?? 0) * metricCoverage[field].validCount;
     return {
       asOf: snapshot.asOf,
@@ -9890,7 +10086,8 @@ async function buildVerificationHistory() {
     days: records.filter(record => record.modelKey === modelKey).length,
     completeDays: records.filter(record => record.modelKey === modelKey && record.complete).length }));
   const done = records.filter((record) => record.complete && record.modelKey === selectedModelKey);
-  const knownCost = records.find(record => record.modelKey === selectedModelKey)?.identity.costModelVersion === currentVerificationIdentity('overnight').costModelVersion;
+  const selectedIdentity = records.find(record => record.modelKey === selectedModelKey)?.identity || {};
+  const knownCost = knownPriceCost(selectedIdentity) || isHoldingIdentity(selectedIdentity);
   const totals = done.length
     ? {
         ...aggregateOvernightRecords(done),
@@ -9976,7 +10173,7 @@ async function buildSignalVerification() {
   }
   const verifiedRows = observed.rows.filter((row) => row.verified);
   const unverifiedRows = observed.rows.filter((row) => !row.verified);
-  const observationNet = value => observed.identity.costModelVersion === currentVerificationIdentity('overnight').costModelVersion ? netReturnPct(value) : null;
+  const observationNet = value => knownPriceCost(observed.identity) ? netReturnPct(value) : null;
   const summarize = (items) => ({
     total: items.length,
     hitPlus2: items.filter((row) => row.hitPlus2).length,
@@ -9991,6 +10188,9 @@ async function buildSignalVerification() {
     // 隔日沖平均報酬本來就在 ±0.5% 這個量級，0.471% 的成本足以讓正負號翻轉。
     avgCurrentReturnNet: observationNet(average(items.map((row) => row.currentReturn))),
     avgHighReturnNet: observationNet(average(items.map((row) => row.highReturn))),
+    ...(isHoldingIdentity(observed.identity) ? { holdingCoverage: Object.fromEntries(['open','close'].map(key => [key,
+      holdingOutcomeCoverage(items.map(row => row.holdingOutcomes?.[key]))])),
+      holdingMetrics: overnightMetricCoverage(items, false, true) } : {}),
   });
   // 三個分群是平行判定、沒有 else：strongContinuation 的條件是 pullbackReversal 的超集，
   // 所以溫和上漲的紅 K 必定同時進兩群，同一檔會出現兩筆、貢獻完全相同的漲跌結果。
@@ -10924,8 +11124,8 @@ function resolveCorporateActionAdjustments(rows, officialActions, { allowHeurist
       // 恆等於「前收 − 參考價」，對兩種情形都成立，所以這張表在數學上分不出配股與現增。
       let shareFactorKnown = archiveShareFactor !== null
         || Boolean(resultKind && !resultKind.includes("權"));
-      // 但「不知道」不等於「該警告」。上櫃沒有 TWT49U 對應端點（實測：1065 個收錄代號裡只有
-      // 1 個上櫃），所以每一筆用 exchange-quote 認出來的上櫃事件都沒有 kind——而全市場 90.6%
+      // 但「不知道」不等於「該警告」。既有價格路徑的 TWT49U 僅覆蓋上市（實測：1065 個收錄代號裡只有
+      // 1 個上櫃）；含息貨幣路徑另用 TPEx exDailyQ，本段維持逐檔參考價。原量測全市場 90.6%
       // 的事件是純除息、股數根本沒變。對它們全部掛標籤等於在 260 檔裡標 44 檔（實測 16.9%），
       // 那是雜訊不是訊號。只有拿得到**正面證據**說股數真的變了、卻量不出倍數時才值得說。
       const shareChangeLikely = resultKind.includes("權")
@@ -11734,6 +11934,7 @@ function recordSwingVerification(db, body) {
         inputFingerprint: body.publication.inputFingerprint, publicationStartedAt: body.publication.publicationStartedAt, publishedAt: body.publication.publishedAt,
         decisionAvailableAt: body.publication.decisionAvailableAt,
         originalEntry: plan.entry, originalStop: plan.structuralStop, originalTarget: plan.target,
+        ...(isHoldingIdentity(body.publication) ? { holdingPosition: pick.holdingPosition ? cloneJson(pick.holdingPosition) : createHypotheticalHoldingPosition(day, plan.entry, plan.structuralStop), holdingEvents: [], holdingCoverage: [] } : {}),
       } : {}),
       surveillance,
       fillModel: swingVerificationFillModel(surveillance),
@@ -11771,8 +11972,8 @@ function supportsSwingEvaluation(entry) {
   const axes = ['snapshotSchemaVersion', 'evaluationVersion', 'entryModel', 'returnBasis'];
   // 無法證明原模型的 legacy pending 只允許帶 this-advance-only provenance 的補驗。
   if (axes.every(axis => identity[axis] === 'legacy-unknown')) return true;
-  const current = currentVerificationIdentity('swing');
-  return axes.every(axis => identity[axis] === current[axis]);
+  return [currentVerificationIdentity('swing'), priceVerificationIdentity('swing')]
+    .some(model => axes.every(axis => identity[axis] === model[axis]));
 }
 function markUnsupportedSwingEvaluation(entry) {
   entry.evaluationUnavailable = { reason: 'unsupported-verification-model', modelKey: verificationModelKey(entry) };
@@ -11806,6 +12007,15 @@ function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
     entry.status = status;
     entry.resolvedAt = day;
     entry.resultPct = roundTo(((exitPrice - entry.entry) / entry.entry) * 100);
+    if (isHoldingIdentity(entry)) {
+      entry.exit = { date: day, price: exitPrice, source: 'official-daily-price-exit-rule', reason: status };
+      entry.priceObservationIdentity = priceVerificationIdentity('swing');
+      const complete = entry.holdingCoverage?.length === entry.daysHeld && entry.holdingCoverage.every(item => item.status === 'complete');
+      entry.holdingOutcome = modelHoldingOutcome(entry.holdingPosition, entry.exit, entry.holdingEvents || [], complete ? 'complete' : 'unknown', verificationIdentity(entry).costModelVersion);
+      entry.holdingOutcome.evidence.coverageSource = cloneJson(entry.holdingCoverage || []);
+      entry.nextOpenHoldingOutcome = { status: 'unpriced', netPnl: null, holdingReturnPct: null,
+        returnBasis: 'cash-holding-return', missingReasons: ['next-open-cash-model-not-established'] };
+    }
     const nextOpen = Number(entry.nextOpen);
     if (Number.isFinite(nextOpen) && nextOpen > 0) {
       entry.resultPctNextOpen = roundTo(((exitPrice - nextOpen) / nextOpen) * 100);
@@ -11893,7 +12103,7 @@ function normalizeSwingVerificationQuote(row) {
 // entry/stop/target，除息當天會被記成假停損（實測：配息 5 元、參考價 95、當天相對參考價
 // 收平盤，仍會 low(95) <= stop(95) 記 loss −5%，而投資人同時領到 5 元現金股利）。
 // 這裡用「交易所官方昨收 ÷ 前一根實際收盤」推出調整比率，把 entry/stop/target 一起搬到
-// 事件後的價格尺度；因為股利已內含在比率裡，之後算出的 resultPct 就是含息總報酬。
+// 事件後的價格尺度；resultPct 仍是還原座標價格觀察，現金持有結果另由 holdingOutcome 計算。
 const CORPORATE_ACTION_RATIO_TOLERANCE = 0.002; // 0.2%：小於此視為捨入誤差，不動計畫價
 
 // 一個事件日的比率有**三種**結果，呼叫端必須分得開：
@@ -11946,6 +12156,7 @@ function swingVerificationActionDetected(code, day, row) {
 }
 
 function applySwingCorporateAction(entry, ratio, day) {
+  if ((entry.corporateActions || []).some(item => item.date === day)) return;
   entry.entry = roundTo(entry.entry * ratio);
   entry.stop = roundTo(entry.stop * ratio);
   entry.target = roundTo(entry.target * ratio);
@@ -11953,7 +12164,7 @@ function applySwingCorporateAction(entry, ratio, day) {
   if (Number.isFinite(Number(entry.nextOpen)) && Number(entry.nextOpen) > 0) entry.nextOpen = roundTo(Number(entry.nextOpen) * ratio);
   const adjustments = Array.isArray(entry.corporateActions) ? entry.corporateActions : [];
   adjustments.push({ date: day, ratio: roundTo(ratio, 6) });
-  entry.corporateActions = adjustments.slice(-8);
+  entry.corporateActions = isHoldingIdentity(entry) ? adjustments : adjustments.slice(-8);
 }
 
 // 依實際交易日逐根重放。任何中間日缺 K 都停在缺口之前，絕不拿較晚一天替代；
@@ -12017,6 +12228,23 @@ function replaySwingVerificationHistory(entry, dayQuotes, latestDate, calendar =
       const quantification = resultRatio !== null
         ? { quantified: true, ratio: Math.abs(resultRatio - 1) > CORPORATE_ACTION_RATIO_TOLERANCE ? resultRatio : null }
         : swingVerificationActionRatio(row, previousRow, { adjacent });
+      if (isHoldingIdentity(entry)) {
+        const monthEvidence = calendar.holdingMonths?.get(expected.slice(0,6));
+        const eventEvidence = entry.exchange === 'TPEx' && monthEvidence?.status === 'complete'
+          ? monthEvidence.events.filter(event => event.code === entry.code && event.exDate === expected)
+          : holdingActionEvidence(entry.code, expected, Boolean(batchAction || resultRatio !== null || quantification.ratio !== null));
+        entry.holdingEvents ||= [];
+        for (const event of eventEvidence) {
+          if (!entry.holdingEvents.some(saved => stableJson(saved) === stableJson(event))) entry.holdingEvents.push(event);
+        }
+        entry.holdingCoverage ||= [];
+        const covered = entry.exchange === 'TPEx' ? monthEvidence?.status === 'complete' && expected <= monthEvidence.coveredThrough
+          : entry.exchange === 'TWSE' && (Boolean(calendar.actionResults) || corporateActionResultMonthCovered(expected));
+        entry.holdingCoverage = entry.holdingCoverage.filter(item => item.date !== expected);
+        entry.holdingCoverage.push({ date: expected, status: !row.fromYahoo && covered ? 'complete' : 'unknown',
+          scope: 'official-ex-right-dividend-only', source: entry.exchange === 'TPEx' ? 'TPEx-exDailyQ' : 'TWSE-TWT49U-month-coverage',
+          observedAt: monthEvidence?.observedAt || new Date().toISOString() });
+      }
       // 同一個事件日只能調整一次。推進失敗（當天無成交、高低價缺值）會停在同一個 expected，
       // 下一輪重跑時若不擋，計畫價會被同一筆事件乘第二次——停等機制會讓重跑變常態，必須先擋。
       const alreadyApplied = (entry.corporateActions || []).some((item) => item?.date === expected);
@@ -12299,12 +12527,16 @@ async function runSwingVerificationAdvance(reference, latestDate, options = {}) 
         }
         rows = historical ? history : [...history, ...directRows];
       }
+      if (exchange === 'TPEx' && entries.some(isHoldingIdentity)) {
+        const months = unique(rows.map(row => toCompactDate(row.rawDate || row.date || row.asOf).slice(0,6))).filter(Boolean).slice(-4);
+        replayCalendar = { ...replayCalendar, holdingMonths: new Map(await Promise.all(months.map(async month => [month, await getTpexHoldingActionMonth(month)]))) };
+      }
       for (const entry of entries) {
         const beforeEvaluation = stableJson(entry);
         replaySwingVerificationHistory(entry, rows, through, replayCalendar);
         if (beforeEvaluation !== stableJson(entry)) {
           entry.evaluationApplied = {
-            evaluationVersion: currentVerificationIdentity('swing').evaluationVersion,
+            evaluationVersion: isHoldingIdentity(entry) ? currentVerificationIdentity('swing').evaluationVersion : priceVerificationIdentity('swing').evaluationVersion,
             evaluatedAt: new Date().toISOString(),
             kind: entry.captureId ? 'forward-observation' : 'retrospective-legacy-evidence',
             inputFingerprint: createHash('sha256').update(stableJson(verificationInputContent({ rows, through, calendar: replayCalendar, beforeEvaluation }))).digest('hex'),
@@ -12499,7 +12731,7 @@ async function buildSwingVerificationSummary() {
       all.push({ day, ...entry });
     }
   }
-  const knownCost = modelGroups.find(group => group.modelKey === selectedModelKey)?.identity.costModelVersion === currentVerificationIdentity("swing").costModelVersion;
+  const knownCost = knownPriceCost(modelGroups.find(group => group.modelKey === selectedModelKey)?.identity || {});
   const scenarios = [...byScenario.values()].map((s) => {
     // headline 的分母只算連續競價：處置期間是分盤集合競價，日 K 高低價只是幾十次撮合的極值，
     // 「觸價」判定的前提在那些樣本上不成立，而且處置股要預收款券、觀察用的散戶多半不會做。
@@ -15306,7 +15538,7 @@ export {
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
-  verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
+  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   summarizeFiniteMetric, classifyCohort, summarizeMatureVerification,
   saveSignalSnapshot, nextScheduledTradingDate, previousScheduledTradingDate, isScheduledTradingDate, resolveNextTradingDate,

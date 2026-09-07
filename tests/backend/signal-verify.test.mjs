@@ -255,7 +255,7 @@ test('I3：沒有formal時單日legacy補觀察明示事後模型，完整memo�
  const single=await mod.buildSignalVerification();
  assert.equal(single.captureId,null); assert.equal(single.kind,'retrospective-observation');
  assert.equal(single.identity.cohortPolicyVersion,'legacy-unknown');
- assert.equal(single.identity.evaluationVersion,mod.currentVerificationIdentity('overnight').evaluationVersion);
+ assert.equal(single.identity.evaluationVersion,'overnight-price-observation-v1');
  assert.equal(single.publishedAt,null);
  const history=await mod.buildVerificationHistory();
  assert.equal(history.records[0].modelKey,single.modelKey);
