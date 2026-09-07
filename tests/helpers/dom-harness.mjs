@@ -92,6 +92,9 @@ export async function createAppWindow({ fetchRoutes = {}, beforeApp } = {}) {
   beforeApp?.(win); // 例如先種 localStorage（app.js 頂層就會讀）
 
   // 以真正的 <script> 元素執行 app.js（classic script 語意）
+  const riskScript = win.document.createElement("script");
+  riskScript.textContent = await readFile(resolve(root, "portfolio-risk.js"), "utf8");
+  win.document.body.appendChild(riskScript);
   const appSrc = await readFile(resolve(root, "app.js"), "utf8");
   const scriptEl = win.document.createElement("script");
   scriptEl.textContent = appSrc;

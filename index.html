@@ -13,6 +13,7 @@
       src="lucide.min.js"
       integrity="sha384-mooE85Luwgx+AyykX7e90VcN8/QCFTSIwPuHLmvcsLVoA0en7lKYb9XlOzn5G2co"
     ></script>
+    <script defer src="portfolio-risk.js"></script>
     <script defer src="app.js"></script>
   </head>
   <body>
@@ -153,9 +154,10 @@
             <div class="swing-risk-bar" aria-label="部位控管">
               <button type="button" class="swing-risk-toggle" data-risk-toggle aria-expanded="false" aria-controls="swingRiskFields">設定資金 → 顯示建議張數</button>
               <div class="swing-risk-fields" id="swingRiskFields">
-                <label><span>資金</span><input id="swingCapital" type="number" inputmode="numeric" min="0" step="10000" placeholder="例如 500000" aria-label="可投入資金（元）" /></label>
+                <label><span>風險計算本金</span><input id="swingCapital" type="number" inputmode="numeric" min="0" step="10000" placeholder="例如 500000" aria-label="風險計算本金（元），本機偏好，非券商現金" /></label>
+                <label><span>本次可投入金額</span><input id="swingAvailableCash" type="number" inputmode="numeric" min="0" step="1" placeholder="選填，含買入費用" aria-label="本次可投入金額（元），只留本頁，切換帳號清空" /></label>
                 <label><span>單筆風險</span><input id="swingRiskPct" type="number" inputmode="decimal" min="0.1" max="5" step="0.1" value="1" aria-label="單筆風險百分比" /><em>%</em></label>
-                <small>填了資金，每張波段卡會顯示「建議張數」＝資金 × 風險% ÷ 每張的（進場−結構停損＋來回費稅）損失；不到 1 張改建議零股股數。只存在這台裝置。</small>
+                <small>本金與單筆風險是本機偏好。本次可投入金額選填、含買入費用，只留本頁；重整或切換帳號清空。留白只按風險估算，資金未檢查；整張不足改估零股。</small>
               </div>
             </div>
           </div>

@@ -2053,6 +2053,11 @@ function clearUserScopedState({ renderNow = true } = {}) {
   authScopeGeneration += 1;
   resetPersonalBackupRestoreState({ closeModal: true });
   resetTradePlansForAccount();
+  Object.assign(holdingsPlanRiskState, { loadAttempted: false, loading: false, error: '', alertPct: null });
+  positionSizingState.availableCash = null;
+  const cashInput = document.getElementById('swingAvailableCash');
+  if (cashInput) cashInput.value = ''; // Account isolation takes precedence over focused-input preservation.
+  syncPositionSizingInputs();
   authState.user = null;
 
   window.clearTimeout(watchListSyncTimer);
@@ -2698,6 +2703,8 @@ function applyTradePlansPayload(payload) {
   tradePlansState.plans = Array.isArray(payload.plans) ? payload.plans : [];
   tradePlansState.rev = Number(payload.rev) || 0;
   tradePlansState.loaded = true;
+  holdingsPlanRiskState.error = '';
+  if (!document.getElementById('tradePlanModal')?.hidden) renderHoldingsPanel();
 }
 async function loadTradePlansFromServer() {
   if (!authState.user) return;
@@ -2737,7 +2744,11 @@ async function openTradePlans(trigger = document.activeElement, create = false) 
   const scope = captureAuthScope();
   const editorSeq = ++tradePlansState.editorSeq;
   const modal = document.getElementById('tradePlanModal');
-  openDialogLayer(modal, {opener:trigger, initialFocus:'[data-trade-plan-close]'});
+  const holdingPlanId = trigger?.dataset?.holdingPlanId;
+  const fromHoldings = trigger?.matches?.('[data-holding-plans],[data-holding-plan-id]');
+  openDialogLayer(modal, {trigger, initialFocus:'[data-trade-plan-close]', openerResolver: fromHoldings ? () =>
+    holdingPlanId ? [...document.querySelectorAll('[data-holding-plan-id]')].find(button => button.dataset.holdingPlanId === holdingPlanId)
+      : document.querySelector('[data-holding-plans]') : null});
   const savedDraft = tradePlanDrafts.get(authState.user.id);
   if (savedDraft) Object.assign(tradePlansState,savedDraft);
   else if(create) {
@@ -3494,6 +3505,74 @@ function renderMissingCorporateActions() {
     </div>`;
 }
 
+const holdingsPlanRiskState = { loadAttempted: false, loading: false, error: '', alertPct: null };
+function buildHoldingsPlanRisk(asOf = new Date().toISOString()) {
+  const positions = (tradesState.portfolio?.holdings || []).map(holding => {
+    const markets = new Set(tradesState.records.filter(record => record.code === holding.code && ['TWSE', 'TPEx'].includes(record.market)).map(record => record.market));
+    return { ...holding, exchange: markets.size === 1 ? [...markets][0] : null, marketConflict: markets.size > 1 };
+  });
+  return Stock1Risk.calculatePortfolioPlanRisk({ positions, plans: tradePlansState.loaded ? tradePlansState.plans : [], quotes: stocks,
+    capitalBasis: positionSizingState.capital, costPolicy: { basis: 'gross-mark-to-stop' }, asOf, session: marketSessionState.stock });
+}
+function formatPortfolioRiskTime(value) {
+  if (typeof value !== 'string') return '--';
+  const normalized = value.replaceAll('/', '-').replace(' ', 'T');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return `${normalized.replaceAll('-', '/')}（台北日期）`;
+  const stamp = /(?:Z|[+-]\d{2}:\d{2})$/.test(normalized) ? normalized : `${normalized}+08:00`;
+  const date = new Date(stamp);
+  if (!Number.isFinite(date.getTime())) return '--';
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(date).replaceAll('-', '/') + '（台北）';
+}
+function renderPortfolioPlanRisk(risk) {
+  const reasons = { 'market-conflict': '市場識別衝突', 'market-unknown': '市場未確認', 'quote-missing': '缺行情', 'quote-date-unknown': '行情日期不明', 'quote-future': '行情時間晚於估值時刻', 'quote-stale': '盤中行情過期或非即時', 'quote-source-unknown': '行情來源未確認', 'stop-missing': '缺有效停損計畫', 'plan-expired': '計畫已過期或有效期不明', 'plan-conflict': '多計畫未分配股數', 'quantity-unknown': '計畫股數不明', 'quantity-uncovered': '其餘股數未覆蓋', 'stop-breached': '已到達或跌破停損，需處理', 'risk-basis-unknown': '估值口徑未確認' };
+  const c = risk.coverage, threshold = holdingsPlanRiskState.alertPct;
+  const warning = threshold !== null && risk.riskPct !== null && risk.riskPct >= threshold;
+  const money = value => value == null ? '--' : formatMoney(value);
+  return `<section class="hold-plan-risk" aria-label="持股計畫風險">
+    <div class="hold-plan-risk-heading"><strong>持股計畫風險</strong><button type="button" class="watch-secondary-action" data-holding-plans>管理計畫</button></div>
+    <div class="hold-plan-risk-metrics"><span>已知減值 <strong>${money(risk.knownRiskCash)}</strong></span><span>占風險計算本金 <strong>${risk.riskPct == null ? '--' : `${formatNumber(risk.riskPct)}%`}</strong></span><span>計畫股數情境 ${formatNumber(c.coveredShares, 0)} / ${formatNumber(c.shares, 0)} 股</span><span>未能估算 ${formatNumber(c.unknownShares, 0)} 股</span><span>市值覆蓋 ${c.marketValuePct == null ? '未知' : `${formatNumber(c.marketValuePct)}%`}</span></div>
+    <p>估值檢查：${escapeHtml(formatPortfolioRiskTime(risk.asOf))}。現價回落至有效停損的情境減值；未知與已跌破部位另列。</p>
+    <details class="hold-risk-method"><summary>估算方式與限制</summary><p>毛減值未含退出費稅、跳空與流動性影響。計畫股數情境尚未驗證實際成交分配；各檔行情日期見明細。盤中僅使用兩分鐘內、同日且有原始時間的行情；這是顯示新鮮度條件，不保證成交。</p></details>
+    ${!tradePlansState.loaded ? `<p class="is-warn">${holdingsPlanRiskState.loading ? '正在載入計畫，覆蓋尚未確認' : '計畫尚未載入，覆蓋未知'}${holdingsPlanRiskState.error ? `：${escapeHtml(holdingsPlanRiskState.error)}` : ''}</p>` : ''}
+    <p>風險計算本金：${positionSizingState.capital > 0 ? formatMoney(positionSizingState.capital) : '尚未設定'}（策略雷達的本機偏好）。${threshold === null ? '未設定警示值。' : `你設定的 ${threshold}% 警示值（本頁）。${warning ? '已知減值已達警示值。' : '仍須檢查未知及跌破項目。'}`}</p>
+    <form class="hold-risk-settings" data-holding-risk-settings><label>你設定的警示值（%）<input name="alertPct" type="number" min="0.01" max="100" step="0.01" value="${threshold ?? ''}" placeholder="選填，無預設" aria-label="你設定的持股風險警示百分比" /></label><button type="submit" class="watch-secondary-action">套用警示值</button></form>
+    ${risk.breached.length ? `<p class="is-warn">${risk.breached.length} 檔已到達或跌破停損，不能視為風險歸零。</p>` : ''}
+    ${risk.positions.map(row => `<div class="hold-risk-item"><strong>${escapeHtml(row.code)}</strong><span>${row.riskCash == null ? '減值未知' : `情境減值 ${money(row.riskCash)}`} · 覆蓋 ${formatNumber(row.coveredShares, 0)} 股${row.unknownShares ? ` · 未知 ${formatNumber(row.unknownShares, 0)} 股` : ''}</span>
+      <span>${(row.reasons || []).map(reason => escapeHtml(reasons[reason] || reason)).join('；') || '依目前有效停損估算'}</span>
+      <small>${row.quoteMode === 'realtime' ? '兩分鐘內盤中行情' : row.quoteMode === 'close' ? '官方收盤參考' : row.quoteMode === 'last-trade' ? '最後成交參考' : '行情未可用'} ${escapeHtml(formatPortfolioRiskTime(row.quoteAsOf))}${row.recency === 'unknown' ? ' · 無法確認最新交易日' : ''}${row.importedHistoryUnverified ? ' · 匯入歷史未驗證，仍使用目前明確停損' : ''}</small>
+      ${(row.planIds || []).map(id => `<button type="button" class="watch-secondary-action" data-holding-plan-id="${escapeHtml(id)}">查看 ${escapeHtml(row.code)} 計畫</button>`).join('')}</div>`).join('')}
+    <details><summary>同股與產業集中度</summary><p>同代號合併；缺行情時總市值與占比未知，產業未提供者獨立列為未知。檔數不能證明分散。</p>
+      ${risk.concentration.byCode.map(row => `<p>${escapeHtml(row.code)}：${money(row.value)} · ${row.pct == null ? '占比未知' : `${formatNumber(row.pct)}%`}</p>`).join('')}
+      ${risk.concentration.byIndustry.map(row => `<p>${escapeHtml(row.industry || '產業未知')}：${money(row.value)} · ${row.pct == null ? '占比未知' : `${formatNumber(row.pct)}%`}</p>`).join('')}
+    </details></section>`;
+}
+async function loadHoldingsRiskPlans() {
+  if (!authState.user || holdingsPlanRiskState.loading) return;
+  const scope = captureAuthScope();
+  Object.assign(holdingsPlanRiskState, { loading: true, loadAttempted: true, error: '' });
+  try { await loadTradePlansFromServer(); }
+  catch (error) { if (isCurrentAuthScope(scope) && !handleAuthRequired(error)) holdingsPlanRiskState.error = error.message; }
+  finally { if (isCurrentAuthScope(scope)) { holdingsPlanRiskState.loading = false; renderLiveDataUpdate(); } }
+}
+document.addEventListener('submit', event => {
+  const form = event.target instanceof Element ? event.target.closest('[data-holding-risk-settings]') : null;
+  if (!form) return;
+  event.preventDefault();
+  const value = form.elements.alertPct.value;
+  if (value !== '' && (!Number.isFinite(Number(value)) || Number(value) <= 0 || Number(value) > 100)) return;
+  holdingsPlanRiskState.alertPct = value === '' ? null : Number(value);
+  document.activeElement?.blur?.(); renderHoldingsPanel();
+  el.holdingsPanel.querySelector('[data-holding-risk-settings] button')?.focus();
+});
+document.addEventListener('click', async event => {
+  const button = event.target instanceof Element ? event.target.closest('[data-holding-plans],[data-holding-plan-id]') : null;
+  if (!button) return;
+  const scope = captureAuthScope(), id = button.dataset.holdingPlanId;
+  await openTradePlans(button);
+  if (!id || !isCurrentAuthScope(scope)) return;
+  const target = [...document.querySelectorAll('#tradePlanList [data-trade-plan-edit]')].find(item => item.dataset.tradePlanEdit === id);
+  target?.click(); document.querySelector('#tradePlanForm [name=stopPrice]')?.focus();
+});
 function renderHoldingsPanel() {
   const panel = el.holdingsPanel;
   if (!panel) return;
@@ -3508,6 +3587,7 @@ function renderHoldingsPanel() {
     return;
   }
   const settings = tradesState.settings;
+  if (!tradePlansState.loaded && !holdingsPlanRiskState.loadAttempted) void loadHoldingsRiskPlans();
   const pf = tradesState.portfolio;
   const holdings = pf?.holdings || [];
   const byCode = new Map(stocks.map((stock) => [stock.code, stock]));
@@ -3742,8 +3822,8 @@ function renderHoldingsPanel() {
     : null;
   panel.innerHTML = `
     <div class="hold-summary">
-      <div><span>總市值</span><strong>${formatMoney(totalValue)}</strong></div>
-      ${top3Share != null ? `<div title="前三大持股市值 ÷ 已報價總市值；超過 60% 代表少數幾檔決定了整個組合的漲跌"><span>前三大占比</span><strong class="${top3Share >= 60 ? "is-warn" : ""}">${top3Share}%</strong></div>` : ""}
+      <div><span>總市值</span><strong>${unpriced ? '--' : formatMoney(totalValue)}</strong>${unpriced ? `<small>已報價市值 ${formatMoney(totalValue)}</small>` : ''}</div>
+      ${top3Share != null ? `<div title="前三大持股市值 ÷ 已報價總市值；僅顯示觀察占比，不代表分散安全"><span>前三大占比${unpriced ? '（總市值未知）' : ''}</span><strong>${unpriced ? '--' : `${top3Share}%`}</strong></div>` : ""}
       <div><span>總成本</span><strong>${formatMoney(totalCost)}</strong></div>
       <div><span>未實現損益</span><strong class="${upTone}">${formatMoney(totalUnrealized, { signed: true })}${totalPct != null ? `（${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(1)}%）` : ""}</strong></div>
       <div><span>已實現累計</span><strong class="${realizedPnl >= 0 ? "is-up" : "is-down"}">${formatMoney(realizedPnl, { signed: true })}</strong></div>
@@ -3754,6 +3834,7 @@ function renderHoldingsPanel() {
         <div data-dividend-summary="receivable"><span>待入帳</span><strong>${formatMoney(dividendReceivableGross)}</strong></div>
         <div data-dividend-summary="received"><span>已入帳淨額</span><strong>${formatMoney(dividendReceivedNet)}</strong></div>
       </div>` : ""}
+    ${renderPortfolioPlanRisk(buildHoldingsPlanRisk())}
     ${renderMissingCorporateActions()}
     ${unpriced ? `<p class="hold-hint">${unpriced} 檔暫無報價，未計入市值與未實現損益，報酬率分母也只算已報價部位（開盤後會自動補上）；「總成本」仍為全部持股。</p>` : ""}
     ${closedPositionDividendHtml}
@@ -6231,7 +6312,7 @@ function renderMarketStanceLine() {
 // 建議張數 = floor(資金 × 風險% ÷ (每張的進場−停損損失))；停損不在進場下方或資金未填就不建議。
 const CAPITAL_KEY = "stock1.capital.v1";
 const RISK_PCT_KEY = "stock1.riskPct.v1";
-const positionSizingState = { capital: 0, riskPct: 1 };
+const positionSizingState = { capital: 0, riskPct: 1, availableCash: null };
 try {
   positionSizingState.capital = Math.max(0, Number(localStorage.getItem(CAPITAL_KEY)) || 0);
   const savedRisk = Number(localStorage.getItem(RISK_PCT_KEY));
@@ -6265,9 +6346,10 @@ function positionSizeLots(capital, riskPct, entry, stop) {
     lotCost: Math.round(e * 1000),
   };
 }
-function savePositionSizing({ capital, riskPct }) {
+function savePositionSizing({ capital, riskPct, availableCash }) {
   if (capital !== undefined) positionSizingState.capital = Math.max(0, Number(capital) || 0);
   if (riskPct !== undefined) positionSizingState.riskPct = Math.min(5, Math.max(0.1, Number(riskPct) || 1));
+  if (availableCash !== undefined) positionSizingState.availableCash = availableCash === null || availableCash === '' ? null : Math.max(0, Number(availableCash));
   try {
     localStorage.setItem(CAPITAL_KEY, String(positionSizingState.capital));
     localStorage.setItem(RISK_PCT_KEY, String(positionSizingState.riskPct));
@@ -6276,18 +6358,18 @@ function savePositionSizing({ capital, riskPct }) {
   }
 }
 function renderPositionSizeStat(plan) {
-  const sizing = positionSizeLots(positionSizingState.capital, positionSizingState.riskPct, plan?.entry, plan?.structuralStop);
-  if (!sizing) return "";
-  const affordable = Math.floor(positionSizingState.capital / sizing.lotCost);
-  const lots = Math.min(sizing.lots, affordable);
-  const entry = Number(plan?.entry) || 0;
-  const affordableShares = entry > 0 ? Math.floor(positionSizingState.capital / entry) : 0;
-  const shares = Math.min(sizing.shares, affordableShares);
-  const odd = lots < 1 && shares >= 1
-    ? `<small class="swing-stat-odd">零股 <strong>${shares} 股</strong>・手續費最低額依券商</small>`
-    : "";
-  const text = lots >= 1 ? `${lots} 張` : "不到 1 張";
-  return `<div class="swing-stat swing-stat-size" title="依「資金 × 單筆風險 %」÷「每張的進場−結構停損損失＋來回費稅 ${ROUND_TRIP_COST_PCT}%」算出的建議張數（${formatMoney(sizing.budget)} ÷ ${formatMoney(sizing.perLotLoss)}／張）；再以資金買得起的張數封頂。不到 1 張時改建議零股股數（盤中零股每分鐘撮合；手續費最低額依券商）。"><span>建議張數 <i class="swing-stat-hint">風險 ${positionSizingState.riskPct}%</i></span><strong>${text}</strong>${odd}</div>`;
+  if (!positionSizeLots(positionSizingState.capital, positionSizingState.riskPct, plan?.entry, plan?.structuralStop)) return '';
+  const input = { capital: positionSizingState.capital, riskPct: positionSizingState.riskPct, entry: plan.entry, stop: plan.structuralStop,
+    availableCash: positionSizingState.availableCash, costPolicy: tradesState.settings };
+  let sizing = Stock1Risk.calculateNewPositionSize({ ...input, unitShares: 1000 });
+  if (!sizing) return '<div class="swing-stat swing-stat-size"><span>部位無法估算</span><small>買入費用設定未確認</small></div>';
+  if (sizing.shares === 0) sizing = Stock1Risk.calculateNewPositionSize({ ...input, unitShares: 1 });
+  const text = sizing.lots >= 1 ? `${sizing.lots} 張` : sizing.shares ? '不到 1 張' : '0 股';
+  const odd = sizing.lots < 1 && sizing.shares > 0 ? `<small class="swing-stat-odd">零股 <strong>${sizing.shares} 股</strong>・手續費最低額依券商</small>` : '';
+  return `<div class="swing-stat swing-stat-size"><span>${sizing.cashChecked ? '建議張數' : '按風險估算'} <i class="swing-stat-hint">風險 ${positionSizingState.riskPct}%</i></span><strong>${text}</strong>${odd}
+    <small>${sizing.cashChecked ? `已按你提供的 ${formatMoney(sizing.availableCash)} 檢查` : '資金未檢查：未提供本次可投入金額'}</small>
+    <small>需款 ${formatMoney(sizing.requiredCash)}（含買入手續費 ${formatMoney(sizing.buyFee)}）</small>
+    <details><summary>部位估算假設</summary><p>新單初始風險約 ${formatMoney(sizing.initialRiskCash)}；以風險計算本金 × ${positionSizingState.riskPct}% 為預算。價差加來回成本 0.471% 近似，買費高於其中買側近似時補差額。買费按帳本目前設定：0.1425% × ${tradesState.settings.feeDiscount}，四捨五入、每筆最低 ${tradesState.settings.minFee} 元。整張不足時改估零股；按單筆委託計費，不含拆單、退出最低費差異、跳空與滑價。這些條件不能界定實際最壞損失。</p><p>風險計算本金是本機偏好，非券商可用現金。本次可投入金額只留本頁，重整或切換帳號清空。</p></details></div>`;
 }
 
 // ===== 計畫 → 到價提醒一鍵 =====
@@ -12356,6 +12438,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (event.target.closest('.swing-stat-size details')) return;
   const swingPick = event.target.closest("[data-swing-code]");
   if (swingPick) {
     const code = normalizeStockCodeInput(swingPick.dataset.swingCode);
@@ -13352,6 +13435,8 @@ document.addEventListener("click", (event) => {
 function syncPositionSizingInputs() {
   const capital = document.getElementById("swingCapital");
   const risk = document.getElementById("swingRiskPct");
+  const availableCash = document.getElementById("swingAvailableCash");
+  if (availableCash && document.activeElement !== availableCash) availableCash.value = positionSizingState.availableCash == null ? "" : String(positionSizingState.availableCash);
   if (capital && document.activeElement !== capital) capital.value = positionSizingState.capital ? String(positionSizingState.capital) : "";
   if (risk && document.activeElement !== risk) risk.value = String(positionSizingState.riskPct);
   // 資金沒填時整列只是一段說明文（手機上佔 177px、排在第一張卡之前）：收成一顆，填了資金或手動點開才展開。
@@ -13377,8 +13462,8 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("input", (event) => {
   const target = event.target instanceof Element ? event.target : null;
-  if (!target || (target.id !== "swingCapital" && target.id !== "swingRiskPct")) return;
-  savePositionSizing(target.id === "swingCapital" ? { capital: target.value } : { riskPct: target.value });
+  if (!target || !["swingCapital", "swingRiskPct", "swingAvailableCash"].includes(target.id)) return;
+  savePositionSizing(target.id === "swingCapital" ? { capital: target.value } : target.id === "swingAvailableCash" ? { availableCash: target.value } : { riskPct: target.value });
   if (strategyState.loaded) renderStrategyBoard();
 });
 

@@ -1,4 +1,6 @@
 import { createServer } from "node:http";
+import './portfolio-risk.js';
+const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
 import { constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
@@ -233,6 +235,7 @@ const publicStaticFiles = new Map([
   ["/", "index.html"],
   ["/index.html", "index.html"],
   ["/app.js", "app.js"],
+  ["/portfolio-risk.js", "portfolio-risk.js"],
   ["/styles.css", "styles.css"],
   ["/lucide.min.js", "lucide.min.js"],
   ["/sw.js", "sw.js"],
@@ -16124,6 +16127,7 @@ if (!process.env.STOCK1_SKIP_LISTEN) {
 
 // 給單元測試用的匯出：純函式＋資料層＋伺服器控制。不影響 `node server.mjs` 的執行行為。
 export {
+  calculatePortfolioPlanRisk, calculateNewPositionSize,
   canonicalizeTradePlans, validatePortableTradePlans, emptyTradePlans,
   // 日期
   toTaipeiCompactDate, toCompactDate, compactToIsoDate, compactToSlashDate,

@@ -84,6 +84,8 @@ test("暫無報價的持股：不計入市值、顯示 -- 並提示", () => {
   app.evalIn(`state.watchList = "hold"; renderHoldingsPanel();`);
   const text = app.evalIn(`el.holdingsPanel.textContent`);
   assert.ok(text.includes("暫無報價"), "要提示未計入");
+  assert.equal(app.evalIn(`el.holdingsPanel.querySelector('.hold-summary div strong').textContent`), '--', '缺行情不能把部分市值叫總市值');
+  assert.ok(text.includes('已報價市值'), '仍提供可觀察的部分金額');
 });
 
 test("除息整合：已入帳事件顯示狀態、不再重複提供快速鈕、股利保留六位小數", () => {

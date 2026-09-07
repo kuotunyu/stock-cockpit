@@ -30,7 +30,7 @@ test("波段卡片：填了資金才顯示建議張數，且以買得起的張�
   assert.match(without, /data-plan-alerts="2330"/);
   assert.match(without, /data-plan-stop="95"/);
   const withCapital = String(app.evalIn(`(() => { savePositionSizing({ capital: 2000000, riskPct: 1 }); return renderSwingCard(${JSON.stringify(pick)}, 1); })()`));
-  assert.match(withCapital, /建議張數/);
+  assert.match(withCapital, /按風險估算/);
   assert.match(withCapital, /<strong>3 張<\/strong>/, "20000 ÷ 5471 ＝ 3.66 → 3 張（含費稅；舊算法會給 4 張＝超出風險預算）");
   const capped = String(app.evalIn(`(() => { savePositionSizing({ capital: 250000, riskPct: 5 }); return renderSwingCard(${JSON.stringify(pick)}, 1); })()`));
   assert.match(capped, /<strong>2 張<\/strong>/, "12500 ÷ 5471 ＝ 2.28 → 2；25 萬買得起 2 張");
@@ -96,7 +96,7 @@ test("市場位階一行：位階、漲跌家數、基差、事件；位階未�
   assert.match(night, /2026\/09/, "合約月份要看得到（結算週換月時基差會跳一個月持有成本）");
 });
 
-test("持股面板：前三大占比；≥60% 標警告色", () => {
+test("持股面板：前三大占比僅為觀察值，不自動套用通用警告比例", () => {
   const html = String(app.evalIn(`(() => {
     const prevUser = authState.user;
     const prev = { stocksLen: stocks.length, watchList: state.watchList, trades: { loaded: tradesState.loaded, records: tradesState.records, quarantined: tradesState.quarantinedRecords, portfolio: tradesState.portfolio } };
@@ -124,7 +124,7 @@ test("持股面板：前三大占比；≥60% 標警告色", () => {
     return out;
   })()`));
   assert.match(html, /前三大占比/);
-  assert.match(html, /<strong class="is-warn">88%<\/strong>/, "(500k+100k+100k) ÷ 800k ＝ 87.5% → 88%");
+  assert.match(html, /<strong>88%<\/strong>/, "(500k+100k+100k) ÷ 800k ＝ 87.5% → 88%，不推薦統一警示值");
 });
 
 test("場景卡：次日開盤進場口徑與全版本合併一行", () => {

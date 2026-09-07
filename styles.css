@@ -9825,3 +9825,32 @@ body.is-locked .app-shell {
 .holding-outcome { display: block; color: var(--muted); font-weight: 500; }
 .holding-outcome.positive { color: var(--up-text); }
 .holding-outcome.negative { color: var(--down-text); }
+/* 持股風險沿用面板與語意色；明細可換行，控制項保留鍵盤操作空間。 */
+.hold-plan-risk { padding: 16px; border-block: 1px solid var(--line); min-width: 0; }
+.hold-plan-risk p, .hold-plan-risk small { color: var(--muted-2); font-size: var(--fs-note); line-height: 1.65; overflow-wrap: anywhere; }
+.hold-plan-risk .is-warn { color: var(--warn-text); }
+.hold-plan-risk-heading, .hold-plan-risk-metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; }
+.hold-plan-risk-heading { justify-content: space-between; }
+.hold-plan-risk-metrics { margin-block: 16px; font-size: var(--fs-body); }
+.hold-plan-risk-metrics strong { font-family: var(--mono); }
+.hold-risk-item { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.hold-risk-item small { flex-basis: 100%; }
+.hold-risk-settings { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+.hold-risk-settings label { display: flex; flex-direction: column; gap: 8px; max-width: 100%; }
+.hold-risk-settings input { min-height: 44px; width: 180px; max-width: 100%; font: inherit; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.hold-plan-risk button, .hold-plan-risk summary, .swing-stat-size summary { min-height: 44px; white-space: normal; overflow-wrap: anywhere; font-size: var(--fs-body); }
+.hold-plan-risk summary, .swing-stat-size summary { cursor: pointer; padding-block: 10px; }
+.swing-stat-size details, .swing-stat-size small, .swing-stat-size p { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: var(--fs-note); line-height: 1.6; }
+.swing-risk-fields { flex-wrap: wrap; }
+.swing-stat-size { grid-column: 1 / -1; min-width: 0; }
+.swing-stat-size span { white-space: normal; }
+.swing-risk-bar label { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.swing-risk-bar input, .swing-risk-toggle { min-height: 44px; }
+.swing-risk-bar { min-width: 0; max-width: 100%; }
+.strategy-screen > .screen-head { grid-template-columns: minmax(0, 1fr); }
+.swing-risk-toggle { max-width: 100%; white-space: normal; }
+.swing-risk-bar input { width: 12ch; min-width: 0; max-width: 100%; }
+.swing-risk-bar label:last-of-type input { width: 6ch; }
+@media (max-width: 760px) {
+  .swing-card:has(.swing-stat-size) .swing-actions { grid-area: auto; grid-column: 1 / -1; }
+}

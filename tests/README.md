@@ -1,5 +1,9 @@
 # Stock1 測試套件
 
+持股情境風險的 `portfolio-plan-risk` 後端／前端測試涵蓋目前停損、部分計畫股數、到達／跌破、過期／多計畫衝突、缺行情與市場衝突、日期／來源有效性及集中度未知分母。共用 `portfolio-risk.js` 由 server 與 classic browser 載入同一份公式；以明確 `asOf` 驗盤中 120 秒產品容忍值與歷史官方收盤參考，不用星期推定最新交易日。可先跑 `node --test tests/backend/portfolio-plan-risk.test.mjs tests/frontend/portfolio-plan-risk.test.mjs tests/frontend/holdings-render.test.mjs`。
+
+新單部位測試驗風險預算與明確投入金額雙上限、買費四捨五入／最低額及整張／零股。`capital` 為本機偏好，`availableCash` 只存本頁 RAM、切帳號清空；未提供則顯示資金未檢查。Chromium 同名案例在 375／768／1280／1440 px 與 100%／200% 文字驗資金欄位、持股風險、原生 details、計畫連結與更新後回焦，產物為 `test-results/browser/portfolio-{size,risk}-*`。此範圍不表示全站 200% 完成；固定底部導覽互疊仍待 T11。
+
 個人交易計畫的 `trade-plans`、`api-trade-plans`、`trade-plans-portability` 與前端同名測試涵蓋初始草稿／首次啟用、上移停損、100 次修改上限、權限及 409 重放、雙擊、儲存途中輸入、帳號隔離、寫入失敗回滾、v1 保留／v2 匯入未驗證、還原點與隔離冷啟動。可先執行 `node --test tests/backend/trade-plans*.test.mjs tests/backend/api-trade-plans.test.mjs tests/frontend/trade-plans.test.mjs`，再跑完整套件。
 
 Chromium 的 `trade-plans.test.mjs` 以真表單驗保存、上移停損、輪詢草稿、Escape 回焦、切帳號與 session 到期；375／768／1280／1440 px 各驗 100%／實際 200% 文字。使用隔離臨時埠，產物在 `test-results/browser/trade-plans-*`。此範圍不代表全站 200% 完成，既有固定底部導覽互疊仍待後续手機可及性工作。
