@@ -231,3 +231,11 @@ npm run test:browser
 ### Actions 固定來源更新
 
 工作流程以官方 `actions` repository 的完整 commit SHA 固定來源，旁註對應版本。更新時先用 `gh api repos/actions/<action>/git/ref/tags/<version>` 核對 tag 指向（annotated tag 另解參照），再讀該 SHA 的 `action.yml`，確認 runtime、inputs 與官方 release notes；最後更新兩份 workflow 並核對實際 GitHub run。保留 Node 22.x／24.x 測試矩陣、獨立 Node 24 Chromium、Reliability 排程／手動觸發及 `contents: read`。本機測試不能代替 GitHub Actions 執行結果。
+
+### 有界維護與完整格式診斷
+
+`node scripts/verification-diagnostics.mjs 5`（最大 20 日）只建立隔離的離線合成 DB，不讀正式資料、不啟 HTTP。每天 260／240 候選、20／40 訊號，含真 publication、inputEvidence、manifest、issued、完成的隔日 2 列與波段 15 列 benchmark memo；報告各資源與樣本 cohort 大小、相同資料 raw／壓縮後原子保存、COW、真正冷行程載入、摘要重算及官方日曆 loader 冷熱呼叫數。延遲是單次本機量測，不是 SLA；簡化 pick 與固定合成價格不能代表實際策略表現。
+
+`verification-evidence-codec`／`verification-evidence-persistence` 驗 UTF8 無損、SHA256、未知 codec／損壞拒絕、32 MiB 解壓限制、完成 transition 的失敗回滾、queue／epoch、冷啟動與完整 DB 備份還原。只有新完成 memo 自動壓縮；舊 raw memo 不遷移。超過 codec 上限仍完整保留 raw，32 MiB 不是歷史或 cohort 上限。摘要與完成 worker 不需解壓；需查原證據時使用 `readBenchmarkEvidence`，錯誤不能當作缺資料而重算。
+
+`swing-cache-bounds` 驗實際研究 scope 增長、LRU／TTL及場景共用；`notes-ownership` 的 backend／frontend 各驗 A/B/admin 作者與管理權；`broker-settings-guard` 驗對外訊息不洩漏绝對路徑、非預期錯誤安全診斷。鍵盤修改仍需完整 Chromium；DOM 不能代替真實原生按鈕與回焦驗證。

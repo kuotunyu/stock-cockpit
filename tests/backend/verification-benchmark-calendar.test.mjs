@@ -1,6 +1,7 @@
 // T08 P1：跨月last-good不能擴大原始日曆覆蓋；恢復後固定正確期間並保留完成證據。
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readBenchmarkEvidence} from '../../verification-evidence.mjs';
 import {createHash} from 'node:crypto';
 import {bootServer} from '../helpers/test-server.mjs';
 test('月底早上cache→跨月失敗保持pending，恢復完整來源才估值；慢請求不以返回日封月',async()=>{
@@ -24,7 +25,7 @@ test('月底早上cache→跨月失敗保持pending，恢復完整來源才估�
     const oldModelKey=m.benchmarkModelKey(c,oldSpec);
     const oldKey=createHash('sha256').update(JSON.stringify({captureId:c.captureId,inputFingerprint:c.inputFingerprint,modelKey:oldModelKey})).digest('hex');
     const oldMemo={captureId:c.captureId,inputFingerprint:c.inputFingerprint,benchmarkSpec:oldSpec,modelKey:oldModelKey,status:'complete',result:{pairedCount:1,meanDifference:9.529}};
-    const currentMemo=db=>Object.values(db.verificationBenchmarks.memos).find(row=>row.benchmarkSpec.calendarVersion.endsWith('-v2'));
+    const currentMemo=db=>{const memo=Object.values(db.verificationBenchmarks.memos).find(row=>row.benchmarkSpec.calendarVersion.endsWith('-v2'));return {...memo,...readBenchmarkEvidence(memo)};};
     await m.commitDbMutation(db=>{db.verificationBenchmarks={memos:{[oldKey]:oldMemo},cursor:oldKey};db.verificationCaptures={[c.captureId]:c};db.verificationPublications={current:{key:c.captureId},captures:{[c.captureId]:c}};return true;});
     assert.equal(m.summarizeVerificationBenchmarks(await m.loadDb(),'overnight').cohorts[0].status,'pending');
     assert.equal((await m.runVerificationBenchmarkBatch()).status,'pending');

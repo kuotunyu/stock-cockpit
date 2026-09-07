@@ -1,6 +1,7 @@
 // 真實API與背景worker：有界續跑、來源故障、不可變memo、冷熱延遲。
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import {readBenchmarkEvidence} from '../../verification-evidence.mjs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -53,9 +54,10 @@ test('HTTP先回pending；真正冷來源延遲不掛前景，同flight，4檔�
   const disk=JSON.parse(await readFile(join(srv.dataDir,'stock1-db.json'),'utf8'));
   assert.deepEqual(Object.values(disk.verificationBenchmarks.memos)[0],saved);
   const bytes=value=>Buffer.byteLength(JSON.stringify(value));
+  const decoded=readBenchmarkEvidence(saved);
   console.log(JSON.stringify({coldMs,hotMs,coldCalls,completeCalls,completedRereadCalls:mock.calls.length-completeCalls,
-    storage:{constituents:saved.observations.length,memoBytes:bytes(saved),captureBytes:bytes(saved.capture),observationsBytes:bytes(saved.observations),
-      rowsBytes:saved.observations.reduce((n,o)=>n+bytes(o.evidence.rows),0),repeatedCalendarBytes:saved.observations.reduce((n,o)=>n+bytes(o.evidence.calendar),0)}}));
+    storage:{constituents:decoded.observations.length,memoBytes:bytes(saved),captureBytes:bytes(decoded.capture),observationsBytes:bytes(decoded.observations),
+      rowsBytes:decoded.observations.reduce((n,o)=>n+bytes(o.evidence.rows),0),repeatedCalendarBytes:decoded.observations.reduce((n,o)=>n+bytes(o.evidence.calendar),0)}}));
 });
 test('三個官方月份與四檔月K各重試一次：真worker最多30來源呼叫，不啟動隱藏來源',async()=>{
   const dates={202601:['20260102','20260105','20260106','20260107','20260108'],202602:['20260202','20260203','20260204','20260205','20260206'],202603:['20260302','20260303','20260304','20260305','20260306','20260309']};

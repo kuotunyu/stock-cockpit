@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import './portfolio-risk.js';
+import { packCompletedBenchmark } from './verification-evidence.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
@@ -9500,11 +9501,12 @@ async function runVerificationBenchmarkBatch() {
     memo.result=buildMatchedBenchmark({capture:frozen,observations:memo.observations,benchmarkSpec:spec});
   }
   memo.updatedAt=at.toISOString();
+  const storedMemo=packCompletedBenchmark(memo);
   const committed = await commitDbMutation(draft=>{
     const current=authoritativeBenchmarkCaptures(draft).find(c=>benchmarkMemoKey(c)===key);
     if(!current || stableJson(draft.verificationBenchmarks?.memos?.[key] || null)!==stableJson(prior || null))return skipDbMutation(false);
     draft.verificationBenchmarks ||= {memos:{},cursor:''};
-    draft.verificationBenchmarks.memos[key]=memo;draft.verificationBenchmarks.cursor=key;
+    draft.verificationBenchmarks.memos[key]=storedMemo;draft.verificationBenchmarks.cursor=key;
     return true;
   });
   return {status:committed ? memo.status : 'discarded',attempted,cursor:memo.cursor,key};
