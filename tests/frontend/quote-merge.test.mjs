@@ -37,6 +37,8 @@ test("mergeOfficialQuote：白名單全欄位都要複製到 stock（含 priceSt
   assert.equal(s.priceChange, 1.5);
   assert.equal(s.priceStale, false);
   assert.equal(s.official, true);
+  assert.equal(s.riskQuote.price, 101);
+  assert.equal(s.riskQuote.asOf, FULL_QUOTE.asOf, 'risk time is captured with the original positive price');
   assert.equal(s.exchange, "TWSE");
   assert.deepEqual(s.dividend, FULL_QUOTE.dividend, "除息旗標必須在白名單裡（歷史踩坑點）");
   assert.deepEqual(s.spark.slice(-1), [101], "現價要接進走勢序列");
@@ -49,6 +51,7 @@ test("mergeOfficialQuote：缺漲跌幅→不動 change；價格非數→不動�
     return JSON.stringify(s);
   })()`));
   assert.equal(s.price, 100, "壞價格不能蓋掉好價格");
+  assert.equal(s.riskQuote.price, null, 'retained display price must not become the latest risk quote');
   assert.deepEqual(s.spark, [100]);
   assert.equal(s.change, 2, "沒給 changePct 就不動漲跌");
   assert.equal(s.priceStale, true);
@@ -69,6 +72,8 @@ test("mergeOfficialQuote：null／0 價格與 nullable 指標不得被 Number() 
   assert.equal(result.existing.unit, 3);
   assert.equal(result.existing.total, 20);
   assert.equal(result.created.price, null, "新股票缺價時保留 null，不偽造 0 元");
+  assert.equal(result.existing.riskQuote.price, null);
+  assert.equal(result.created.riskQuote.price, null);
   assert.deepEqual(result.created.spark, [], "缺價時不應建立 [0, 0] 假走勢");
   assert.equal(app.evalIn(`formatSignedPercent(null)`), "--", "missing percent must not become a fake 0.00%");
   assert.equal(app.evalIn(`formatSignedPrice(null)`), "--", "missing change must not become a fake zero");

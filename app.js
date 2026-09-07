@@ -2118,6 +2118,7 @@ function clearUserScopedState({ renderNow = true } = {}) {
   [el.watchRows, el.priceAlertBox, el.holdingsPanel, document.getElementById("moreDetail")].forEach((node) => {
     if (node) node.replaceChildren();
   });
+  document.querySelectorAll('.swing-stat-size').forEach(node => node.remove());
   if (renderNow) render();
 }
 
@@ -3511,7 +3512,8 @@ function buildHoldingsPlanRisk(asOf = new Date().toISOString()) {
     const markets = new Set(tradesState.records.filter(record => record.code === holding.code && ['TWSE', 'TPEx'].includes(record.market)).map(record => record.market));
     return { ...holding, exchange: markets.size === 1 ? [...markets][0] : null, marketConflict: markets.size > 1 };
   });
-  return Stock1Risk.calculatePortfolioPlanRisk({ positions, plans: tradePlansState.loaded ? tradePlansState.plans : [], quotes: stocks,
+  const quotes = stocks.map(stock => ({ ...(stock.riskQuote || { code: stock.code, price: null }), industry: stock.industry || null }));
+  return Stock1Risk.calculatePortfolioPlanRisk({ positions, plans: tradePlansState.loaded ? tradePlansState.plans : [], quotes,
     capitalBasis: positionSizingState.capital, costPolicy: { basis: 'gross-mark-to-stop' }, asOf, session: marketSessionState.stock });
 }
 function formatPortfolioRiskTime(value) {
@@ -4279,6 +4281,10 @@ function removeSelectedWatchStocks() {
 function mergeOfficialQuote(stock, quote) {
   if (!stock || !quote) return;
   const latestPrice = positivePriceOrNull(quote.price);
+  // The display can retain an old price, but risk must use price and time from
+  // the same response. A missing price explicitly invalidates this risk snapshot.
+  stock.riskQuote = Object.freeze({ code: stock.code, price: latestPrice, exchange: quote.exchange,
+    source: quote.source, sourceKind: quote.sourceKind, asOf: quote.asOf, priceStale: quote.priceStale === true, official: true });
   if (latestPrice !== null) {
     stock.price = latestPrice;
     const lastSpark = stock.spark[stock.spark.length - 1];

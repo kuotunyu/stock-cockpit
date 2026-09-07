@@ -37,7 +37,7 @@ test('持股情境風險與明確投入金額在四尺寸及200%文字可讀、�
       tradePlansState.loaded = true; tradePlansState.plans = [plan];
       tradesState.portfolio = { holdings: [{ code: '6488', shares: 1000, avgCost: 400, cost: 400000 }, { code: '9999', shares: 500, avgCost: 50, cost: 25000 }], totals: { cost: 425000 }, realized: [] };
       tradesState.records = [{ id: 'risk-buy', code: '6488', market: 'TWSE', side: 'buy', date: '20260904', shares: 1000, price: 400, fee: 342, tax: 0 }];
-      const stock = stocks.find(s => s.code === '6488'); Object.assign(stock, { price: 425, exchange: 'TWSE', official: true, sourceKind: 'realtime', asOf: '2026-09-07T02:00:00.000Z' });
+      const stock = stocks.find(s => s.code === '6488'); mergeOfficialQuote(stock, { price: 425, exchange: 'TWSE', source: 'TWSE MIS', sourceKind: 'realtime', asOf: '2026-09-07T02:00:00.000Z' });
       document.activeElement.blur(); renderHoldingsPanel();
     }, plan);
     const risk = page.locator('.hold-plan-risk');
@@ -68,6 +68,26 @@ test('持股情境風險與明確投入金額在四尺寸及200%文字可讀、�
     await visibleNav(page, 'strategy').click(); await page.locator('#swingAvailableCash').focus();
     await page.evaluate(() => activateAuthenticatedUser({ id: 'second-risk-user', username: 'second' }));
     assert.equal(await page.locator('#swingAvailableCash').inputValue(), '');
+    for (const operation of ['switch', '401']) {
+      await page.evaluate(() => activateAuthenticatedUser({ id: 'private-cash-owner', username: 'cash-owner' }));
+      await visibleNav(page, 'strategy').click();
+      await page.locator('#swingAvailableCash').fill('12345');
+      assert.match(await page.locator('.swing-stat-size').first().textContent(), /已按你提供的 12,345 檢查/);
+      await visibleNav(page, 'more').click();
+      assert.equal(await page.locator('#strategyBoard').isVisible(), false);
+      assert.match(await page.locator('#strategyBoard').textContent(), /12,345/);
+      if (operation === 'switch') {
+        await page.evaluate(() => { activateAuthenticatedUser({ id: 'next-cash-owner', username: 'next' }); render(); });
+      } else {
+        await page.route('**/api/trade-plans', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ ok: false, code: 'AUTH_REQUIRED', error: '登入已到期' }) }));
+        await page.evaluate(async () => { try { await fetchApi('/api/trade-plans'); } catch (error) { handleAuthRequired(error); } });
+        await page.locator('#loginGate').waitFor({ state: 'visible' });
+      }
+      assert.equal(await page.locator('#swingAvailableCash').inputValue(), '');
+      assert.equal(await page.locator('.swing-stat-size').count(), 0, 'hidden quantities, required cash and checks must be erased synchronously');
+      assert.equal(await page.evaluate(() => /12,345|已按你提供的/.test(document.body.textContent)), false);
+      await fixture.captureSnapshot(`portfolio-cash-reset-hidden-${operation}`);
+    }
     assert.equal(fixture.externalRequests.length, 0);
   } catch (error) { await fixture.captureFailure('portfolio-plan-risk'); throw error; }
   finally { await fixture.close(); }
