@@ -227,3 +227,7 @@ npm run test:browser
 產物 `test-results/browser/t11-*` 包含對照、成交／檢討及 OHLC 截圖。保存通知按正常計時自然消失後才截可讀內容，不由測試刪除通知 DOM。44px 是常用操作的產品目標；WCAG 2.2 AA SC 2.5.8 的最小目標是24×24 CSS px並有例外。這些案例驗特定流程，不宣稱整站 WCAG 認證。
 
 `fixture-lifecycle` 釘住真輪詢替换 DOM 後仍維持 200% 字級、100→200 往返不累乘，以及延遲提醒 API 回應後原生處置卡片回焦／草稿保留。文字放大 helper 僅用同源測試 stylesheet；手機重排停用後等兩幀讀天然字級，合併 childList 更新並等待收斂，不關閉輪詢或放寬產品 CSP。OHLC reader 用原生方向鍵捲動；圖表控制區仍驗加號與 R，首次操作說明以正常關閉完成。
+
+### Actions 固定來源更新
+
+工作流程以官方 `actions` repository 的完整 commit SHA 固定來源，旁註對應版本。更新時先用 `gh api repos/actions/<action>/git/ref/tags/<version>` 核對 tag 指向（annotated tag 另解參照），再讀該 SHA 的 `action.yml`，確認 runtime、inputs 與官方 release notes；最後更新兩份 workflow 並核對實際 GitHub run。保留 Node 22.x／24.x 測試矩陣、獨立 Node 24 Chromium、Reliability 排程／手動觸發及 `contents: read`。本機測試不能代替 GitHub Actions 執行結果。

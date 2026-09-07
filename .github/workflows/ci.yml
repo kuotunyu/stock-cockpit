@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Fail if private data is tracked
         run: |
@@ -57,13 +57,13 @@ jobs:
       # 強制改用 Node 24 執行並每跑必噴警告（見 2025-09-19 changelog）。等 runner 撤掉這層
       # 相容墊片就會直接變成紅 X，所以先升到 action 本體即為 node24 的 v7。
       # 對本 workflow 的行為差異：checkout v7 只多擋 pull_request_target／workflow_run 的
-      # fork PR checkout（我們只用 push／pull_request，無影響）；setup-node v6 把自動快取
+      # fork PR checkout（我們只用 push／pull_request，無影響）；setup-node v7 把自動快取
       # 限縮到 npm（我們本來就明寫 cache: npm，無影響）。
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: "npm"
@@ -81,10 +81,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Use Node.js 24.x
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "24.x"
           cache: "npm"
@@ -100,7 +100,7 @@ jobs:
 
       - name: Upload browser failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: browser-failure-artifacts
           path: test-results/browser/
