@@ -261,3 +261,48 @@ test("隔日沖 headline 仍只讀目前公式最近 260 份，窗口外 pending
     assert.deepEqual(db.signalSnapshots.find(s=>s.asOf===outside.asOf),outside);
   } finally {removeTwse();removeTpex();}
 });
+
+// I1 的固定日期是審查重現契約：1/3 先停損、1/4 才達標，不能因指數缺值跳過 1/3。
+async function runCalendarReviewCase(caseYear, extraRow, missingIndex = false) {
+  const signal=`${caseYear}0102`, stopDay=`${caseYear}0103`, targetDay=`${caseYear}0104`, tail=`${caseYear}0228`;
+  const removeCalendar=mock.override({match:/afterTrading\/FMTQIK/,reply:url=>({stat:"OK",data:
+    url.searchParams.get("date").startsWith(`${caseYear}01`)
+      ? [[roc(signal),"1","1","1","20000"],[roc(stopDay),"1","1","1",missingIndex?"--":"20000"],
+        [roc(targetDay),"1","1","1","20000"],...(extraRow?[extraRow]:[])]
+      : [[roc(tail),"1","1","1","20000"]]})});
+  const removeHistory=mock.override({match:/STOCK_DAY\?/,reply:url=>({stat:"OK",data:
+    (url.searchParams.get("date").startsWith(`${caseYear}01`)
+      ? [[signal,105,99],[stopDay,105,90],[targetDay,112,99]] : [[tail,105,99]])
+      .map(([date,high,low])=>[roc(date),"1000000","100000000","100",String(high),String(low),"100","0","1000"])})});
+  try {
+    const db=await mod.loadDb();
+    db.swingVerification={[signal]:[entry({lastChecked:signal})]}; db.swingVerificationRetry={};
+    mod.resetSwingAdvanceKeyForTest(); mod.resetHistoryCacheForTest();
+    await mod.saveDb(db);
+    const historyCalls=mock.callsFor(/STOCK_DAY\?/).length;
+    await mod.advanceSwingVerification(reference,today,{riskSets:null});
+    return {result:db.swingVerification[signal][0],signal,stopDay,historyCalls:mock.callsFor(/STOCK_DAY\?/).length-historyCalls};
+  } finally {removeCalendar();removeHistory();}
+}
+
+test("I1：有效交易日期但指數 -- 仍保留 1/3 停損日，不得誤判 1/4 win", async () => {
+  const {result,stopDay}=await runCalendarReviewCase(2024,null,true);
+  assert.equal(result.status,"loss"); assert.equal(result.resolvedAt,stopDay);
+  assert.equal(result.resultPct,-5); assert.equal(result.daysHeld,1);
+});
+
+test("I1：混月份／格式錯誤／不存在日期列不可在 filter 後逃過整月完整性驗證", async () => {
+  const cases=[
+    [2020,["109/02/03","1","1","1","--"]],
+    [2021,["not-a-date","1","1","1","--"]],
+    [2022,["111/01/32","1","1","1","20000"]],
+    [2019,["108/01/03 trailing text","1","1","1","--"]],
+    [2018,[]],
+  ];
+  for(const [caseYear,row] of cases){
+    const {result,signal,historyCalls}=await runCalendarReviewCase(caseYear,row);
+    assert.equal(result.status,"pending",String(row[0])); assert.equal(result.lastChecked,signal);
+    assert.equal(result.verificationRetry?.reason,"calendar-unavailable"); assert.equal(result.dataGap,undefined);
+    assert.equal(historyCalls,0,"日曆無法安全解讀時不可繼續抓 K 判定");
+  }
+});

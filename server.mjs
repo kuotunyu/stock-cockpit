@@ -11440,7 +11440,8 @@ function selectSwingVerificationBatch(store, retryState, { asOf, now = Date.now(
   return { jobs, cursors, recentRemaining };
 }
 
-// 已結束的兩個月份才宣稱完整涵蓋；空包／混月／缺少指數值都不能當成「整月休市」。
+// 已結束的月份才宣稱完整涵蓋；交易日證據不依賴指數 close。
+// 每個原始日期列都須有效且屬於要求月份，不能 filter 後才驗完整性。
 async function getSwingHistoricalCalendar(from, through) {
   const months = [from.slice(0, 6), through.slice(0, 6)].filter((month, i, all) => all.indexOf(month) === i);
   const tradingDays = [];
@@ -11456,9 +11457,21 @@ async function getSwingHistoricalCalendar(from, through) {
       }
     }
     const { value: rows } = await loadWithLastGood(state, { ttlMs: 24 * 60 * 60 * 1000, retryMs: SWING_VERIFY_RETRY_MS, load: async () => {
-      const parsed = parseTaiexMonthlyPayload(await fetchJson(TAIEX_HISTORY_URL(month)));
-      if (!parsed.length || parsed.some(row => !row.date.startsWith(month))) throw new Error("歷史交易日月份覆蓋不明");
-      return parsed;
+      const payload = await fetchJson(TAIEX_HISTORY_URL(month));
+      if (payload?.stat !== "OK" || !Array.isArray(payload.data) || !payload.data.length) {
+        throw new Error("歷史交易日月份覆蓋不明");
+      }
+      return payload.data.map(row => {
+        // 此官方欄位為民國 yyy/mm/dd；通用 toCompactDate 會剝掉任意文字且不驗日曆日期，
+        // 不適合完整月份證據。指數 -- 不影響該日期確實開市的事實。
+        const match = Array.isArray(row) && typeof row[0] === "string"
+          ? row[0].trim().match(/^(\d{2,3})\/(\d{2})\/(\d{2})$/) : null;
+        const date = match ? `${Number(match[1]) + 1911}${match[2]}${match[3]}` : "";
+        if (!isValidCompactCalendarDate(date) || !date.startsWith(month)) {
+          throw new Error("歷史交易日含無效日期或非要求月份");
+        }
+        return { date };
+      });
     } });
     if (!rows?.length) throw new Error("歷史交易日無法確認");
     tradingDays.push(...rows.map(row => row.date));
