@@ -524,6 +524,7 @@ function createEmptyDb() {
     watchLists: {},
     priceAlerts: {},
     trades: {},
+    tradePlans: {},
     dataRevs: {},
     sharedRevs: {},
     brokerCredentials: {},
@@ -2332,6 +2333,7 @@ async function loadDbOnce() {
   dbCache.watchLists ||= {};
   dbCache.priceAlerts ||= {};
   dbCache.trades ||= {};
+  dbCache.tradePlans ||= {};
   dbCache.dataRevs ||= {};
   dbCache.sharedRevs ||= {};
   dbCache.brokerCredentials ||= {};
@@ -2506,9 +2508,161 @@ function bumpSharedRev(db, key) {
   return db.sharedRevs[key];
 }
 
+// ===== 個人交易計畫：使用者意圖與不可變的首次啟用證據 =====
+const TRADE_PLAN_LIMIT = 1000;
+const TRADE_PLAN_REVISION_LIMIT = 100;
+const TRADE_PLAN_MAX_BYTES = 120 * 1024;
+const TRADE_PLAN_INTENT_KEYS = ['status', 'entryPrice', 'entryLow', 'entryHigh', 'stopPrice', 'targetPrice', 'quantity', 'riskBudgetCash', 'expiresOn', 'invalidationReason', 'reason'];
+const TRADE_PLAN_IDENTITY_KEYS = ['planId', 'code', 'exchange', 'strategy', 'scenario', 'signalId', 'sourceCaptureId'];
+const TRADE_PLAN_SERVER_KEYS = ['createdAt', 'updatedAt', 'initial', 'activation', 'revisions', 'source', 'provenance'];
+function emptyTradePlans() { return { schemaVersion: 1, plans: [] }; }
+function assertTradePlanCapacity(payload) {
+  // 集合 PUT 仍是 128 KiB；預留 envelope 與匯入 provenance 後，合法資源必須能再送出。
+  const importedProjection = { schemaVersion: 1, plans: payload.plans.map(plan => ({ ...plan,
+    source: plan.source ? { ...plan.source, verification: 'unverified-import' } : null,
+    provenance: { kind: 'imported', importedAt: '2000-01-01T00:00:00.000Z', historicalEvidence: 'unverified' },
+  })) };
+  const bytes = Math.max(Buffer.byteLength(JSON.stringify(payload), 'utf8'), Buffer.byteLength(JSON.stringify(importedProjection), 'utf8'));
+  if (bytes > TRADE_PLAN_MAX_BYTES) throw tradePlanError('PLAN_STORAGE_TOO_LARGE', '計畫與完整歷史超過 120 KiB 容量，未修改資料；可匯出保留全部內容，匯出不會自動騰出容量');
+}
+function tradePlanError(code, message) { return portableError(code, message, 422); }
+function tradePlanIntent(raw, { now, activating = false, historical = false } = {}) {
+  if (!['draft', 'active', 'closed', 'cancelled'].includes(raw.status)) throw tradePlanError('PLAN_INVALID', '計畫狀態不正確');
+  const intent = { status: raw.status };
+  for (const key of ['entryPrice', 'entryLow', 'entryHigh', 'stopPrice', 'targetPrice', 'quantity', 'riskBudgetCash']) {
+    const value = raw[key] ?? null;
+    if (value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || (key === 'quantity' && !Number.isSafeInteger(value)))) {
+      throw tradePlanError('PLAN_INVALID', `${key} 必須是正數${key === 'quantity' ? '整數股數' : ''}`);
+    }
+    intent[key] = value;
+  }
+  for (const key of ['reason', 'invalidationReason']) {
+    const value = raw[key] ?? '';
+    if (typeof value !== 'string' || value.length > 1000) throw tradePlanError('PLAN_INVALID', `${key} 上限 1000 字`);
+    intent[key] = value;
+  }
+  const expiresOn = raw.expiresOn ?? null;
+  if (expiresOn !== null && (typeof expiresOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(expiresOn)
+    || !Number.isFinite(Date.parse(expiresOn)) || new Date(expiresOn).toISOString().slice(0, 10) !== expiresOn)) {
+    throw tradePlanError('PLAN_INVALID', '有效期必須是有效日期');
+  }
+  intent.expiresOn = expiresOn;
+  if ((intent.entryLow === null) !== (intent.entryHigh === null) || (intent.entryLow !== null && intent.entryLow > intent.entryHigh)
+    || (intent.entryLow !== null && intent.entryPrice !== null && (intent.entryPrice < intent.entryLow || intent.entryPrice > intent.entryHigh))) {
+    throw tradePlanError('PLAN_INVALID', '進場區間須成對，且參考進場價須位於區間內');
+  }
+  if (intent.targetPrice !== null && intent.entryPrice !== null && intent.targetPrice <= intent.entryPrice) throw tradePlanError('PLAN_INVALID', '目標價須高於參考進場價');
+  if (raw.status === 'active' && ['entryPrice', 'stopPrice', 'quantity', 'expiresOn'].some(key => intent[key] === null)) {
+    throw tradePlanError('PLAN_ACTIVE_INCOMPLETE', '啟用需要進場價、停損、股數與有效期');
+  }
+  if (activating && !(intent.entryPrice > intent.stopPrice)) throw tradePlanError('PLAN_INVALID', '首次啟用停損須低於進場價');
+  if (!historical && raw.status === 'active' && expiresOn < compactToIsoDate(toTaipeiCompactDate(new Date(now)))) throw tradePlanError('PLAN_EXPIRED', '啟用計畫的有效期已過');
+  return intent;
+}
+function tradePlanIdentity(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw tradePlanError('PLAN_INVALID', '計畫必須是物件');
+  const identity = Object.fromEntries(TRADE_PLAN_IDENTITY_KEYS.map(key => [key, raw[key] ?? null]));
+  if (typeof identity.planId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(identity.planId)
+    || typeof identity.code !== 'string' || !SECURITY_CODE_PATTERN.test(identity.code)
+    || !['TWSE', 'TPEx'].includes(identity.exchange) || !['overnight', 'swing'].includes(identity.strategy)
+    || (identity.scenario !== null && (typeof identity.scenario !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(identity.scenario)))
+    || [identity.signalId, identity.sourceCaptureId].some(value => value !== null && (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)))
+    || ((identity.signalId === null) !== (identity.sourceCaptureId === null))) throw tradePlanError('PLAN_INVALID', '計畫識別／股票／市場／策略格式不正確');
+  return identity;
+}
+function resolveTradePlanSource(identity, db) {
+  if (!identity.signalId) return null;
+  const capture = db?.verificationPublications?.captures?.[identity.sourceCaptureId];
+  const matches = capture?.signals?.filter(signal => signal.signalId === identity.signalId && signal.code === identity.code
+    && signal.exchange === identity.exchange && (signal.scenario?.key || signal.group || null) === identity.scenario) || [];
+  if (capture?.strategy !== identity.strategy || matches.length !== 1) throw tradePlanError('PLAN_SOURCE_INVALID', '來源訊號與已保存的發布版本不符，請改以手動計畫建立');
+  const signal = matches[0];
+  return { captureId: identity.sourceCaptureId, signalId: identity.signalId, verification: 'verified-local',
+    capturedReference: { tradeDate: capture.tradeDate || null, publicationKind: capture.kind || null, publicationRevision: capture.revision || null,
+      decisionAvailableAt: capture.decisionAvailableAt || null, price: signal.price ?? null, plan: cloneJson(signal.plan || null) } };
+}
+function tradePlanActivation(snapshot) {
+  const riskPerShare = snapshot.intent.entryPrice - snapshot.intent.stopPrice;
+  const riskAmount = riskPerShare * snapshot.intent.quantity;
+  if (!Number.isFinite(riskAmount) || riskAmount <= 0) throw tradePlanError('PLAN_INVALID', '初始計畫風險超出有效範圍');
+  return { ...cloneJson(snapshot), riskPerShare, riskAmount };
+}
+function canonicalizeTradePlans(input, existing = emptyTradePlans(), { db, now = new Date().toISOString() } = {}) {
+  if (input?.schemaVersion !== 1 || !Array.isArray(input.plans)) throw tradePlanError('PLAN_SCHEMA_UNSUPPORTED', '計畫格式版本不支援');
+  if (input.plans.length > TRADE_PLAN_LIMIT) throw tradePlanError('PLAN_LIMIT_EXCEEDED', '每人上限 1000 個計畫；請先從個人資料備份匯出');
+  const current = new Map(existing.plans.map(plan => [plan.planId, plan]));
+  const seen = new Set();
+  const plans = input.plans.map(raw => {
+    const identity = tradePlanIdentity(raw);
+    if (seen.has(identity.planId)) throw tradePlanError('PLAN_INVALID', '計畫 ID 重複');
+    seen.add(identity.planId);
+    const prior = current.get(identity.planId);
+    if (Object.keys(raw).some(key => ![...TRADE_PLAN_IDENTITY_KEYS, ...TRADE_PLAN_INTENT_KEYS, ...TRADE_PLAN_SERVER_KEYS].includes(key))) throw tradePlanError('PLAN_INVALID', '計畫包含不支援或非本人可指定的欄位');
+    for (const key of TRADE_PLAN_SERVER_KEYS) {
+      if (Object.hasOwn(raw, key) && (!prior || stableJson(raw[key]) !== stableJson(prior[key]))) throw tradePlanError('PLAN_HISTORY_IMMUTABLE', '不可修改伺服器保存的時間、来源或歷史');
+    }
+    if (prior && TRADE_PLAN_IDENTITY_KEYS.some(key => identity[key] !== prior[key])) throw tradePlanError('PLAN_IDENTITY_IMMUTABLE', '計畫股票、策略與來源不可更換，請建立另一個計畫');
+    // 無變更與結案允許保存已過期的舊意圖，不由背景自動結案。
+    const candidate = tradePlanIntent(raw, { now, historical: true });
+    if (prior && stableJson(candidate) === stableJson(Object.fromEntries(TRADE_PLAN_INTENT_KEYS.map(key => [key, prior[key]])))) return cloneJson(prior);
+    const allowed = prior ? { draft: ['draft', 'active', 'cancelled'], active: ['active', 'closed', 'cancelled'], closed: [], cancelled: [] }[prior.status] : ['draft', 'active'];
+    if (!allowed.includes(raw.status)) throw tradePlanError('PLAN_TRANSITION_INVALID', '此計畫狀態不可轉換或修改');
+    const activating = raw.status === 'active' && !prior?.activation;
+    const intent = tradePlanIntent(raw, { now, activating });
+    if (prior && prior.revisions.length >= TRADE_PLAN_REVISION_LIMIT) throw tradePlanError('PLAN_REVISION_LIMIT_EXCEEDED', '每計畫上限 100 次修改；請先從個人資料備份匯出');
+    const snapshot = { revision: prior ? prior.revisions.length + 1 : 0, recordedAt: now, intent: cloneJson(intent) };
+    return { ...identity, ...intent, createdAt: prior?.createdAt || now, updatedAt: now,
+      initial: prior ? cloneJson(prior.initial) : snapshot,
+      revisions: prior ? [...cloneJson(prior.revisions), snapshot] : [],
+      activation: prior?.activation ? cloneJson(prior.activation) : activating ? tradePlanActivation(snapshot) : null,
+      source: prior ? cloneJson(prior.source) : resolveTradePlanSource(identity, db),
+      provenance: prior ? cloneJson(prior.provenance) : { kind: 'server-authored', historicalEvidence: 'server-recorded' } };
+  });
+  if ([...current.keys()].some(id => !seen.has(id))) throw tradePlanError('PLAN_REMOVAL_FORBIDDEN', '不可刪除原計畫；請改為取消並保留歷史');
+  const payload = { schemaVersion: 1, plans };
+  assertTradePlanCapacity(payload);
+  return payload;
+}
+function validatePortableTradePlans(payload, now = new Date().toISOString()) {
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.plans) || payload.plans.length > TRADE_PLAN_LIMIT) throw tradePlanError('BACKUP_PLAN_INVALID', '備份計畫版本或容量不正確');
+  const seen = new Set();
+  const plans = payload.plans.map(raw => {
+    const identity = tradePlanIdentity(raw);
+    if (Object.keys(raw).some(key => ![...TRADE_PLAN_IDENTITY_KEYS, ...TRADE_PLAN_INTENT_KEYS, ...TRADE_PLAN_SERVER_KEYS].includes(key))) throw tradePlanError('BACKUP_PLAN_INVALID', '備份計畫包含不支援的欄位');
+    if (seen.has(identity.planId)) throw tradePlanError('BACKUP_PLAN_INVALID', '備份計畫 ID 重複');
+    seen.add(identity.planId);
+    if (!Array.isArray(raw.revisions) || raw.revisions.length > TRADE_PLAN_REVISION_LIMIT) throw tradePlanError('BACKUP_PLAN_INVALID', '計畫修改歷史容量不正確');
+    const history = [raw.initial, ...raw.revisions];
+    let previous = null, activation = null;
+    for (const [index, snapshot] of history.entries()) {
+      if (snapshot?.revision !== index || Object.keys(snapshot).some(key => !['revision', 'recordedAt', 'intent'].includes(key))
+        || typeof snapshot.recordedAt !== 'string' || !Number.isFinite(Date.parse(snapshot.recordedAt))
+        || (previous && Date.parse(snapshot.recordedAt) < Date.parse(previous.recordedAt))) throw tradePlanError('BACKUP_PLAN_INVALID', '計畫歷史時間或序號不一致');
+      const status = snapshot.intent?.status;
+      const allowed = previous ? {draft:['draft','active','cancelled'],active:['active','closed','cancelled'],closed:[],cancelled:[]}[previous.intent.status] : ['draft','active'];
+      if (!allowed?.includes(status)) throw tradePlanError('BACKUP_PLAN_INVALID', '計畫歷史狀態不一致');
+      const intent = tradePlanIntent(snapshot.intent, { historical: true, activating: status === 'active' && !activation });
+      if (stableJson(intent) !== stableJson(snapshot.intent)) throw tradePlanError('BACKUP_PLAN_INVALID', '計畫歷史欄位不一致');
+      if (status === 'active' && !activation) activation = tradePlanActivation(snapshot);
+      previous = snapshot;
+    }
+    if (stableJson(raw.activation) !== stableJson(activation) || raw.createdAt !== history[0].recordedAt || raw.updatedAt !== previous.recordedAt
+      || stableJson(tradePlanIntent(raw, { historical: true })) !== stableJson(previous.intent)) throw tradePlanError('BACKUP_PLAN_INVALID', '原始啟用、目前計畫與歷史不一致');
+    if (identity.signalId ? raw.source?.signalId !== identity.signalId || raw.source?.captureId !== identity.sourceCaptureId
+      || !raw.source?.capturedReference || typeof raw.source.capturedReference !== 'object' : raw.source !== null) throw tradePlanError('BACKUP_PLAN_INVALID', '計畫來源識別不一致');
+    return { ...identity, ...cloneJson(previous.intent), createdAt: raw.createdAt, updatedAt: raw.updatedAt,
+      initial: cloneJson(raw.initial), revisions: cloneJson(raw.revisions), activation,
+      source: identity.signalId ? { signalId: identity.signalId, captureId: identity.sourceCaptureId, capturedReference: cloneJson(raw.source.capturedReference), verification: 'unverified-import' } : null,
+      provenance: { kind: 'imported', importedAt: now, historicalEvidence: 'unverified' } };
+  });
+  const canonical = { schemaVersion: 1, plans };
+  assertTradePlanCapacity(canonical);
+  return canonical;
+}
+
 // ===== 個人資料可攜式備份／兩階段安全還原 =====
 const PERSONAL_BACKUP_FORMAT = "stock1-personal-backup";
-const PERSONAL_BACKUP_VERSION = 1;
+const PERSONAL_BACKUP_VERSION = 2;
 const PERSONAL_BACKUP_MAX_BYTES = 16 * 1024 * 1024;
 // HTTP body 還包含 { bundle, options } 包裝；檔案本身仍嚴格限制為 16 MiB。
 const PERSONAL_BACKUP_REQUEST_MAX_BYTES = PERSONAL_BACKUP_MAX_BYTES + (256 * 1024);
@@ -2563,11 +2717,12 @@ function currentPersonalRevisions(db, userId) {
     watchLists: getDataRev(db, userId, "watchLists"),
     alerts: getDataRev(db, userId, "alerts"),
     trades: getDataRev(db, userId, "trades"),
+    tradePlans: getDataRev(db, userId, "tradePlans"),
   };
 }
 
 function samePersonalRevisions(left, right) {
-  return ["watchLists", "alerts", "trades"].every((key) => Number(left?.[key]) === Number(right?.[key]));
+  return ["watchLists", "alerts", "trades", "tradePlans"].every((key) => Number(left?.[key]) === Number(right?.[key]));
 }
 
 function normalizePortableNotes(input) {
@@ -2623,7 +2778,7 @@ function validatePersonalBackupEnvelope(bundle) {
   if (!bundle || typeof bundle !== "object" || Array.isArray(bundle) || bundle.format !== PERSONAL_BACKUP_FORMAT) {
     throw portableError("BACKUP_FORMAT_INVALID", "這不是有效的 Stock1 個人備份檔");
   }
-  if (bundle.formatVersion !== PERSONAL_BACKUP_VERSION) {
+  if (![1, PERSONAL_BACKUP_VERSION].includes(bundle.formatVersion)) {
     throw portableError("BACKUP_VERSION_UNSUPPORTED", "此備份版本尚未支援，請使用相容版本的 Stock1");
   }
   if (!bundle.data || typeof bundle.data !== "object" || Array.isArray(bundle.data)
@@ -2667,6 +2822,7 @@ function buildPersonalBackup(db, user) {
       watchLists: cloneJson(normalizeWatchListsPayload(db.watchLists?.[user.id])),
       alerts: cloneJson(normalizeAlertsPayload(db.priceAlerts?.[user.id])),
       trades: cloneJson(trades),
+      tradePlans: cloneJson(db.tradePlans?.[user.id] || emptyTradePlans()),
     },
     sharedContributions: { stockNotes, companyProfiles },
   };
@@ -2753,6 +2909,9 @@ async function buildPersonalRestorePreview(db, user, session, bundle, options) {
   const previewEpoch = dbMutationEpoch;
   validateRestoreOptions(options);
   validatePersonalBackupEnvelope(bundle);
+  if (bundle.formatVersion === 1 && Object.hasOwn(bundle.data, 'tradePlans')) throw portableError('BACKUP_PLAN_INVALID', '舊版備份不可包含未定義的計畫區段');
+  const currentPlans = db.tradePlans?.[user.id] || emptyTradePlans();
+  const tradePlans = bundle.formatVersion === 1 ? cloneJson(currentPlans) : validatePortableTradePlans(bundle.data.tradePlans);
 
   const rawLists = bundle.data.watchLists;
   if (!rawLists || typeof rawLists !== "object" || Array.isArray(rawLists)
@@ -2832,6 +2991,9 @@ async function buildPersonalRestorePreview(db, user, session, bundle, options) {
   const currentTrades = normalizeTradesPayload(db.trades?.[user.id]);
   const publicPlan = {
     sections: {
+      tradePlans: { mode: bundle.formatVersion === 1 ? 'preserve' : 'replace',
+        changed: stableJson(currentPlans) !== stableJson(tradePlans), beforeCount: currentPlans.plans.length, afterCount: tradePlans.plans.length,
+        policy: bundle.formatVersion === 1 ? '舊版備份未含交易計畫，保留目前計畫' : '取代計畫；匯入歷史與來源未驗證，不視為事前證據' },
       watchLists: {
         mode: "replace",
         changed: stableJson(currentLists) !== stableJson(watchLists),
@@ -2875,7 +3037,7 @@ async function buildPersonalRestorePreview(db, user, session, bundle, options) {
     expectedRevisions: revisions,
     expectedStockNotesRev: getSharedRev(db, "stockNotes"),
     publicPlan,
-    canonical: { watchLists, alerts, trades, portableNotes },
+    canonical: { watchLists, alerts, trades, tradePlans, portableNotes },
   });
   return { ok: true, previewToken, expiresAt: new Date(expiresAtMs).toISOString(), plan: publicPlan };
 }
@@ -3006,9 +3168,11 @@ async function commitPersonalRestore(db, auth, input, clientAddress = "") {
       if (sections.watchLists.changed) currentDb.watchLists[currentUser.id] = cloneJson(entry.canonical.watchLists);
       if (sections.alerts.changed) currentDb.priceAlerts[currentUser.id] = cloneJson(entry.canonical.alerts);
       if (sections.trades.changed) currentDb.trades[currentUser.id] = cloneJson(entry.canonical.trades);
+      if (sections.tradePlans.changed) { currentDb.tradePlans ||= {}; currentDb.tradePlans[currentUser.id] = cloneJson(entry.canonical.tradePlans); }
       if (sections.watchLists.changed) bumpDataRev(currentDb, currentUser.id, "watchLists");
       if (sections.alerts.changed) bumpDataRev(currentDb, currentUser.id, "alerts");
       if (sections.trades.changed) bumpDataRev(currentDb, currentUser.id, "trades");
+      if (sections.tradePlans.changed) bumpDataRev(currentDb, currentUser.id, "tradePlans");
       for (const note of notesPlan.additions) {
         currentDb.stockNotes[note.code] ||= [];
         currentDb.stockNotes[note.code].push({
@@ -3026,6 +3190,7 @@ async function commitPersonalRestore(db, auth, input, clientAddress = "") {
           watchLists: "replaced",
           alerts: "replaced",
           trades: "replaced",
+          tradePlans: sections.tradePlans.mode === 'preserve' ? 'preserved' : 'replaced',
           stockNotes: { added: notesPlan.addCount, duplicates: notesPlan.duplicateCount },
           companyProfiles: "skipped",
         },
@@ -14097,6 +14262,7 @@ async function handleApi(request, requestUrl, response) {
           if (currentDb.watchLists) delete currentDb.watchLists[id];
           if (currentDb.priceAlerts) delete currentDb.priceAlerts[id];
           if (currentDb.trades) delete currentDb.trades[id];
+          if (currentDb.tradePlans) delete currentDb.tradePlans[id];
           if (currentDb.brokerCredentials) delete currentDb.brokerCredentials[id];
           if (currentDb.dataRevs) delete currentDb.dataRevs[id];
           let removedStockNotes = false;
@@ -14267,6 +14433,38 @@ async function handleApi(request, requestUrl, response) {
     } catch (error) {
       apiFailure(response, 502, error);
     }
+    return true;
+  }
+
+  if (requestUrl.pathname === '/api/trade-plans') {
+    if (!ensureAuthed(auth, response)) return true;
+    const db = await loadDb();
+    if (request.method === 'GET') {
+      jsonResponse(response, 200, { ok: true, rev: getDataRev(db, auth.user.id, 'tradePlans'), ...(db.tradePlans?.[auth.user.id] || emptyTradePlans()) });
+      return true;
+    }
+    if (request.method === 'PUT') {
+      try {
+        const input = await readJsonBody(request);
+        const result = await commitDbMutation(currentDb => {
+          const { user } = requireCurrentMutationAuth(currentDb, auth);
+          if (rejectPersonalRestoreBusy(response) || rejectStaleRev(currentDb, user.id, 'tradePlans', input?.rev, response)) return skipDbMutation(null);
+          const existing = currentDb.tradePlans?.[user.id] || emptyTradePlans();
+          const payload = canonicalizeTradePlans(input, existing, { db: currentDb });
+          if (stableJson(payload) === stableJson(existing)) return skipDbMutation({ ok: true, rev: getDataRev(currentDb, user.id, 'tradePlans'), ...payload });
+          currentDb.tradePlans ||= {};
+          currentDb.tradePlans[user.id] = payload;
+          return { ok: true, rev: bumpDataRev(currentDb, user.id, 'tradePlans'), ...payload };
+        });
+        if (result) jsonResponse(response, 200, result);
+      } catch (error) {
+        if (error?.message === 'Request body too large') {
+          jsonResponse(response, 413, { ok: false, code: 'PLAN_BODY_TOO_LARGE', error: '計畫請求超過 128 KiB 上限；請先從個人資料備份匯出，未修改任何計畫' });
+        } else mutationErrorResponse(response, error, 400);
+      }
+      return true;
+    }
+    jsonResponse(response, 405, { ok: false, error: 'Method not allowed' });
     return true;
   }
 
@@ -15926,6 +16124,7 @@ if (!process.env.STOCK1_SKIP_LISTEN) {
 
 // 給單元測試用的匯出：純函式＋資料層＋伺服器控制。不影響 `node server.mjs` 的執行行為。
 export {
+  canonicalizeTradePlans, validatePortableTradePlans, emptyTradePlans,
   // 日期
   toTaipeiCompactDate, toCompactDate, compactToIsoDate, compactToSlashDate,
   compactToRocSlashDate, addMonthsCompact, addDaysCompact, compactDaysDiff, formatDate,

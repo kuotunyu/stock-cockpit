@@ -25,6 +25,22 @@
   unicode-range: U+0000-00FF;
 }
 
+.trade-plan-modal { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); overflow-y: auto; background: var(--panel); color: var(--text); padding: 20px; border: 1px solid var(--line); border-radius: 12px; }
+#tradePlanModal { display: grid; place-items: center; padding: 12px; }
+.trade-plan-modal header, .trade-plan-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.trade-plan-modal h2 { margin: 0; }
+.trade-plan-modal p, .trade-plan-modal summary { overflow-wrap: anywhere; font-size: var(--fs-body); line-height: 1.6; }
+.trade-plan-modal details { margin-block: 16px; }
+.trade-plan-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-block: 12px; }
+.trade-plan-modal label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: var(--fs-body); }
+.trade-plan-modal :is(input, select, textarea, button) { min-width: 0; min-height: 44px; font-size: var(--fs-body); border-radius: 8px; }
+.trade-plan-modal :is(input, select, textarea) { width: 100%; box-sizing: border-box; color: var(--text); background: var(--bg); border: 1px solid var(--line); padding: 8px; }
+.trade-plan-modal button { padding: 10px 14px; white-space: normal; overflow-wrap: anywhere; }
+#tradePlanList { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+#tradePlanList button { display: flex; flex-direction: column; align-items: start; text-align: start; gap: 6px; }
+#tradePlanError { color: var(--error-text); }
+@media (max-width: 600px) { .trade-plan-grid { grid-template-columns: minmax(0, 1fr); } .trade-plan-modal { padding: 14px; } }
+
 :root {
   color-scheme: dark;
   --bg: #0b0c0d;

@@ -187,6 +187,7 @@
             </button>
           </div>
           <div class="holdings-panel" id="holdingsPanel" hidden></div>
+          <button type="button" class="watch-secondary-action" data-trade-plan-open="list" aria-haspopup="dialog">我的交易計畫</button>
           <div class="watch-brief" id="watchBrief"></div>
           <div class="watch-manage-bar" id="watchManageBar" hidden>
             <span id="watchManageSummary">選取要移除的股票</span>
@@ -417,6 +418,7 @@
           </div>
         </section>
         <section class="price-alert-box" id="priceAlertBox" hidden></section>
+        <button type="button" class="watch-secondary-action" data-trade-plan-open="create" aria-haspopup="dialog">建立我的計畫</button>
         <p class="detail-strategy-basis" id="detailStrategyBasis" hidden></p>
         <div class="detail-tabs" role="tablist" aria-label="明細分類">
           <button class="is-active" data-detail-tab="即時" type="button">即時</button>
@@ -696,6 +698,42 @@
         <p class="login-note">帳號由這台伺服器的管理者建立；忘記密碼請找管理者到「帳號管理」重設。不登入也能看行情，登入後才有自選股、到價提醒與交易帳本。</p>
       </section>
     </div>
+    <div class="modal-backdrop" id="tradePlanModal" hidden>
+      <section class="trade-plan-modal" role="dialog" aria-modal="true" aria-labelledby="tradePlanTitle" tabindex="-1">
+        <header><h2 id="tradePlanTitle">我的交易計畫</h2><button type="button" class="watch-secondary-action" data-trade-plan-close aria-label="關閉交易計畫">關閉</button></header>
+        <p>停損是你明確保存的意圖。草稿與首次啟用基準分開保存，修改保留歷史；不會自動下單或依到價提醒猜測計畫。</p>
+        <p>計畫與完整歷史容量 120 KiB，並同時受每人 1000 計畫／每計畫 100 次修改上限約束。匯出保留全部內容，不會自動騰出容量。</p>
+        <div class="trade-plan-actions"><button type="button" class="watch-secondary-action" data-trade-plan-new>新增手動計畫</button><button type="button" class="watch-secondary-action" data-action="download-personal-backup">匯出個人資料</button></div>
+        <details class="trade-plan-existing"><summary>已保存的計畫</summary><div id="tradePlanList"></div></details>
+        <div id="tradePlanEvidence"></div>
+        <p id="tradePlanError" role="alert" tabindex="-1"></p>
+        <form id="tradePlanForm" hidden>
+          <div class="trade-plan-grid">
+            <label>股票代號<input name="code" maxlength="6" pattern="[0-9A-Z]{4,6}" required></label>
+            <label>市場<select name="exchange"><option value="TWSE">上市</option><option value="TPEx">上櫃</option></select></label>
+            <label>策略<select name="strategy"><option value="swing">波段</option><option value="overnight">隔日沖</option></select></label>
+            <label>狀態<select name="status"><option value="draft">草稿</option><option value="active">啟用</option><option value="closed">結案</option><option value="cancelled">取消</option></select></label>
+            <label>參考進場價<input name="entryPrice" type="number" min="0.000001" step="any"></label>
+            <label>有效停損價<input name="stopPrice" type="number" min="0.000001" step="any"></label>
+            <label>目標價（選填）<input name="targetPrice" type="number" min="0.000001" step="any"></label>
+            <label>預計股數<input name="quantity" type="number" min="1" step="1"></label>
+            <label>有效期<input name="expiresOn" type="date"></label>
+          </div>
+          <details><summary>進場區間、風險預算與失效條件</summary>
+            <div class="trade-plan-grid">
+              <label>進場下緣<input name="entryLow" type="number" min="0.000001" step="any"></label>
+              <label>進場上緣<input name="entryHigh" type="number" min="0.000001" step="any"></label>
+              <label>風險預算（元）<input name="riskBudgetCash" type="number" min="0.000001" step="any"></label>
+            </div>
+            <label>失效條件<textarea name="invalidationReason" maxlength="1000" rows="2"></textarea></label>
+          </details>
+          <label>建立／修改原因<textarea name="reason" maxlength="1000" rows="3"></textarea></label>
+          <p>首次啟用需完整進場價、低於進場價的停損、股數與未過期有效期。啟用後可上移停損；結案或取消後不再改寫。</p>
+          <button type="submit" class="more-primary">保存計畫</button>
+        </form>
+      </section>
+    </div>
+
     <div class="modal-backdrop personal-backup-backdrop" id="personalBackupModal" hidden>
       <section class="personal-backup-modal" role="dialog" aria-modal="true" aria-labelledby="personalBackupTitle" aria-describedby="personalBackupDescription" tabindex="-1">
         <header class="personal-backup-head">

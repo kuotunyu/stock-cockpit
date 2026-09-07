@@ -1,5 +1,9 @@
 # Stock1 測試套件
 
+個人交易計畫的 `trade-plans`、`api-trade-plans`、`trade-plans-portability` 與前端同名測試涵蓋初始草稿／首次啟用、上移停損、100 次修改上限、權限及 409 重放、雙擊、儲存途中輸入、帳號隔離、寫入失敗回滾、v1 保留／v2 匯入未驗證、還原點與隔離冷啟動。可先執行 `node --test tests/backend/trade-plans*.test.mjs tests/backend/api-trade-plans.test.mjs tests/frontend/trade-plans.test.mjs`，再跑完整套件。
+
+Chromium 的 `trade-plans.test.mjs` 以真表單驗保存、上移停損、輪詢草稿、Escape 回焦、切帳號與 session 到期；375／768／1280／1440 px 各驗 100%／實際 200% 文字。使用隔離臨時埠，產物在 `test-results/browser/trade-plans-*`。此範圍不代表全站 200% 完成，既有固定底部導覽互疊仍待後续手機可及性工作。
+
 Node 內建 `node --test`＋ `jsdom`（前端 DOM 測試）。使用 **Node 22.22.2 以上的 22.x、24.15.0 以上的 24.x，或 ≥26**；精確範圍為 jsdom 30 的 `^22.22.2 || ^24.15.0 || >=26.0.0`，比 App 本身的 `engines` 嚴格。CI 目前測 Node 22.x／24.x。
 
 ## 怎麼跑

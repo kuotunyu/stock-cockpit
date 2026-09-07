@@ -24,7 +24,8 @@ function pressKey(target, key, options = {}) {
 
 test("every authored dialog has an accessible name and each visible trigger declares its dialog", () => {
   const dialogs = [...app.doc.querySelectorAll('[role="dialog"]')];
-  assert.equal(dialogs.length, 10);
+  assert.equal(dialogs.length, 11);
+  assert.ok(app.doc.querySelector('#tradePlanModal [role="dialog"]'));
 
   for (const dialog of dialogs) {
     const labelledBy = dialog.getAttribute("aria-labelledby");

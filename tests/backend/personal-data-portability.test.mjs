@@ -327,12 +327,12 @@ test("export：只匯出登入者 canonical 資料，含 checksum／quarantine�
   exportedBundle = body.bundle;
 
   assert.equal(exportedBundle.format, "stock1-personal-backup");
-  assert.equal(exportedBundle.formatVersion, 1);
+  assert.equal(exportedBundle.formatVersion, 2);
   assert.deepEqual(exportedBundle.sourceAccount, {
     username: admin.username,
     displayName: admin.displayName,
   });
-  assert.deepEqual(exportedBundle.sourceRevisions, { watchLists: 5, alerts: 6, trades: 7 });
+  assert.deepEqual(exportedBundle.sourceRevisions, { watchLists: 5, alerts: 6, trades: 7, tradePlans: 0 });
   assert.deepEqual(exportedBundle.data.watchLists, { 1: ["2330", "0050"], 2: [], 3: [] });
   assert.equal(exportedBundle.data.alerts.length, 1);
   assert.equal(exportedBundle.data.trades.schemaVersion, 2);
@@ -509,11 +509,12 @@ test("restore：原子 replace 私有資料、保留 quarantine、安全 merge �
     }),
   }), 200);
   assert.equal(body.ok, true);
-  assert.deepEqual(body.revisions, { watchLists: 12, alerts: 13, trades: 14 });
+  assert.deepEqual(body.revisions, { watchLists: 12, alerts: 13, trades: 14, tradePlans: 0 });
   assert.deepEqual(body.applied, {
     watchLists: "replaced",
     alerts: "replaced",
     trades: "replaced",
+    tradePlans: "replaced",
     stockNotes: { added: 1, duplicates: 0 },
     companyProfiles: "skipped",
   });

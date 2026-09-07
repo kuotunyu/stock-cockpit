@@ -299,7 +299,7 @@ const authState = {
 let authScopeGeneration = 0;
 
 const PERSONAL_BACKUP_FORMAT = "stock1-personal-backup";
-const PERSONAL_BACKUP_FORMAT_VERSION = 1;
+const PERSONAL_BACKUP_FORMAT_VERSION = 2;
 const PERSONAL_BACKUP_MAX_FILE_BYTES = 16 * 1024 * 1024;
 const PERSONAL_RESTORE_OPTIONS = Object.freeze({
   watchLists: "replace",
@@ -1702,6 +1702,7 @@ function renderPersonalBackupPreview() {
   const watch = sections.watchLists || {};
   const alerts = sections.alerts || {};
   const trades = sections.trades || {};
+  const plans = sections.tradePlans || {};
   const notes = sections.stockNotes || {};
   const warnings = Array.isArray(response.plan?.warnings)
     ? response.plan.warnings
@@ -1741,6 +1742,7 @@ function renderPersonalBackupPreview() {
         <strong>新增 ${personalBackupCount(notes.addCount || 0)}</strong>
         <small>略過重複 ${personalBackupCount(notes.duplicateCount || 0)} 則</small>
       </article>
+      <article><span>交易計畫</span><strong>${personalBackupCount(plans.beforeCount)} → ${personalBackupCount(plans.afterCount)}</strong><small>${escapeHtml(plans.policy || '舊版備份未含計畫，保留目前計畫')}</small></article>
     </div>
     ${warningRows.length ? `<ul class="personal-backup-warnings">${warningRows.map((warning) => `<li>${warning}</li>`).join("")}</ul>` : ""}
   `;
@@ -1886,7 +1888,7 @@ async function previewPersonalBackupFile(input) {
     setPersonalBackupError("這不是 Stock1 個人備份格式，請選擇由本 App 下載的 JSON 檔。");
     return;
   }
-  if (!Number.isInteger(bundle.formatVersion) || bundle.formatVersion !== PERSONAL_BACKUP_FORMAT_VERSION) {
+  if (!Number.isInteger(bundle.formatVersion) || ![1, PERSONAL_BACKUP_FORMAT_VERSION].includes(bundle.formatVersion)) {
     const message = Number(bundle.formatVersion) > PERSONAL_BACKUP_FORMAT_VERSION
       ? `這份備份是較新版格式（版本 ${bundle.formatVersion}），請先更新 Stock1 再復原。`
       : "這份備份版本不受支援，請重新下載最新版備份。";
@@ -2011,6 +2013,7 @@ async function restorePersonalBackup() {
       loadWatchListsFromServer(),
       loadAlertsFromServer(),
       loadTradesFromServer(),
+      loadTradePlansFromServer(),
       loadNotesFeed(),
     ]);
     if (requestId !== personalBackupState.requestSeq || !isCurrentAuthScope(scope)) return;
@@ -2049,6 +2052,7 @@ function clearUserScopedState({ renderNow = true } = {}) {
   notesState.notes = [];
   authScopeGeneration += 1;
   resetPersonalBackupRestoreState({ closeModal: true });
+  resetTradePlansForAccount();
   authState.user = null;
 
   window.clearTimeout(watchListSyncTimer);
@@ -2643,6 +2647,183 @@ async function refreshBackgroundPriceAlerts() {
 // ===== 持股損益（完整交易紀錄）=====
 // 紀錄與設定存伺服器（每人一份）；損益引擎在後端（加權平均法），前端只把
 // 持股跟即時報價配對算未實現損益。任何寫入都走 PUT 整包同步，伺服器擋「賣超」。
+const tradePlansState = { plans: [], rev: 0, loaded: false, saving: false, requestSeq: 0, editorSeq: 0, editor: null, base: null };
+const tradePlanDrafts = new Map(); // 僅頁面記憶體，按帳號隔離；重新登入同帳號可取回未送出的草稿。
+let detailTradePlanContext = null;
+const TRADE_PLAN_FORM_FIELDS = ['code','exchange','strategy','status','entryPrice','stopPrice','targetPrice','quantity','expiresOn','entryLow','entryHigh','riskBudgetCash','invalidationReason','reason'];
+const TRADE_PLAN_NUMBER_FIELDS = ['entryPrice','stopPrice','targetPrice','quantity','entryLow','entryHigh','riskBudgetCash'];
+function tradePlanFromDisplayedPick(pick, strategy, publication) {
+  const exchange = ({tse:'TWSE',otc:'TPEx'})[pick?.exchange] || pick?.exchange || 'TWSE';
+  const scenario = pick?.scenario?.key || pick?.group || null;
+  const matches = (publication?.signals || []).filter(signal => signal.code === pick?.code && signal.exchange === exchange
+    && (signal.scenario?.key || signal.group || null) === scenario);
+  const saved = publication?.captureId && matches.length === 1 && matches[0].signalId ? matches[0] : null;
+  return { planId: crypto.randomUUID(), code: pick?.code || '', exchange, strategy, scenario,
+    signalId: saved?.signalId || null, sourceCaptureId: saved ? publication.captureId : null, status:'draft',
+    entryPrice: positivePriceOrNull(pick?.plan?.entry ?? pick?.price), stopPrice: positivePriceOrNull(pick?.plan?.structuralStop),
+    targetPrice: positivePriceOrNull(pick?.plan?.target), quantity:null, expiresOn:null, entryLow:null, entryHigh:null,
+    riskBudgetCash:null, invalidationReason:'', reason:'' };
+}
+function rememberTradePlanDraft() {
+  const form = document.getElementById('tradePlanForm');
+  if (!authState.user || !tradePlansState.editor || !form || form.hidden) return;
+  const draft = { ...tradePlansState.editor };
+  for (const key of TRADE_PLAN_FORM_FIELDS) {
+    const input = form.elements.namedItem(key);
+    if (!input) continue;
+    draft[key] = TRADE_PLAN_NUMBER_FIELDS.includes(key) ? input.value === '' ? null : Number(input.value) : key === 'expiresOn' ? input.value || null : input.value;
+  }
+  tradePlansState.editor = draft;
+  if (tradePlansState.base && JSON.stringify(draft) === JSON.stringify(tradePlansState.base)) { tradePlanDrafts.delete(authState.user.id); return; }
+  tradePlanDrafts.set(authState.user.id, { editor: draft, base: tradePlansState.base });
+}
+function closeTradePlans() {
+  rememberTradePlanDraft();
+  tradePlansState.editorSeq += 1;
+  closeDialogLayer(document.getElementById('tradePlanModal'));
+}
+function resetTradePlansForAccount() {
+  rememberTradePlanDraft();
+  const modal = document.getElementById('tradePlanModal');
+  if (modal && !modal.hidden) closeDialogLayer(modal, {restoreFocus:false});
+  tradePlansState.requestSeq += 1;
+  tradePlansState.editorSeq += 1;
+  Object.assign(tradePlansState,{plans:[],rev:0,loaded:false,saving:false,editor:null,base:null});
+  document.getElementById('tradePlanList')?.replaceChildren();
+  const form = document.getElementById('tradePlanForm');
+  form?.reset(); if (form) form.hidden = true;
+  const evidence = document.getElementById('tradePlanEvidence'); if(evidence) evidence.replaceChildren();
+}
+function applyTradePlansPayload(payload) {
+  tradePlansState.plans = Array.isArray(payload.plans) ? payload.plans : [];
+  tradePlansState.rev = Number(payload.rev) || 0;
+  tradePlansState.loaded = true;
+}
+async function loadTradePlansFromServer() {
+  if (!authState.user) return;
+  const scope = captureAuthScope(), seq = ++tradePlansState.requestSeq;
+  const payload = await fetchApi('/api/trade-plans');
+  if (!isCurrentAuthScope(scope) || seq !== tradePlansState.requestSeq || Number(payload.rev) < tradePlansState.rev) return;
+  applyTradePlansPayload(payload);
+}
+function renderTradePlanList() {
+  const list = document.getElementById('tradePlanList');
+  const names = {draft:'草稿',active:'啟用',closed:'結案',cancelled:'取消'};
+  list.innerHTML = tradePlansState.plans.length ? tradePlansState.plans.map(plan => `<button type="button" class="watch-secondary-action" data-trade-plan-edit="${escapeHtml(plan.planId)}"><strong>${escapeHtml(plan.code)} · ${plan.strategy === 'overnight' ? '隔日沖' : '波段'} · ${escapeHtml(names[plan.status] || plan.status)}</strong><span>有效停損 ${plan.stopPrice == null ? '未設定' : escapeHtml(String(plan.stopPrice))} · ${plan.revisions?.length || 0} 次修改</span></button>`).join('') : '<p>尚未保存計畫。草稿可留白，啟用時再確認價位、股數與有效期。</p>';
+}
+function renderTradePlanEditor() {
+  const form = document.getElementById('tradePlanForm'), plan = tradePlansState.editor;
+  form.hidden = !plan;
+  if (!plan) return;
+  const final = ['closed','cancelled'].includes(plan.status);
+  for (const key of TRADE_PLAN_FORM_FIELDS) {
+    const input = form.elements.namedItem(key);
+    input.value = plan[key] ?? '';
+    input.disabled = final || Boolean(tradePlansState.base && ['code','exchange','strategy'].includes(key)) || Boolean(plan.signalId && ['code','exchange','strategy'].includes(key));
+  }
+  for(const option of form.elements.status.options) option.disabled = tradePlansState.base?.status === 'active' && option.value === 'draft';
+  form.querySelector('[type=submit]').disabled = final || tradePlansState.saving;
+  document.getElementById('tradePlanError').textContent = '';
+  const evidence = document.getElementById('tradePlanEvidence');
+  const activation = plan.activation;
+  evidence.innerHTML = `<p>${plan.signalId ? '已連結當時顯示的保存訊號；以下價位仍須由你確認保存。' : '手動計畫：未連結已保存訊號。到價提醒不代表停損意圖。'}</p>
+    ${plan.provenance?.kind === 'imported' ? '<p>匯入計畫：歷史時間與訊號來源未驗證，無法確認事前真實性。</p>' : ''}
+    ${plan.initial ? `<details><summary>原始草稿與修改紀錄</summary><p>首次保存 ${escapeHtml(plan.createdAt)} · 原始停損 ${escapeHtml(String(plan.initial.intent.stopPrice ?? '未設定'))}</p>
+    <p>${activation ? `首次啟用停損 ${escapeHtml(String(activation.intent.stopPrice))} · 計畫價差風險 ${escapeHtml(String(activation.riskAmount))} 元（非實際成交 R 分母）` : '尚未建立首次啟用風險基準'}</p>
+    ${(plan.revisions || []).map(rev=>`<p>#${rev.revision} · ${escapeHtml(rev.recordedAt)} · 停損 ${escapeHtml(String(rev.intent.stopPrice ?? '未設定'))} · ${escapeHtml(rev.intent.reason)}</p>`).join('')}</details>` : ''}`;
+}
+async function openTradePlans(trigger = document.activeElement, create = false) {
+  if (!authState.user) { setLoginGateVisible(true, '登入後保存你的交易計畫'); return; }
+  const scope = captureAuthScope();
+  const editorSeq = ++tradePlansState.editorSeq;
+  const modal = document.getElementById('tradePlanModal');
+  openDialogLayer(modal, {opener:trigger, initialFocus:'[data-trade-plan-close]'});
+  const savedDraft = tradePlanDrafts.get(authState.user.id);
+  if (savedDraft) Object.assign(tradePlansState,savedDraft);
+  else if(create) {
+    const stock = getSelectedStock();
+    tradePlansState.editor = detailTradePlanContext?.code === state.selectedCode ? {...detailTradePlanContext,planId:crypto.randomUUID()} : tradePlanFromDisplayedPick(stock,'swing',null);
+    tradePlansState.base = null;
+  } else { tradePlansState.editor=null; tradePlansState.base=null; }
+  renderTradePlanEditor(); renderTradePlanList();
+  try { await loadTradePlansFromServer(); if(isCurrentAuthScope(scope)) renderTradePlanList(); }
+  catch(error) { if(isCurrentAuthScope(scope) && editorSeq === tradePlansState.editorSeq && !handleAuthRequired(error)) document.getElementById('tradePlanError').textContent=error.message; }
+}
+async function putTradePlanIntent(operation) {
+  const scope = captureAuthScope();
+  const build = () => {
+    const found = tradePlansState.plans.find(plan=>plan.planId===operation.planId);
+    if (!operation.isNew && !found) throw new Error('計畫已不存在，請保留草稿並重新確認');
+    if (operation.isNew && found) {
+      const equal=Object.entries(operation.changes).every(([key,value])=>JSON.stringify(found[key])===JSON.stringify(value));
+      if(!equal) throw new Error('此計畫 ID 已存在不同內容，請重新確認');
+      return tradePlansState.plans;
+    }
+    return operation.isNew ? [...tradePlansState.plans,operation.changes] : tradePlansState.plans.map(plan=>plan.planId===operation.planId?{...plan,...operation.changes}:plan);
+  };
+  for(let attempt=0;attempt<2;attempt+=1) {
+    try {
+      const payload=await fetchApi('/api/trade-plans',{method:'PUT',body:JSON.stringify({schemaVersion:1,rev:tradePlansState.rev,plans:build()})});
+      if(!isCurrentAuthScope(scope))throw authScopeChangedError();
+      tradePlansState.requestSeq+=1; applyTradePlansPayload(payload); return;
+    } catch(error) {
+      if(error.status!==409 || attempt || !isCurrentAuthScope(scope))throw error;
+      const latest=await fetchApi('/api/trade-plans');
+      if(!isCurrentAuthScope(scope))throw authScopeChangedError();
+      applyTradePlansPayload(latest);
+    }
+  }
+}
+async function submitTradePlan(event) {
+  event.preventDefault(); if(tradePlansState.saving || !authState.user) return;
+  rememberTradePlanDraft();
+  const scope=captureAuthScope(), draft={...tradePlansState.editor}, base=tradePlansState.base;
+  const editorSeq=tradePlansState.editorSeq;
+  const changes=base ? Object.fromEntries(TRADE_PLAN_FORM_FIELDS.filter(key=>JSON.stringify(draft[key])!==JSON.stringify(base[key])).map(key=>[key,draft[key]])) : draft;
+  tradePlansState.saving=true;
+  const button=document.querySelector('#tradePlanForm [type=submit]');button.disabled=true;
+  try {
+    // 最初載入失敗時不能以空清單覆蓋既有計畫。
+    if(!tradePlansState.loaded) await loadTradePlansFromServer();
+    if(!isCurrentAuthScope(scope))throw authScopeChangedError();
+    await putTradePlanIntent({planId:draft.planId,isNew:!base,changes});
+    if(!isCurrentAuthScope(scope))return;
+    const canonical=tradePlansState.plans.find(plan=>plan.planId===draft.planId);
+    if(editorSeq===tradePlansState.editorSeq){
+      tradePlanDrafts.delete(authState.user.id);
+      tradePlansState.editor=canonical;tradePlansState.base=canonical;
+    }else if(tradePlansState.editor?.planId===draft.planId){
+      tradePlansState.base=canonical;rememberTradePlanDraft();
+    }
+    showToast(editorSeq===tradePlansState.editorSeq ? '交易計畫已保存，原始意圖與首次啟用基準均保留' : '送出的版本已保存，後續修改尚未保存');
+    renderTradePlanList();
+  }catch(error){
+    if(!isCurrentAuthScope(scope))return;
+    if(!handleAuthRequired(error) && editorSeq===tradePlansState.editorSeq){
+      const message=document.getElementById('tradePlanError');message.textContent=error.message;message.focus();
+    }
+  }finally{if(isCurrentAuthScope(scope)){tradePlansState.saving=false;button.disabled=['closed','cancelled'].includes(tradePlansState.editor?.status);}}
+  if(isCurrentAuthScope(scope) && editorSeq===tradePlansState.editorSeq && tradePlansState.base===tradePlansState.editor)renderTradePlanEditor();
+}
+document.getElementById('tradePlanForm')?.addEventListener('submit',submitTradePlan);
+document.getElementById('tradePlanForm')?.addEventListener('input',()=>{tradePlansState.editorSeq+=1;rememberTradePlanDraft();});
+document.addEventListener('click',event=>{
+  if(event.target.id==='tradePlanModal'){closeTradePlans();return;}
+  const button=event.target.closest('[data-trade-plan-open],[data-trade-plan-new],[data-trade-plan-close],[data-trade-plan-edit]');
+  if(!button)return;
+  if(button.hasAttribute('data-trade-plan-open')){void openTradePlans(button,button.dataset.tradePlanOpen==='create');return;}
+  if(button.hasAttribute('data-trade-plan-close')){closeTradePlans();return;}
+  if(tradePlansState.saving)return;
+  tradePlansState.editorSeq+=1;
+  if(button.hasAttribute('data-trade-plan-new')){
+    tradePlansState.editor=tradePlanFromDisplayedPick({code:'',exchange:'TWSE'},'swing',null);tradePlansState.base=null;
+  }else{
+    const plan=tradePlansState.plans.find(item=>item.planId===button.dataset.tradePlanEdit);
+    tradePlansState.editor=plan?JSON.parse(JSON.stringify(plan)):null;tradePlansState.base=plan || null;
+  }
+  renderTradePlanEditor();rememberTradePlanDraft();
+});
+
 const tradesState = {
   schemaVersion: 2,
   settings: { feeDiscount: 0.6, minFee: 20 },
@@ -3717,6 +3898,7 @@ function syncDetailPanelLayout() {
 
 // 個股詳情面板開關走瀏覽器歷史：手機返回鍵會先關面板，而不是直接離開網站。
 function openDetailPanel(trigger = document.activeElement) {
+  if (!trigger?.closest?.('[data-overnight-code],[data-swing-code]')) detailTradePlanContext = null;
   if (el.detailPanel.classList.contains("is-open")) return;
   el.detailPanel.classList.add("is-open");
   if (!isDesktopDetailLayout()) {
@@ -6136,6 +6318,7 @@ async function loadOvernightSignals({ notify = false } = {}) {
     overnightState.asOf = payload.asOf;
     overnightState.source = payload.source;
     overnightState.groups = payload.groups;
+    overnightState.publication = payload.publication || null;
     overnightState.surveillanceCount = payload.surveillanceCount || 0;
     overnightState.warnings = payload.warnings || [];
     const picks = Object.values(payload.groups).flat();
@@ -6183,6 +6366,7 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
     strategyState.asOf = payload.asOf || "";
     strategyState.source = payload.source || "";
     strategyState.picks = payload.picks;
+    strategyState.publication = payload.publication || null;
     strategyState.scenarios = payload.scenarios || [];
     strategyState.matchedCount = payload.matchedCount || payload.picks.length;
     strategyState.candidateCount = payload.candidateCount || 0;
@@ -12074,6 +12258,9 @@ document.addEventListener("click", async (event) => {
   const overnightPick = event.target.closest("[data-overnight-code]");
   if (overnightPick) {
     const code = normalizeStockCodeInput(overnightPick.dataset.overnightCode);
+    const displayed = Object.values(overnightState.groups || {}).flat().filter(pick=>pick.code===code);
+    detailTradePlanContext = displayed.length === 1 && !overnightPick.classList.contains('verify-chip')
+      ? tradePlanFromDisplayedPick(displayed[0],'overnight',overnightState.publication) : null;
     await ensureStockForDetailCode(code);
     state.selectedCode = code;
     state.technicalCode = state.selectedCode;
@@ -12161,6 +12348,9 @@ document.addEventListener("click", async (event) => {
   const swingPick = event.target.closest("[data-swing-code]");
   if (swingPick) {
     const code = normalizeStockCodeInput(swingPick.dataset.swingCode);
+    const displayed = strategyState.picks.filter(pick=>pick.code===code && pick.scenario?.key===strategyState.scenario);
+    detailTradePlanContext = displayed.length===1 && !swingPick.classList.contains('inspect-open')
+      ? tradePlanFromDisplayedPick(displayed[0],'swing',strategyState.publication) : null;
     await ensureStockForDetailCode(code);
     state.selectedCode = code;
     state.technicalCode = state.selectedCode;
