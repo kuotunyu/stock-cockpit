@@ -2369,7 +2369,7 @@ async function loadAlertsFromServer() {
     priceAlertsState.alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
     priceAlertsState.rev = Number(payload.rev) || 0;
     priceAlertsState.loaded = true;
-    render();
+    renderLiveDataUpdate();
   } catch (error) {
     if (!isCurrentAuthScope(scope) || requestSeq !== alertLoadSeq) return;
     if (!handleAuthRequired(error)) showToast(`到價提醒同步失敗：${error.message}`);
@@ -2653,11 +2653,63 @@ async function refreshBackgroundPriceAlerts() {
 // ===== 持股損益（完整交易紀錄）=====
 // 紀錄與設定存伺服器（每人一份）；損益引擎在後端（加權平均法），前端只把
 // 持股跟即時報價配對算未實現損益。任何寫入都走 PUT 整包同步，伺服器擋「賣超」。
-const tradePlansState = { plans: [], rev: 0, loaded: false, saving: false, requestSeq: 0, editorSeq: 0, editor: null, base: null };
+const tradePlansState = { plans: [], rev: 0, loaded: false, saving: false, requestSeq: 0, editorSeq: 0, editor: null, base: null, linkEvidence: {} };
 const tradePlanDrafts = new Map(); // 僅頁面記憶體，按帳號隔離；重新登入同帳號可取回未送出的草稿。
 let detailTradePlanContext = null;
 const TRADE_PLAN_FORM_FIELDS = ['code','exchange','strategy','status','entryPrice','stopPrice','targetPrice','quantity','expiresOn','entryLow','entryHigh','riskBudgetCash','invalidationReason','reason'];
 const TRADE_PLAN_NUMBER_FIELDS = ['entryPrice','stopPrice','targetPrice','quantity','entryLow','entryHigh','riskBudgetCash'];
+function tradePlanDelta(before, after) {
+  const delta=Object.fromEntries(TRADE_PLAN_FORM_FIELDS.filter(key=>JSON.stringify(before[key])!==JSON.stringify(after[key])).map(key=>[key,after[key]]));
+  if(JSON.stringify(before.review)!==JSON.stringify(after.review)) delta.review=after.review===null?null:Object.fromEntries(['decision','reason'].filter(key=>before.review?.[key]!==after.review?.[key]).map(key=>[key,after.review[key]]));
+  if(JSON.stringify(before.tradeLinks || [])!==JSON.stringify(after.tradeLinks || [])) delta.linkChanges={
+    remove:(before.tradeLinks || []).filter(link=>!(after.tradeLinks || []).some(item=>item.tradeId===link.tradeId)).map(link=>link.tradeId),
+    upsert:(after.tradeLinks || []).filter(link=>JSON.stringify(link)!==JSON.stringify((before.tradeLinks || []).find(item=>item.tradeId===link.tradeId))) };
+  return delta;
+}
+function applyTradePlanDelta(plan, changes) {
+  const {linkChanges,review,...flat}=changes, next={...plan,...flat};
+  if(Object.hasOwn(changes,'review')) next.review=review===null?null:{...(plan.review || {}),...review};
+  if(linkChanges) next.tradeLinks=[...(plan.tradeLinks || []).filter(link=>!linkChanges.remove.includes(link.tradeId)&&!linkChanges.upsert.some(item=>item.tradeId===link.tradeId)),...linkChanges.upsert];
+  return next;
+}
+function formatTradePlanTime(value) {
+  return formatPortfolioRiskTime(String(value || '').replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3'));
+}
+function tradePlanSourceLabel(value) { return ({manual:'手填',estimated:'估算',broker:'券商',legacy:'舊資料'})[value] || '未知'; }
+function tradePlanBrokerLabel(value) { return !value || ['default','unknown','legacy-unknown'].includes(value)?'尚未確認券商帳號':value; }
+function tradePlanTradeLabel(record) { return record?`${formatTradePlanTime(record.date)} ${record.side==='buy'?'買入':'賣出'} × ${record.price}`:'尚未核對來源'; }
+function renderTradePlanLinkChoices() {
+  const form=document.getElementById('tradePlanForm'),plan=tradePlansState.editor;if(!form || !plan)return;
+  const select=form.elements.linkTradeId,selected=select.value;
+  select.innerHTML='<option value="">選擇已登錄成交</option>'+tradesState.records.filter(record=>record.code===plan.code&&record.market===plan.exchange&&['buy','sell'].includes(record.side)).map(record=>`<option value="${escapeHtml(record.id)}">${escapeHtml(formatTradePlanTime(record.date))} ${record.side==='buy'?'買入':'賣出'} ${escapeHtml(String(record.shares))} 股 × ${escapeHtml(String(record.price))} · ${escapeHtml(tradePlanBrokerLabel(record.brokerAccountId))}</option>`).join('');
+  select.value=selected;
+  document.getElementById('tradePlanLinkDraft').innerHTML=(plan.tradeLinks || []).map(link=>`<p>${escapeHtml(tradePlanTradeLabel(link.snapshot || tradesState.records.find(record=>record.id===link.tradeId)))} · ${escapeHtml(String(link.allocatedShares))} 股 <button type="button" class="watch-secondary-action" data-trade-link-remove="${escapeHtml(link.tradeId)}">解除關聯</button></p>`).join('');
+}
+function renderTradePlanReviewEvidence(plan) {
+  const e=tradePlansState.linkEvidence?.[plan.planId];
+  const money=value=>value==null?'未知':`${value<0?'−':''}${formatNumber(Math.abs(value),2)} 元`;
+  const intent=item=>`進場 ${escapeHtml(String(item?.entryPrice ?? '未設定'))} · 停損 ${escapeHtml(String(item?.stopPrice ?? '未設定'))} · ${escapeHtml(String(item?.quantity ?? '未設定'))} 股<p>目標 ${escapeHtml(String(item?.targetPrice ?? '未設定'))} · 有效期 ${escapeHtml(item?.expiresOn?.replaceAll('-','/') || '未設定')}</p><p>${escapeHtml(item?.invalidationReason || '')}</p><p>${escapeHtml(item?.reason || '')}</p>`;
+  const statuses={valid:'有效關聯','source-changed':'来源成交已修正，關聯失效','source-deleted':'來源成交已刪除，關聯失效'};
+  return `<details class="trade-plan-comparison"><summary>原始計畫、目前計畫與實際成交對照</summary>
+    <div class="trade-plan-compare-grid"><section><h3>原始計畫</h3>${intent(plan.initial?.intent)}</section><section><h3>目前計畫</h3>${intent(plan)}${plan.revisions?.length?`<details><summary>歷次經濟意圖修改</summary>${plan.revisions.map(rev=>`<p>#${rev.revision} · ${escapeHtml(formatTradePlanTime(rev.recordedAt))}</p>${intent(rev.intent)}`).join('')}</details>`:''}</section><section><h3>實際成交／費稅</h3><p>已關聯買入 ${e?.buyShares ?? '未知'} 股／賣出 ${e?.sellShares ?? '未知'} 股</p><p>買入支出 ${money(e?.buyCash)} · 賣出收入 ${money(e?.sellCash)}</p><p>已關聯現金差額 ${money(e?.cashDifference)}</p></section></div>
+    <p>名詞：${glossLink('達標率','達標與淨獲利')} · ${glossLink('淨獲利','達標與淨獲利')} · ${glossLink('R','事後 netR')} · ${glossLink('成本','成本敏感度')} · ${glossLink('基準','比較基準')} · ${glossLink('coverage','資料覆蓋')}</p><p>完整計畫報酬與 netR：未知。現金差額不等於完整損益；部分／未平倉、失效關聯、公司行動及股利應收／實收覆蓋不足，不能當成帳戶報酬。</p>
+    <p>按實際買入分配與首次啟用停損的原始價差風險：${money(e?.originalRiskCash)}。僅按帳本輸入的成交時間比較本機首次啟用時間，未經交易所獨立驗證；未含退出費稅／跳空，非完整最大損失。日期只有日的歷史成交，不猜秒數先後。</p>
+    <p>${e?.reasons?.includes('broker-account-unconfirmed')?'尚未確認券商帳號，不能據此確認成交都來自同一券商帳戶。':''}</p>
+    ${(e?.links || []).map(link=>`<p>${escapeHtml(statuses[link.status] || '尚未核對')} · ${escapeHtml(formatTradePlanTime(link.snapshot.date))} ${link.snapshot.timePrecision==='date-only'?'（僅日期）':'（帳本輸入時間）'} · ${link.snapshot.side==='buy'?'買入':'賣出'} ${escapeHtml(String(link.allocatedShares))} 股 × ${escapeHtml(String(link.snapshot.price))}<br>原成交費用 ${money(link.snapshot.fee)}（${tradePlanSourceLabel(link.snapshot.feeSource)}）／稅 ${money(link.snapshot.tax)}（${tradePlanSourceLabel(link.snapshot.taxSource)}）；按分配股數比例分攤，不另估稅或費率。</p>`).join('')}
+    <details><summary>關聯與檢討修改紀錄（${plan.metadataRevisions?.length || 0} 次）</summary>${(plan.metadataRevisions || []).map(rev=>`<p>#${rev.revision} · ${escapeHtml(formatTradePlanTime(rev.recordedAt))} · ${escapeHtml(rev.review?.reason || '調整成交關聯')} · ${(rev.tradeLinks || []).map(link=>`${escapeHtml(link.tradeId)} ${escapeHtml(String(link.allocatedShares))} 股`).join('、') || '無關聯'}</p>`).join('')}</details>
+  </details>`;
+}
+document.addEventListener('click',event=>{
+  const button=event.target.closest('[data-trade-link-add],[data-trade-link-remove]');if(!button||!tradePlansState.editor||tradePlansState.saving)return;
+  rememberTradePlanDraft();const plan=tradePlansState.editor,form=document.getElementById('tradePlanForm');
+  if(button.hasAttribute('data-trade-link-remove'))plan.tradeLinks=(plan.tradeLinks || []).filter(link=>link.tradeId!==button.dataset.tradeLinkRemove);
+  else {
+    const tradeId=form.elements.linkTradeId.value,allocatedShares=Number(form.elements.linkShares.value);
+    if(!tradeId||!Number.isSafeInteger(allocatedShares)||allocatedShares<=0){document.getElementById('tradePlanError').textContent='請選成交並填正整數股數';return;}
+    plan.tradeLinks=[...(plan.tradeLinks || []).filter(link=>link.tradeId!==tradeId),{tradeId,allocatedShares}];
+  }
+  tradePlansState.editorSeq+=1;rememberTradePlanDraft();renderTradePlanLinkChoices();
+});
 function tradePlanFromDisplayedPick(pick, strategy, publication) {
   const exchange = ({tse:'TWSE',otc:'TPEx'})[pick?.exchange] || pick?.exchange || 'TWSE';
   const scenario = pick?.scenario?.key || pick?.group || null;
@@ -2679,6 +2731,9 @@ function rememberTradePlanDraft() {
     if (!input) continue;
     draft[key] = TRADE_PLAN_NUMBER_FIELDS.includes(key) ? input.value === '' ? null : Number(input.value) : key === 'expiresOn' ? input.value || null : input.value;
   }
+  const decision=form.elements.reviewDecision?.value || '';
+  const reviewReason=form.elements.reviewReason.value;
+  draft.review=decision||reviewReason?{...(draft.review || {}),decision,reason:reviewReason}:null;
   tradePlansState.editor = draft;
   if (tradePlansState.base && JSON.stringify(draft) === JSON.stringify(tradePlansState.base)) { tradePlanDrafts.delete(authState.user.id); return; }
   tradePlanDrafts.set(authState.user.id, { editor: draft, base: tradePlansState.base });
@@ -2694,14 +2749,17 @@ function resetTradePlansForAccount() {
   if (modal && !modal.hidden) closeDialogLayer(modal, {restoreFocus:false});
   tradePlansState.requestSeq += 1;
   tradePlansState.editorSeq += 1;
-  Object.assign(tradePlansState,{plans:[],rev:0,loaded:false,saving:false,editor:null,base:null});
+  Object.assign(tradePlansState,{plans:[],rev:0,loaded:false,saving:false,editor:null,base:null,linkEvidence:{}});
   document.getElementById('tradePlanList')?.replaceChildren();
   const form = document.getElementById('tradePlanForm');
   form?.reset(); if (form) form.hidden = true;
+  form?.elements.linkTradeId?.replaceChildren();
+  document.getElementById('tradePlanLinkDraft')?.replaceChildren();
   const evidence = document.getElementById('tradePlanEvidence'); if(evidence) evidence.replaceChildren();
 }
 function applyTradePlansPayload(payload) {
   tradePlansState.plans = Array.isArray(payload.plans) ? payload.plans : [];
+  tradePlansState.linkEvidence = payload.linkEvidence || {};
   tradePlansState.rev = Number(payload.rev) || 0;
   tradePlansState.loaded = true;
   holdingsPlanRiskState.error = '';
@@ -2730,15 +2788,18 @@ function renderTradePlanEditor() {
     input.disabled = final || Boolean(tradePlansState.base && ['code','exchange','strategy'].includes(key)) || Boolean(plan.signalId && ['code','exchange','strategy'].includes(key));
   }
   for(const option of form.elements.status.options) option.disabled = tradePlansState.base?.status === 'active' && option.value === 'draft';
-  form.querySelector('[type=submit]').disabled = final || tradePlansState.saving;
+  form.elements.reviewDecision.value=plan.review?.decision || '';
+  form.elements.reviewReason.value=plan.review?.reason || '';
+  form.querySelector('[type=submit]').disabled = tradePlansState.saving;
+  renderTradePlanLinkChoices();
   document.getElementById('tradePlanError').textContent = '';
   const evidence = document.getElementById('tradePlanEvidence');
   const activation = plan.activation;
   evidence.innerHTML = `<p>${plan.signalId ? '已連結當時顯示的保存訊號；以下價位仍須由你確認保存。' : '手動計畫：未連結已保存訊號。到價提醒不代表停損意圖。'}</p>
     ${plan.provenance?.kind === 'imported' ? '<p>匯入計畫：歷史時間與訊號來源未驗證，無法確認事前真實性。</p>' : ''}
-    ${plan.initial ? `<details><summary>原始草稿與修改紀錄</summary><p>首次保存 ${escapeHtml(plan.createdAt)} · 原始停損 ${escapeHtml(String(plan.initial.intent.stopPrice ?? '未設定'))}</p>
+    ${plan.initial ? `<details><summary>原始草稿與修改紀錄</summary><p>首次保存 ${escapeHtml(formatTradePlanTime(plan.createdAt))} · 原始停損 ${escapeHtml(String(plan.initial.intent.stopPrice ?? '未設定'))}</p>
     <p>${activation ? `首次啟用停損 ${escapeHtml(String(activation.intent.stopPrice))} · 計畫價差風險 ${escapeHtml(String(activation.riskAmount))} 元（非實際成交 R 分母）` : '尚未建立首次啟用風險基準'}</p>
-    ${(plan.revisions || []).map(rev=>`<p>#${rev.revision} · ${escapeHtml(rev.recordedAt)} · 停損 ${escapeHtml(String(rev.intent.stopPrice ?? '未設定'))} · ${escapeHtml(rev.intent.reason)}</p>`).join('')}</details>` : ''}`;
+    ${(plan.revisions || []).map(rev=>`<p>#${rev.revision} · ${escapeHtml(formatTradePlanTime(rev.recordedAt))} · 停損 ${escapeHtml(String(rev.intent.stopPrice ?? '未設定'))} · ${escapeHtml(rev.intent.reason)}</p>`).join('')}</details>` : ''}${renderTradePlanReviewEvidence(plan)}`;
 }
 async function openTradePlans(trigger = document.activeElement, create = false) {
   if (!authState.user) { setLoginGateVisible(true, '登入後保存你的交易計畫'); return; }
@@ -2758,7 +2819,7 @@ async function openTradePlans(trigger = document.activeElement, create = false) 
     tradePlansState.base = null;
   } else { tradePlansState.editor=null; tradePlansState.base=null; }
   renderTradePlanEditor(); renderTradePlanList();
-  try { await loadTradePlansFromServer(); if(isCurrentAuthScope(scope)) renderTradePlanList(); }
+  try { await loadTradePlansFromServer(); if(isCurrentAuthScope(scope)) {renderTradePlanList();renderTradePlanLinkChoices();} }
   catch(error) { if(isCurrentAuthScope(scope) && editorSeq === tradePlansState.editorSeq && !handleAuthRequired(error)) document.getElementById('tradePlanError').textContent=error.message; }
 }
 async function putTradePlanIntent(operation) {
@@ -2771,7 +2832,7 @@ async function putTradePlanIntent(operation) {
       if(!equal) throw new Error('此計畫 ID 已存在不同內容，請重新確認');
       return tradePlansState.plans;
     }
-    return operation.isNew ? [...tradePlansState.plans,operation.changes] : tradePlansState.plans.map(plan=>plan.planId===operation.planId?{...plan,...operation.changes}:plan);
+    return operation.isNew ? [...tradePlansState.plans,operation.changes] : tradePlansState.plans.map(plan=>plan.planId===operation.planId?applyTradePlanDelta(plan,operation.changes):plan);
   };
   for(let attempt=0;attempt<2;attempt+=1) {
     try {
@@ -2791,7 +2852,7 @@ async function submitTradePlan(event) {
   rememberTradePlanDraft();
   const scope=captureAuthScope(), draft={...tradePlansState.editor}, base=tradePlansState.base;
   const editorSeq=tradePlansState.editorSeq;
-  const changes=base ? Object.fromEntries(TRADE_PLAN_FORM_FIELDS.filter(key=>JSON.stringify(draft[key])!==JSON.stringify(base[key])).map(key=>[key,draft[key]])) : draft;
+  const changes=base ? tradePlanDelta(base,draft) : draft;
   tradePlansState.saving=true;
   const button=document.querySelector('#tradePlanForm [type=submit]');button.disabled=true;
   try {
@@ -2809,23 +2870,21 @@ async function submitTradePlan(event) {
       // 409 可能合併其他分頁的新欄位。只重放送出後新增的編輯，不能把舊表單
       // 整包掛到新 base，否則下次保存會將未碰過的舊值當成使用者修改。
       rememberTradePlanDraft();
-      const laterChanges=Object.fromEntries(TRADE_PLAN_FORM_FIELDS
-        .filter(key=>JSON.stringify(tradePlansState.editor[key])!==JSON.stringify(draft[key]))
-        .map(key=>[key,tradePlansState.editor[key]]));
+      const laterChanges=tradePlanDelta(draft,tradePlansState.editor);
       hasUnsentChanges=Object.keys(laterChanges).length>0;
       tradePlansState.base=canonical;
-      tradePlansState.editor=hasUnsentChanges?{...canonical,...laterChanges}:canonical;
+      tradePlansState.editor=hasUnsentChanges?applyTradePlanDelta(canonical,laterChanges):canonical;
       renderTradePlanEditor();
       rememberTradePlanDraft();
     }
-    showToast(hasUnsentChanges ? '送出的版本已保存，後續修改尚未保存' : '交易計畫已保存，原始意圖與首次啟用基準均保留');
+    showToast(hasUnsentChanges ? '送出的版本已保存，後續修改尚未保存' : '交易計畫已保存，原始意圖與首次啟用基準均保留',undefined,'trade-plan-saved');
     renderTradePlanList();
   }catch(error){
     if(!isCurrentAuthScope(scope))return;
     if(!handleAuthRequired(error) && editorSeq===tradePlansState.editorSeq){
       const message=document.getElementById('tradePlanError');message.textContent=error.message;message.focus();
     }
-  }finally{if(isCurrentAuthScope(scope)){tradePlansState.saving=false;button.disabled=['closed','cancelled'].includes(tradePlansState.editor?.status);}}
+  }finally{if(isCurrentAuthScope(scope)){tradePlansState.saving=false;button.disabled=false;}}
   if(isCurrentAuthScope(scope) && editorSeq===tradePlansState.editorSeq && tradePlansState.base===tradePlansState.editor)renderTradePlanEditor();
 }
 document.getElementById('tradePlanForm')?.addEventListener('submit',submitTradePlan);
@@ -3235,6 +3294,15 @@ async function putTrades(next) {
   if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
   if (payload?.ok === false) throw new Error(payload.error || "儲存失敗");
   applyTradesPayload(payload);
+  tradePlansState.linkEvidence={};
+  if(tradePlansState.loaded) {
+    try { await loadTradePlansFromServer(); if(isCurrentAuthScope(scope) && tradePlansState.editor) {
+      const evidence=document.getElementById('tradePlanEvidence');if(evidence) evidence.innerHTML=renderTradePlanReviewEvidence(tradePlansState.editor);
+      renderTradePlanLinkChoices();
+    } } catch(error) { if(isCurrentAuthScope(scope) && !handleAuthRequired(error)) {
+      document.getElementById('tradePlanEvidence')?.replaceChildren();showToast('帳本已保存，成交關聯尚未重新核對，請重新開啟計畫');
+    } }
+  }
 }
 
 // 蓋寫防護的重放：409（別的分頁改過）→ 先同步最新版，再把「這一次的操作」重放一次。
@@ -7433,6 +7501,7 @@ function hasActiveListFilters() {
 }
 
 function renderRows(container, list, screen = state.screen) {
+  syncQuoteTableSemantics(container);
   if (!list.length) {
     // 還在第一次載入時顯示載入中，避免被誤會成「真的沒有符合的股票」。
     // 用三列固定高度的 skeleton 撐住版面（列高與真實 .stock-row 相同），文字給讀屏。
@@ -7460,6 +7529,30 @@ function renderRows(container, list, screen = state.screen) {
     return;
   }
   container.innerHTML = list.map((stock) => rowTemplate(stock, screen)).join("");
+  syncQuoteTableSemantics(container);
+}
+
+function syncQuoteTableSemantics(container) {
+  const table=container.closest('.table-scroller');if(!table)return;
+  table.setAttribute('role','table');table.setAttribute('aria-label','行情比較');container.setAttribute('role','rowgroup');
+  const head=table.querySelector('.table-head');head.setAttribute('role','row');
+  for(const item of [...head.children])if(item.getAttribute('role')!=='columnheader') {
+    const header=document.createElement('div');header.className='quote-column-header';header.setAttribute('role','columnheader');item.replaceWith(header);header.append(item);
+  }
+  for(const header of head.children){const button=header.querySelector('[data-sort]');if(button?.dataset.sort===state.sort)header.setAttribute('aria-sort',state.sortDir==='asc'?'ascending':'descending');else header.removeAttribute('aria-sort');}
+  for(let row of [...container.querySelectorAll('.stock-row:not(.is-skeleton)')]) {
+    if(row.tagName==='BUTTON') {const replacement=document.createElement('div');for(const attr of row.attributes)if(attr.name!=='type')replacement.setAttribute(attr.name,attr.value);replacement.append(...row.childNodes);row.replaceWith(replacement);row=replacement;}
+    row.setAttribute('role','row');row.tabIndex=-1;
+    const watch=row.querySelector('.watch-row-select');if(watch){watch.replaceWith(...watch.childNodes);}
+    for(const cell of row.querySelectorAll('.stock-cell'))cell.setAttribute('role','cell');
+    const first=row.querySelector('.stock-main');
+    if(first&&!first.querySelector('.quote-stock-open')) {
+      const button=document.createElement('button');button.type='button';button.className='quote-stock-open';button.dataset.code=row.dataset.code;
+      if(row.classList.contains('watch-stock-row'))button.classList.add('watch-row-select');
+      const name=first.querySelector('.stock-name');button.setAttribute('aria-label',`查看 ${name?.textContent?.trim() || row.dataset.code}`);if(name){name.replaceWith(button);button.append(name);}
+    }
+    const action=row.querySelector('.watch-select-box');if(action){const cell=document.createElement('span');cell.setAttribute('role','cell');action.replaceWith(cell);cell.append(action);}
+  }
 }
 
 function renderStrategies() {
@@ -8718,6 +8811,16 @@ function buildDateTicks(visible) {
   });
 }
 
+function renderChartOhlc(canvas,data,visible) {
+  const target=document.getElementById(canvas===el.technicalChart?'technicalOhlc':canvas===el.zoomChartCanvas?'zoomOhlc':'');if(!target)return;
+  const values=visible.map(candle=>`<tr><th scope="row">${escapeHtml(String(candle.date).replace(/^(\d{4})(\d{2})(\d{2})$/,'$1/$2/$3').replaceAll('-','/'))}</th>${['open','high','low','close'].map(key=>`<td>${escapeHtml(String(finiteNumberOrNull(candle[key]) ?? '--'))}</td>`).join('')}</tr>`).join('');
+  const open=target.open, focus=target.querySelector('summary')===document.activeElement?'summary':target.querySelector('.ohlc-scroller')===document.activeElement?'.ohlc-scroller':null;
+  const region=target.querySelector('.ohlc-scroller'), scrollTop=region?.scrollTop || 0, scrollLeft=region?.scrollLeft || 0;
+  const html=`<summary>讀取本圖日期與 OHLC 資料</summary><p>${escapeHtml(data?.code || '')} ${escapeHtml(formatTechnicalPeriod(data?.period || 'day'))} · 與當下 K 線相同的座標與可見範圍。已還原／估算與缺漏依圖表原資料；不是歷史實際成交价。</p><div class="ohlc-scroller" tabindex="0" role="region" aria-label="本圖 OHLC 資料，可水平捲動"><table><caption>當下可見 ${visible.length} 根 K 線</caption><thead><tr><th scope="col">日期</th><th scope="col">開</th><th scope="col">高</th><th scope="col">低</th><th scope="col">收</th></tr></thead><tbody>${values}</tbody></table></div>`;
+  if(target._ohlcHtml===html)return;target._ohlcHtml=html;target.innerHTML=html;target.open=open;
+  const updated=target.querySelector('.ohlc-scroller');updated.scrollTop=scrollTop;updated.scrollLeft=scrollLeft;if(focus)target.querySelector(focus)?.focus({preventScroll:true});
+}
+
 function drawTechnicalChart(data, options = {}) {
   const canvas = options.canvas || el.technicalChart;
   if (!canvas) return null;
@@ -8729,6 +8832,7 @@ function drawTechnicalChart(data, options = {}) {
   context.fillRect(0, 0, width, height);
 
   if (!data?.candles?.length) {
+    renderChartOhlc(canvas,null,[]);
     context.fillStyle = "#b8cadc";
     context.font = "700 18px Microsoft JhengHei, sans-serif";
     context.textAlign = "center";
@@ -8763,6 +8867,7 @@ function drawTechnicalChart(data, options = {}) {
   const viewEnd = Number.isInteger(options.viewEnd) ? Math.max(viewStart, Math.min(options.viewEnd, total - 1)) : total - 1;
   const isFullView = viewStart === 0 && viewEnd === total - 1;
   const visible = candles.slice(viewStart, viewEnd + 1);
+  renderChartOhlc(canvas,data,visible);
   const visN = Math.max(1, visible.length);
   const step = chartWidth / Math.max(1, visN - 1);
   const candleWidth = Math.max(3, Math.min(options.enlarged ? 16 : 9, step * 0.64));
@@ -11310,11 +11415,13 @@ function renderSearchResults(query = searchState.query) {
   el.searchResults.innerHTML = `${localHtml}${remoteHtml}${statusHtml}`;
 }
 
-function showToast(message, duration) {
+function showToast(message, duration, replaceKey) {
   const stack = document.getElementById("toastStack");
   if (!stack) return;
+  if(replaceKey)for(const prior of stack.querySelectorAll('[data-toast-key]'))if(prior.dataset.toastKey===replaceKey)prior.remove();
   const toast = document.createElement("div");
   toast.className = "toast";
+  if(replaceKey)toast.dataset.toastKey=replaceKey;
   // 每則各自是一個 status：容器 aria-atomic=false，新增一則時讀屏只唸新的，不重唸整個堆疊。
   toast.setAttribute("role", "status");
   toast.textContent = message;
@@ -12857,11 +12964,13 @@ function initCanvasResizeObserver() {
     [el.priceChart?.parentElement, "detail"],
     [el.technicalChart?.closest(".technical-chart-card"), "technical"],
     [el.zoomChartStage, "zoom"],
+    [document.querySelector('.bottom-nav'), "nav"],
   ].filter(([target]) => target));
   canvasResizeObserver = new window.ResizeObserver((entries) => {
     entries.forEach((entry) => {
       const kind = targetKinds.get(entry.target);
-      if (kind) scheduleCanvasRedraw(kind);
+      if (kind === 'nav') document.documentElement.style.setProperty('--bottom-nav-height',`${entry.target.getBoundingClientRect().height}px`);
+      else if (kind) scheduleCanvasRedraw(kind);
     });
   });
   targetKinds.forEach((_kind, target) => canvasResizeObserver.observe(target));
@@ -12910,6 +13019,9 @@ window.addEventListener("popstate", (event) => {
 // def 內含刻意排版的 HTML（<strong> 等）→ 輸出時不 escape；term/aliases/分類值才 escape。
 const GLOSSARY_CATS = ["畫面說明", "看盤基礎", "隔日沖（短線）", "策略雷達（波段）", "技術指標", "風險與制度", "成績單與決策"];
 const GLOSSARY = [
+  {term:'達標與淨獲利',aliases:['達標率','淨獲利'],cat:'成績單與決策',def:'達標是價格達到事先設定的目標；淨獲利是在完整已知成本後損益大於零。達標不保證能成交或獲利，未達標也可能以正報酬結束。日 K 的觸價只是價格觀察；實際計畫只有完整成交、費稅與公司行動資料才能計算完整淨損益。'},
+  {term:'資料覆蓋',aliases:['coverage'],cat:'成績單與決策',def:'已具備資料的範圍與完整母體相比。股數、市值、日期與成本各有自己的分母；來源缺漏不能填成零，部分關聯成交不能代表完整計畫損益。'},
+  {term:'比較基準',aliases:['基準'],cat:'成績單與決策',def:'必須先固定比較期間、母體、成本與資料可用時間。候選池同期間價格觀察差，不等於原停損策略超額收益，也不是帳戶資產曲線。'},
   // —— 畫面說明（原本只在分頁的 title 提示裡，手機沒有 hover 看不到）——
   { term: "隔日沖（畫面）", aliases: ["隔日沖頁", "隔日沖"], cat: "畫面說明", def: "看<strong>訊號日收盤後</strong>的短線型態，觀察<strong>實際下一交易日</strong>的慣性（通常抱約 1 個交易日）。「總覽」把三種型態合在一起看；「策略表現」是候選股自身的歷史統計，不是前向驗證。和「策略雷達」的波段（抱數天～數週、附完整進出場計畫）是不同維度的工具。" },
   { term: "強勢續攻／爆量高危／回檔轉強（分頁）", aliases: ["分頁"], cat: "畫面說明", def: "<strong>強勢續攻</strong>：訊號日收盤強勢（收在高檔、量能放大、站上均線）。<strong>爆量高危</strong>：今天爆量、振幅大或收盤轉弱的高風險股，用來提醒控管追高（看當天，不是買進建議）。<strong>回檔轉強</strong>：小漲收紅、守住短均、回檔後重新轉強。三群平行判定，同一檔可能同時進兩群。" },
@@ -13363,6 +13475,8 @@ if (el.zoomCrosshairCanvas) {
 }
 document.addEventListener("keydown", (event) => {
   if (!el.technicalZoomModal || el.technicalZoomModal.hidden || topDialogLayer() !== el.technicalZoomModal) return;
+  // OHLC 文字表格保留原生捲動鍵；焦點回到圖表控制項時仍使用既有快捷鍵。
+  if (event.target.closest?.("#zoomOhlc")) return;
   // 畫線模式時，方向鍵/縮放鍵交給瀏覽器，避免和放點衝突的誤觸（保留 Delete 刪除 hover 線）。
   if (drawState.tool !== "cursor") {
     if ((event.key === "Delete" || event.key === "Backspace") && drawState.hoverId) {

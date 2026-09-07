@@ -369,7 +369,7 @@ export async function createBrowserFixture({ scenario, setupFailure } = {}) {
   let browser;
   let context;
   let page;
-  let textZoomCss = "";
+  const textZoomCss = "";
   let textZoomVersion = 0;
   let traceActive = false;
   let closed = false;
@@ -464,53 +464,69 @@ export async function createBrowserFixture({ scenario, setupFailure } = {}) {
         return url.origin === new URL(server.baseUrl).origin && url.pathname === "/api/markets";
       }, { timeout: 15_000 });
       await response.finished();
-      await page.evaluate(() => new Promise((resolveFrame) => requestAnimationFrame(() => resolveFrame())));
+      await page.evaluate(async () => { await new Promise(requestAnimationFrame); await window.__stock1BrowserTextZoom?.running; });
     },
     emulateTextZoom: async (factor, trackedSelectors = [".swing-nm", ".swing-stat strong", ".swing-open", ".swing-plan-alerts"]) => {
-      const setup = await page.evaluate(({zoomFactor, trackedSelectors}) => {
-        window.__stock1BrowserTextZoomBases ||= new WeakMap();
-        const baseSizes = window.__stock1BrowserTextZoomBases;
-        const tracked = trackedSelectors.map((selector) => {
-          const node = document.querySelector(selector);
-          const before = node
-            ? (baseSizes.get(node) || Number.parseFloat(getComputedStyle(node).fontSize))
-            : 0;
-          return { selector, before };
-        });
-        const elements = [...document.body.querySelectorAll("*")];
-        const originalSizes = elements.map((node) => baseSizes.get(node) || Number.parseFloat(getComputedStyle(node).fontSize));
-        const rules = [];
-        elements.forEach((node, index) => {
-          const size = originalSizes[index];
-          if (!Number.isFinite(size) || size <= 0) return;
-          baseSizes.set(node, size);
-          node.dataset.browserTextZoom = String(index);
-          rules.push(`[data-browser-text-zoom="${index}"]{font-size:${size * zoomFactor}px !important}`);
-        });
-        return {
-          rules: rules.join("\n"),
-          tracked,
-        };
-      }, {zoomFactor:factor,trackedSelectors});
-      textZoomCss = setup.rules;
-      textZoomVersion += 1;
-      await page.evaluate((version) => new Promise((resolveLoad, rejectLoad) => {
-        const link = document.createElement("link");
-        link.rel = "stylesheet";
-        link.href = `/__browser-text-zoom.css?v=${version}`;
-        link.onload = resolveLoad;
-        link.onerror = () => rejectLoad(new Error("測試用文字放大樣式載入失敗"));
-        document.head.append(link);
-      }), textZoomVersion);
-      await page.evaluate(() => new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))));
-      const measurements = await page.evaluate((tracked) => tracked.map(({ selector, before }) => {
-        const node = document.querySelector(selector);
-        return {
-          selector,
-          before,
-          after: node ? Number.parseFloat(getComputedStyle(node).fontSize) : 0,
-        };
-      }), setup.tracked);
+      // A single same-origin sheet obeys the product CSP. Re-measure natural sizes
+      // after child replacement, so live polling retains real text zoom.
+      if (!textZoomVersion) {
+        textZoomVersion = 1;
+        await page.evaluate(() => new Promise((resolveLoad, rejectLoad) => {
+          const link = document.createElement("link");
+          link.id = "browserTextZoomStyles";
+          link.rel = "stylesheet";
+          link.href = "/__browser-text-zoom.css";
+          link.onload = resolveLoad;
+          link.onerror = () => rejectLoad(new Error("測試用文字放大樣式載入失敗"));
+          document.head.append(link);
+        }));
+      }
+      const tracked = await page.evaluate(async ({ factor, selectors }) => {
+        if (!window.__stock1BrowserTextZoom) {
+          const zoom = { factor: 1, bases: new WeakMap() };
+          const sheet = document.getElementById("browserTextZoomStyles").sheet;
+          zoom.frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          zoom.request = () => {
+            zoom.pending = true;
+            if (zoom.running) return zoom.running;
+            zoom.running = (async () => {
+              while (zoom.pending) {
+                zoom.pending = false;
+                sheet.ownerNode.media = "not all";
+                // Chromium can retain the previous computed size through the first
+                // frame after a mobile reflow. Read the unscaled cascade after paint.
+                await zoom.frames();
+                while (sheet.cssRules.length) sheet.deleteRule(0);
+                const nodes = [...document.body.querySelectorAll("*")];
+                const sizes = nodes.map(node => Number.parseFloat(getComputedStyle(node).fontSize));
+                nodes.forEach((node, index) => {
+                  const size = sizes[index];
+                  if (!Number.isFinite(size) || size <= 0) return;
+                  zoom.bases.set(node, size);
+                  // Keep fixture markers out of the product's data-* focus identity.
+                  node.setAttribute("browser-text-zoom", String(index));
+                  sheet.insertRule(`[browser-text-zoom="${index}"]{font-size:${size * zoom.factor}px !important}`, sheet.cssRules.length);
+                });
+                sheet.ownerNode.media = "all";
+                await zoom.frames();
+              }
+            })().finally(() => { zoom.running = null; });
+            return zoom.running;
+          };
+          zoom.observer = new MutationObserver(() => zoom.request());
+          zoom.observer.observe(document.body, { childList: true, subtree: true });
+          window.__stock1BrowserTextZoom = zoom;
+        }
+        const zoom = window.__stock1BrowserTextZoom;
+        zoom.factor = factor;
+        await zoom.request();
+        return selectors.map(selector => ({selector, before: zoom.bases.get(document.querySelector(selector)) || 0}));
+      }, {factor, selectors: trackedSelectors});
+      await page.evaluate(() => new Promise(resolveFrame => requestAnimationFrame(() => requestAnimationFrame(resolveFrame))));
+      const measurements = await page.evaluate(tracked => tracked.map(({selector, before}) => ({
+        selector, before,
+        after: Number.parseFloat(getComputedStyle(document.querySelector(selector)).fontSize),
+      })), tracked);
       for (const item of measurements) {
         assert.ok(item.before > 0, `文字放大目標不存在：${item.selector}`);
         assert.ok(Math.abs(item.after / item.before - factor) < 0.01, `${item.selector} 字級倍率應為 ${factor}x，實際 ${item.after / item.before}`);
@@ -526,6 +542,7 @@ export async function createBrowserFixture({ scenario, setupFailure } = {}) {
       }
     },
     captureSnapshot: async (name) => {
+      await page.evaluate(async () => { await window.__stock1BrowserTextZoom?.running; });
       await mkdir(ARTIFACT_DIR, { recursive: true });
       await page.screenshot({ path: resolve(ARTIFACT_DIR, `${name}.png`) });
     },
@@ -539,6 +556,7 @@ export async function createBrowserFixture({ scenario, setupFailure } = {}) {
           await context.tracing.stop();
           traceActive = false;
         },
+        async () => { if (!page.isClosed()) await page.evaluate(() => window.__stock1BrowserTextZoom?.observer.disconnect()); },
         () => page.close(),
         () => context.close(),
         () => browser.close(),

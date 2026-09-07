@@ -210,3 +210,20 @@ node --test tests/backend/verification-cost-sensitivity.test.mjs tests/backend/v
 ```powershell
 node --test tests/backend/verification-holding-return.test.mjs tests/backend/verification-holding-source.test.mjs tests/backend/verification-corporate-actions.test.mjs tests/backend/swing-verify.test.mjs
 ```
+
+
+### T11 計畫成交關聯、檢討與局部可及性
+
+`trade-plan-links` 同檔包含純規格及真正 HTTP 帳本／計畫保存：部分買入、分批賣出、未進場、結案後修正 metadata、跨計畫份額、來源修正／刪除、同帳號／市場／券商、queue 中最新來源與重新驗證登入。備份測試經實際匯出／預覽／復原核對將還原的帳本，保存已失效快照與檢討歷史，兼容缺新欄位的舊 v2。時間按台北成交日與帶時區的使用者輸入；等於首次啟用時間不能建立事前原風險。完整公司行動與應收覆蓋未知時，不把已關聯現金差額當完整計畫報酬或 netR。
+
+`trade-plan-review` DOM 鎖結案經濟意圖唯讀、檢討仍可改、409 delta 重放、字串跳脫、帳號清除、行情表格角色／aria-sort、OHLC 視窗與保存 toast 去重。Chromium 同名檔驗七項導覽於四寬／100%及200%實際文字的標籤矩形與手機底部留白；由實際計畫表單走部分成交、結案、修正來源、重新關聯與未進場。另驗日／週 K 及放大視窗的 OHLC、鍵盤縮放／R 復位；用可見 rows 完成條件等待 rAF，不以任意 sleep 取代。幾何巡檢從獨立計畫列表開啟；手機詳情父層在切到桌面時原本會關閉，不將此當作新 modal 管理方式。
+
+```powershell
+node --test tests/backend/trade-plan-links.test.mjs tests/frontend/trade-plan-review.test.mjs
+npm test
+npm run test:browser
+```
+
+產物 `test-results/browser/t11-*` 包含對照、成交／檢討及 OHLC 截圖。保存通知按正常計時自然消失後才截可讀內容，不由測試刪除通知 DOM。44px 是常用操作的產品目標；WCAG 2.2 AA SC 2.5.8 的最小目標是24×24 CSS px並有例外。這些案例驗特定流程，不宣稱整站 WCAG 認證。
+
+`fixture-lifecycle` 釘住真輪詢替换 DOM 後仍維持 200% 字級、100→200 往返不累乘，以及延遲提醒 API 回應後原生處置卡片回焦／草稿保留。文字放大 helper 僅用同源測試 stylesheet；手機重排停用後等兩幀讀天然字級，合併 childList 更新並等待收斂，不關閉輪詢或放寬產品 CSP。OHLC reader 用原生方向鍵捲動；圖表控制區仍驗加號與 R，首次操作說明以正常關閉完成。

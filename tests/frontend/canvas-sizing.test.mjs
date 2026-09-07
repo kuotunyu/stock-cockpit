@@ -286,10 +286,10 @@ test("ResizeObserver 與 window resize 在同一 frame 合併為每種可見圖�
     })())`));
 
     assert.equal(observerShape.instanceCount, 1, "全站應共用一個 ResizeObserver");
-    assert.equal(observerShape.targetCount, 3, "應觀察 detail、technical、zoom 三個穩定容器");
+    assert.equal(observerShape.targetCount, 4, "觀察 detail、technical、zoom 與固定導覽高度");
     assert.deepEqual(
       observerShape.targets.map((target) => target.id),
-      ["", "", "zoomChartStage"],
+      ["", "", "zoomChartStage", ""],
     );
     assert.match(observerShape.targets[0].className, /detail-chart-wrap/);
     assert.match(observerShape.targets[1].className, /technical-chart-card/);

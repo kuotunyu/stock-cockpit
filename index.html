@@ -257,6 +257,7 @@
             </header>
             <div class="technical-chart-markers" id="technicalChartMarkers" hidden></div>
             <canvas id="technicalChart" class="technical-price-canvas" width="980" height="560" role="button" tabindex="0" aria-label="放大技術分析 K 線圖" title="點一下放大，可拖曳查看每根 K 棒"></canvas>
+            <details id="technicalOhlc" class="chart-ohlc"></details>
             <div class="technical-macd-panel">
               <div class="technical-macd-head">
                 <strong>MACD</strong>
@@ -547,6 +548,7 @@
             <button data-draw-action="clear" type="button" title="清除全部畫線" aria-label="清除全部畫線"><i data-lucide="trash-2"></i></button>
           </div>
         </div>
+        <details id="zoomOhlc" class="chart-ohlc"></details>
       </section>
     </div>
 
@@ -730,7 +732,19 @@
             <label>失效條件<textarea name="invalidationReason" maxlength="1000" rows="2"></textarea></label>
           </details>
           <label>建立／修改原因<textarea name="reason" maxlength="1000" rows="3"></textarea></label>
-          <p>首次啟用需完整進場價、低於進場價的停損、股數與未過期有效期。啟用後可上移停損；結案或取消後不再改寫。</p>
+          <p>首次啟用需完整進場價、低於進場價的停損、股數與未過期有效期。啟用後可上移停損；結案或取消後不再改寫經濟意圖；仍可補登成交與檢討。結案不代表股利或款項全部到帳。</p>
+          <details class="trade-plan-review-fields"><summary>成交關聯與檢討（可先記未進場）</summary>
+            <p>從本人帳本選擇實際成交與本計畫分配股數。部分成交只列已關聯現金；持股風險的預計股數覆蓋另行顯示。</p>
+            <div class="trade-plan-grid">
+              <label>來源成交<select name="linkTradeId" aria-label="來源成交"></select></label>
+              <label>分配股數<input name="linkShares" type="number" min="1" step="1"></label>
+            </div>
+            <button type="button" class="watch-secondary-action" data-trade-link-add>加入／重新核對關聯</button>
+            <div id="tradePlanLinkDraft"></div>
+            <label>檢討分類<select name="reviewDecision"><option value="">尚未分類</option><option value="conditions-changed">條件變了</option><option value="execution-deviation">執行偏離</option><option value="insufficient-data">資料不足</option><option value="no-entry">未進場／取消</option></select></label>
+            <label>檢討或未進場原因<textarea name="reviewReason" maxlength="1000" rows="3"></textarea></label>
+            <p>不把每次虧損歸咎執行。關聯與檢討各次保存保留歷史，合計最多 100 次修改，每計畫最多 100 筆關聯；仍受完整 120 KiB 容量限制。</p>
+          </details>
           <button type="submit" class="more-primary">保存計畫</button>
         </form>
       </section>

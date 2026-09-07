@@ -29,7 +29,7 @@ test('交易計畫在四尺寸與200%可操作，保存/移停/草稿/回焦與�
   assert.equal(payload.plans[0].activation.intent.stopPrice,95);assert.equal(payload.plans[0].stopPrice,102);
   await form.locator('[name=reason]').fill('未送出的私人草稿');await fixture.advancePollingCycle();
   assert.equal(await form.locator('[name=reason]').inputValue(),'未送出的私人草稿');
-  const summary=form.locator('summary');await summary.focus();await page.keyboard.press('Enter');assert.equal(await summary.evaluate(n=>n.parentElement.open),true);
+  const summary=form.getByText('進場區間、風險預算與失效條件',{exact:true});await summary.focus();await page.keyboard.press('Enter');assert.equal(await summary.evaluate(n=>n.parentElement.open),true);
   for(const width of [375,768,1280,1440])for(const factor of [1,2]){
    await page.setViewportSize({width,height:1000});await fixture.emulateTextZoom(factor,['#tradePlanForm [type=submit]']);
    const boxes=await modal.locator('input:visible,select:visible,textarea:visible,button:visible').evaluateAll(nodes=>nodes.map(n=>({width:n.getBoundingClientRect().width,left:n.getBoundingClientRect().left,right:n.getBoundingClientRect().right,height:n.getBoundingClientRect().height})));
