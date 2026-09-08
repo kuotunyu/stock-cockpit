@@ -221,7 +221,7 @@ npm run backup "D:\OneDrive\stock1-backup"
 
 `npm run backup` 載入 `.env`；命令列目標優先於 `STOCK1_BACKUP_DIR`，不會自動記住。直接 `node scripts/backup.mjs` 時，DATA_DIR／DB_PATH 必須由環境提供（僅 APP_SECRET 保留讀 `.env` 的備援）。自訂 DB_PATH 必須在 canonical DATA_DIR 內且父目錄已存在；CLI 會顯示實際解析路徑。包內 `stock1-db.json` 永遠是該現役主檔，不能憑包內檔名推定原主檔路徑。
 
-備份全程持有與 server 相同的 writer leases；服務仍在執行或備份中重啟服務會明確拒絕。這是**停止寫入後的一致備份**，不提供熱備份。每次先寫入唯一 `.stock1-backup-incomplete-*` 暫存目錄，JSON、長度、SHA-256 與 manifest 全部核對後，才 rename 發布 `stock1-backup-日期時間-UUID` 成功包。失敗不覆寫或輪替舊包；只輪替已驗證的新格式成功包，保留最新 30 份。異常中断殘留的 incomplete 目錄不是成功包。
+備份全程持有與 server 相同的 writer leases；服務仍在執行或備份中重啟服務會明確拒絕。這是**停止寫入後的一致備份**，不提供熱備份。每次先寫入唯一 `.stock1-backup-incomplete-*` 暫存目錄，JSON、長度、SHA-256 與 manifest 全部核對後，才 rename 發布 `stock1-backup-日期時間-UUID` 成功包。失敗不覆寫或輪替舊包；只輪替已驗證的新格式成功包，保留最新 30 份；與現役 canonical DATA_DIR 重疊的目錄永遠排除，不計入這 30 份。異常中断殘留的 incomplete 目錄不是成功包。
 
 `manifest.json` 記錄格式版本、時間、stopped-writer 一致性、檔案清單與 hash、是否剝除券商憑證，不記錄密鑰或來源私密路徑。弱／未設定 APP_SECRET 時移除券商憑證；強密鑰時保留加密內容，**APP_SECRET 與券商憑證檔須另行安全保管**，不在此包內。風險 last-good 快取與同地 backups 不收錄；基本面歷史不可重建，必須保留。
 

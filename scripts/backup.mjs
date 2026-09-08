@@ -90,18 +90,28 @@ export async function verifyMachineBackup(directory) {
   return manifest;
 }
 
-async function rotate(destRoot) {
+async function rotate(destRoot, canonicalSourceDir) {
+  const overlapsSource = async (directory) => {
+    const canonical = await realpath(directory);
+    return within(canonical, canonicalSourceDir) || within(canonicalSourceDir, canonical);
+  };
   const complete = [];
   for (const entry of await readdir(destRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || !PACKAGE_NAME.test(entry.name)) continue;
     try {
-      const manifest = await verifyMachineBackup(join(destRoot, entry.name));
+      const directory = join(destRoot, entry.name);
+      // 使用者可能直接從已還原的成功包啟動；來源即使仍通過 manifest 驗證也不是輪替候選。
+      if (await overlapsSource(directory)) continue;
+      const manifest = await verifyMachineBackup(directory);
       complete.push({ name: entry.name, createdAt: manifest.createdAt });
     } catch { /* 不自動刪除不可驗證或舊格式的包。 */ }
   }
   complete.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.name.localeCompare(b.name));
   for (const item of complete.slice(0, Math.max(0, complete.length - KEEP))) {
-    await rm(join(destRoot, item.name), { recursive: true });
+    const directory = join(destRoot, item.name);
+    // 刪除前再以 canonical identity 確認，不只依掃描時的名稱或路徑前綴。
+    if (await overlapsSource(directory)) continue;
+    await rm(directory, { recursive: true });
   }
 }
 
@@ -148,7 +158,7 @@ async function backup(target) {
     finally { await lease.release(); }
   }
   // 發布失敗絕不走到輪替；輪替自身失敗不把已成功發布的包誤報成失敗。
-  try { await rotate(destRoot); }
+  try { await rotate(destRoot, lease.canonicalDataDir); }
   catch { console.warn("[Stock1] 備份已發布，但舊包輪替失敗；請保留並人工檢查。"); }
   console.log(`[Stock1] 備份完成 → ${published}`);
   console.log(`  僅輪替已驗證的新格式成功包，保留最新 ${KEEP} 份；舊格式包不自動刪除。`);

@@ -253,4 +253,4 @@ npm run test:browser
 
 ## 整機備份一致性回歸
 
-`node --test tests/backend/backup*.test.mjs` 驗證現役 DB_PATH、同分鐘重跑、失敗時舊包 bytes 不變、optional 缺失、manifest hash、成功包輪替與 canonical junction 邊界。`backup-fs-preload.mjs` 只由測試的 `--import` 載入，透過窄 filesystem 注入控制 read/write/fsync/rename 失敗與 CLI 持鎖時序，產品沒有測試環境後門。真 CLI 與 port 0 server 分程序互斥，並由 bootServer 建立帳本、計畫及正式發布，再停止原服務、還原到新隔離 DB_PATH，以獨立程序驗已載入欄位及基本面。lease-only context 另驗同模組重入與 idempotent release。全程不載入正式 `.env` 或 `.data`。
+`node --test tests/backend/backup*.test.mjs` 驗證現役 DB_PATH、同分鐘重跑、失敗時舊包 bytes 不變、optional 缺失、manifest hash、成功包輪替與 canonical junction 邊界，並驗證現役 DATA_DIR 本身是有效成功包時仍不會被輪替刪除（含來源 junction alias）。`backup-fs-preload.mjs` 只由測試的 `--import` 載入，透過窄 filesystem 注入控制 read/write/fsync/rename 失敗與 CLI 持鎖時序，產品沒有測試環境後門。真 CLI 與 port 0 server 分程序互斥，並由 bootServer 建立帳本、計畫及正式發布，再停止原服務、還原到新隔離 DB_PATH，以獨立程序驗已載入欄位及基本面。lease-only context 另驗同模組重入與 idempotent release。全程不載入正式 `.env` 或 `.data`。

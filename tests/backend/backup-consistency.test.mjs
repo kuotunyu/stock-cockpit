@@ -174,3 +174,44 @@ test("成功才輪替 30 份已驗證的新包，舊分鐘包與不完整包保�
     assert.equal(await readFile(join(incomplete, "partial"), "utf8"), "leave-alone");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("輪替排除本身是有效成功包的現役 DATA_DIR，canonical alias 同樣保留來源且其他包維持 30 份", async () => {
+  const { cp } = await import("node:fs/promises");
+  const { randomUUID } = await import("node:crypto");
+  const root = await mkdtemp(join(tmpdir(), "stock1-machine-source-retention-"));
+  try {
+    const seed = join(root, "seed"), target = join(root, "target");
+    await mkdir(seed);
+    await writeFile(join(seed, "stock1-db.json"), '{"users":[],"trades":{"fixture":"keep-source"}}');
+    await writeFile(join(seed, "fundamentals-cache.json"), '{"revenue":{"fixture":100}}');
+    assert.equal((await cli(seed, target).closed).code, 0);
+    const [initial] = await readdir(target);
+    const source = join(target, `stock1-backup-20000101T000000000Z-${randomUUID()}`);
+    await cp(join(target, initial), source, { recursive: true });
+    const sourceManifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8"));
+    sourceManifest.createdAt = "2000-01-01T00:00:00.000Z";
+    await writeFile(join(source, "manifest.json"), JSON.stringify(sourceManifest));
+    for (let index = 0; index < 29; index++) {
+      const createdAt = new Date(Date.now() - (index + 1) * 60000).toISOString();
+      const name = `stock1-backup-${createdAt.replace(/[-:.]/g, "")}-${randomUUID()}`;
+      const destination = join(target, name);
+      await cp(join(target, initial), destination, { recursive: true });
+      const manifest = JSON.parse(await readFile(join(destination, "manifest.json"), "utf8"));
+      manifest.createdAt = createdAt;
+      await writeFile(join(destination, "manifest.json"), JSON.stringify(manifest));
+    }
+    assert.equal((await readdir(target)).length, 31);
+    await verifyMachineBackup(source);
+    const before = await tree(source);
+    const alias = join(root, "source-alias");
+    await symlink(source, alias, process.platform === "win32" ? "junction" : "dir");
+    for (const dataDir of [source, alias]) {
+      const result = await cli(dataDir, target).closed;
+      assert.equal(result.code, 0, result.out + result.err);
+      assert.match(result.out, /備份完成/);
+      assert.deepEqual(await tree(source), before, "現役來源目錄與所有 bytes 必須原封不動");
+      assert.equal((await readdir(target)).length, 31, "來源不計入可輪替成功包，其他包保留 30 份");
+      await verifyMachineBackup(source);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
