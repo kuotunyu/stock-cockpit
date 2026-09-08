@@ -250,3 +250,7 @@ npm run test:browser
 `verification-compression-diagnostics` 另驗真實 >32 MiB 完成 raw、純 pack 原物件不變、完成狀態章 COW 與冷讀 hash，以及公開 1 日診斷的 before/after 聚合。新完成超限保存 skipped-size 章；舊 raw 為 legacy-or-unclassified，不自動遷移。knownBytes／knownCount 與 unknownCount 分開，packed 不 inflate，舊 raw 不為統計序列化。
 
 `observation-source-provenance` 驗較早日僅存在官方月 K 的缺章→恢復、direct quote 原來源與正值、close-only 不冒充 price，以及真 getQuotes 的 Yahoo fallback 不變正式 final；原官方整批恢復與 MIS intraday 各有來源／phase 斷言。
+
+## 整機備份一致性回歸
+
+`node --test tests/backend/backup*.test.mjs` 驗證現役 DB_PATH、同分鐘重跑、失敗時舊包 bytes 不變、optional 缺失、manifest hash、成功包輪替與 canonical junction 邊界。`backup-fs-preload.mjs` 只由測試的 `--import` 載入，透過窄 filesystem 注入控制 read/write/fsync/rename 失敗與 CLI 持鎖時序，產品沒有測試環境後門。真 CLI 與 port 0 server 分程序互斥，並由 bootServer 建立帳本、計畫及正式發布，再停止原服務、還原到新隔離 DB_PATH，以獨立程序驗已載入欄位及基本面。lease-only context 另驗同模組重入與 idempotent release。全程不載入正式 `.env` 或 `.data`。

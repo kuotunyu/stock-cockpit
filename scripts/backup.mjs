@@ -1,34 +1,23 @@
-// npm run backup [目標資料夾]：把「不可重建」的資料複製到這顆硬碟以外的地方。
-//
-// 為什麼需要：`.data/backups/` 的 14 份日備份**跟主檔在同一個資料夾、同一顆硬碟**。
-// 它防的是「檔案寫壞」，完全不防「硬碟掛掉／資料夾被誤刪／同步衝突」。
-// 而這個 App 裡最不能重來的東西恰好不是交易帳本（那還有券商對帳單可以對），是：
-//   • swingVerification：前向驗證紀錄。它記的是「當時看得到什麼」，**本質上不能重算**。
-//   • fundamentals-cache：月營收／EPS 的歷史累積——官方 API 只回最新一期，
-//     過去的期數是這個 App 一天一天存下來的，刪掉就真的沒有了。
-//   • surveillance-history：處置看板的每日快照，「新進／連 N 天」都靠它。
-// 所以這支的目標是異地，不是又一份同地備份。
-//
-// 用法：
-//   npm run backup "D:\\OneDrive\\stock1-backup"     指定目標（第一次用這個）
-//   npm run backup                                    之後可改設環境變數 STOCK1_BACKUP_DIR
-//
-// 工作排程器用 npm.cmd 完整路徑、引數 run backup "目標資料夾"、起始位置填專案資料夾；
-// 省略目標時需事先設定 STOCK1_BACKUP_DIR，命令列指定過的目標不會自動記住。
-import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+// 整機異地備份：停止服務後取得同一組 writer leases，驗證完整暫存包才發布。
+import { mkdir, mkdtemp, readFile, readdir, rm, lstat, realpath, open, rename } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const dataDir = process.env.DATA_DIR || join(root, ".data");
 const KEEP = 30;
+const SOURCES = ["stock1-db.json", "fundamentals-cache.json", "surveillance-history.json"];
+const FORMAT = "stock1-machine-backup";
+const PACKAGE_NAME = /^stock1-backup-\d{8}T\d{9}Z-[a-f0-9-]{36}$/;
+const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const identity = (path) => process.platform === "win32" ? path.toLowerCase() : path;
+function within(parent, child) {
+  const rel = relative(identity(parent), identity(child));
+  return !rel || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
 
-// APP_SECRET 沒設（或還是範例值、太短）時，DB 裡的券商憑證是用公開 repo 裡寫死的金鑰加密的，
-// 等同明文：身分證字號、富邦登入密碼、憑證密碼。把它複製到雲端同步資料夾等於把這些送出去，
-// 所以這種情況預設剝掉 brokerCredentials（其餘完整）。npm run backup 會載入 .env；
-// 直接 node 執行時，下面另有 APP_SECRET 的 .env 讀取備援（不等於載入全部環境變數）。
-const UNSAFE_SECRETS = new Set(["", "replace-with-a-long-random-secret"]);
+// npm run backup 載入完整 .env；直接 node 執行維持既有 APP_SECRET 備援。
 function readAppSecret() {
   if (process.env.APP_SECRET !== undefined) return String(process.env.APP_SECRET);
   const envFile = process.env.STOCK1_ENV_FILE || join(root, ".env");
@@ -39,133 +28,161 @@ function readAppSecret() {
   }
   return "";
 }
-const appSecret = readAppSecret().trim();
-const appSecretWeak = UNSAFE_SECRETS.has(appSecret) || appSecret.length < 32;
 
-// 只帶不可重建的。risk-cache.json 是純 last-good 快取（重抓就有），backups/ 是同地備援
-// （異地備份的情境是「本機整個沒了」，那時一份完整主檔就夠），兩者都刻意不帶。
-const SOURCES = [
-  { file: "stock1-db.json", label: "主資料庫（交易帳本、前向驗證、自選股、備註、帳號）", required: true },
-  { file: "fundamentals-cache.json", label: "月營收／EPS 歷史累積（官方只回最新一期）", required: false },
-  { file: "surveillance-history.json", label: "處置看板每日快照（新進／連 N 天靠它）", required: false },
-];
-
-function stamp() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
-}
-
-function usage(message) {
-  console.error("");
-  console.error(`[Stock1] ${message}`);
-  console.error("");
-  console.error("  用法：npm run backup \"D:\\\\OneDrive\\\\stock1-backup\"");
-  console.error("        （或設環境變數 STOCK1_BACKUP_DIR 之後直接 npm run backup）");
-  console.error("");
-  console.error("  請選一個**不在這顆硬碟上**的位置：雲端同步資料夾、外接硬碟、NAS。");
-  console.error("  放在專案裡或同一顆硬碟等於沒有備份——那正是 .data/backups/ 已經在做的事。");
-  console.error("");
-  process.exitCode = 1;
-}
-
-const target = process.argv[2] || process.env.STOCK1_BACKUP_DIR || "";
-if (!target) {
-  usage("沒有指定備份目標資料夾。");
-} else if (resolve(target).toLowerCase().startsWith(resolve(root).toLowerCase())) {
-  // 備份到專案自己裡面是最常見的誤用，而且完全達不到目的——直接擋下來。
-  usage(`目標 ${resolve(target)} 在專案資料夾內，這樣沒有異地效果。`);
-} else if (!existsSync(dataDir)) {
-  usage(`找不到資料目錄 ${dataDir}——這台機器還沒跑過這個 App 嗎？`);
-} else {
-  const destRoot = resolve(target);
-  const destination = join(destRoot, `stock1-backup-${stamp()}`);
-  // 時間戳只到分鐘，所以同一分鐘內重跑會落在同一個資料夾。這本身沒問題（等同覆蓋），
-  // 但**失敗時的清理不可以把別人的成果刪掉**：若這個資料夾在本次執行前就存在，
-  // 裡面可能是一分鐘前那次成功的備份，中止時只能原封不動退出。
-  const destinationPreexisted = existsSync(destination);
-  await mkdir(destination, { recursive: true });
-
-  const copied = [];
-  let failed = false;
-  let strippedBroker = false;
-  for (const source of SOURCES) {
-    const from = join(dataDir, source.file);
-    if (!existsSync(from)) {
-      if (source.required) {
-        console.error(`[Stock1] 找不到 ${source.file}，備份中止（這是主資料庫）。`);
-        failed = true;
-        break;
-      }
-      console.log(`  略過 ${source.file}（這台還沒產生這個檔，正常）`);
-      continue;
-    }
-    const to = join(destination, source.file);
-    if (source.file === "stock1-db.json" && appSecretWeak) {
-      let parsed;
-      try {
-        parsed = JSON.parse(await readFile(from, "utf8"));
-      } catch (error) {
-        console.error(`[Stock1] ${source.file} 無法解析（${error.message}）——來源可能已損壞，備份中止。`);
-        failed = true;
-        break;
-      }
-      if (parsed && typeof parsed === "object" && parsed.brokerCredentials) {
-        delete parsed.brokerCredentials;
-        strippedBroker = true;
-      }
-      await writeFile(to, JSON.stringify(parsed));
-    } else {
-      await copyFile(from, to);
-    }
-    // 複製完一定要重讀＋解析一次：**parse 不了的備份不是備份**。
-    // 這也順便擋住「主檔已經壞掉了，卻把壞檔複製過去蓋掉好備份」這個更糟的情況。
+// 先解析最近存在的祖先，拒絕 junction／symlink 指進來源，再建立目的地。
+async function prospectiveCanonical(path) {
+  try { return await realpath(path); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
     try {
-      JSON.parse(await readFile(to, "utf8"));
-    } catch (error) {
-      console.error(`[Stock1] ${source.file} 複製後無法解析（${error.message}）——來源可能已損壞，備份中止。`);
-      failed = true;
-      break;
-    }
-    const { size } = await stat(to);
-    copied.push({ file: source.file, label: source.label, size });
+      await lstat(path);
+      throw Object.assign(new Error("目的地含懸空連結"), { code: "BACKUP_TARGET_UNSAFE" });
+    } catch (entryError) { if (entryError.code !== "ENOENT") throw entryError; }
+    return join(await prospectiveCanonical(dirname(path)), relative(dirname(path), path));
   }
-
-  if (failed) {
-    if (destinationPreexisted) {
-      console.error(`[Stock1] ${destination} 在這次執行前就存在，保留不動（裡面可能是先前成功的備份）。`);
-    } else {
-      await rm(destination, { recursive: true, force: true });
+}
+async function destinationRoot(target, sourceDir) {
+  const project = await realpath(root);
+  const check = (path) => {
+    if (within(sourceDir, path) || within(project, path)) {
+      throw Object.assign(new Error("備份目的地不可位於 DATA_DIR 或專案資料夾內"), { code: "BACKUP_TARGET_UNSAFE" });
     }
+  };
+  check(await prospectiveCanonical(resolve(target)));
+  await mkdir(resolve(target), { recursive: true });
+  const canonical = await realpath(resolve(target));
+  check(canonical);
+  return canonical;
+}
+async function writeDurable(path, bytes) {
+  const file = await open(path, "wx", 0o600);
+  try { await file.writeFile(bytes); await file.sync(); }
+  finally { await file.close(); }
+}
+function parseObject(bytes) {
+  const value = JSON.parse(bytes.toString("utf8"));
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("備份來源必須是 JSON 物件");
+  return value;
+}
+
+// 僅完整、可辨識的新包可輪替；舊分鐘包與不完整／損壞包留給使用者核對。
+export async function verifyMachineBackup(directory) {
+  const manifestInfo = await lstat(join(directory, "manifest.json"));
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || manifestInfo.nlink !== 1) throw new Error("不安全的 manifest");
+  const manifest = parseObject(await readFile(join(directory, "manifest.json")));
+  if (manifest.format !== FORMAT || manifest.version !== 1 || manifest.consistency !== "stopped-writer"
+      || !Number.isFinite(Date.parse(manifest.createdAt)) || typeof manifest.brokerCredentialsStripped !== "boolean"
+      || !Array.isArray(manifest.files) || manifest.files.length < 1 || manifest.files.length > SOURCES.length
+      || manifest.files[0].file !== SOURCES[0]) throw new Error("無法辨識完整整機備份包");
+  const seen = new Set();
+  for (const item of manifest.files) {
+    if (!SOURCES.includes(item.file) || seen.has(item.file) || item.format !== "json"
+        || !Number.isSafeInteger(item.bytes) || item.bytes < 0 || !/^[a-f0-9]{64}$/.test(item.sha256)) throw new Error("備份 manifest 檔案清單無效");
+    seen.add(item.file);
+    const info = await lstat(join(directory, item.file));
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error("備份檔案不是獨立一般檔案");
+    const bytes = await readFile(join(directory, item.file));
+    parseObject(bytes);
+    if (bytes.length !== item.bytes || hash(bytes) !== item.sha256) throw new Error("備份雜湊或長度不符");
+  }
+  const names = await readdir(directory);
+  if (names.length !== seen.size + 1 || names.some(name => name !== "manifest.json" && !seen.has(name))) throw new Error("備份包有未登錄檔案");
+  return manifest;
+}
+
+async function rotate(destRoot) {
+  const complete = [];
+  for (const entry of await readdir(destRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !PACKAGE_NAME.test(entry.name)) continue;
+    try {
+      const manifest = await verifyMachineBackup(join(destRoot, entry.name));
+      complete.push({ name: entry.name, createdAt: manifest.createdAt });
+    } catch { /* 不自動刪除不可驗證或舊格式的包。 */ }
+  }
+  complete.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.name.localeCompare(b.name));
+  for (const item of complete.slice(0, Math.max(0, complete.length - KEEP))) {
+    await rm(join(destRoot, item.name), { recursive: true });
+  }
+}
+
+async function backup(target) {
+  const secret = readAppSecret().trim();
+  const weakSecret = secret.length < 32 || secret === "replace-with-a-long-random-secret";
+  // server 的 import 不得啟動 HTTP、排程或 loadDb；僅呼叫有界 lease-only 出口。
+  process.env.STOCK1_SKIP_LISTEN = "1";
+  const { acquireBackupSourceLease } = await import("../server.mjs");
+  const lease = await acquireBackupSourceLease();
+  let staging;
+  let published;
+  let manifest;
+  let destRoot;
+  try {
+    destRoot = await destinationRoot(target, lease.canonicalDataDir);
+    staging = await mkdtemp(join(destRoot, ".stock1-backup-incomplete-"));
+    manifest = { format: FORMAT, version: 1, createdAt: new Date().toISOString(), consistency: "stopped-writer",
+      brokerCredentialsStripped: false, files: [] };
+    for (const [index, file] of SOURCES.entries()) {
+      lease.assertHealthy();
+      const source = index === 0 ? lease.canonicalDbPath : join(lease.canonicalDataDir, file);
+      let bytes;
+      try { bytes = await readFile(source); }
+      catch (error) { if (index !== 0 && error.code === "ENOENT") continue; throw error; }
+      const parsed = parseObject(bytes);
+      if (index === 0 && weakSecret && Object.hasOwn(parsed, "brokerCredentials")) {
+        delete parsed.brokerCredentials;
+        manifest.brokerCredentialsStripped = true;
+        bytes = Buffer.from(JSON.stringify(parsed));
+      }
+      await writeDurable(join(staging, file), bytes);
+      manifest.files.push({ file, format: "json", bytes: bytes.length, sha256: hash(bytes) });
+    }
+    await writeDurable(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+    await verifyMachineBackup(staging);
+    lease.assertHealthy();
+    const stamp = manifest.createdAt.replace(/[-:.]/g, "");
+    published = join(destRoot, `stock1-backup-${stamp}-${randomUUID()}`);
+    await rename(staging, published);
+    staging = undefined;
+  } finally {
+    try { if (staging) await rm(staging, { recursive: true, force: true }); }
+    finally { await lease.release(); }
+  }
+  // 發布失敗絕不走到輪替；輪替自身失敗不把已成功發布的包誤報成失敗。
+  try { await rotate(destRoot); }
+  catch { console.warn("[Stock1] 備份已發布，但舊包輪替失敗；請保留並人工檢查。"); }
+  console.log(`[Stock1] 備份完成 → ${published}`);
+  console.log(`  僅輪替已驗證的新格式成功包，保留最新 ${KEEP} 份；舊格式包不自動刪除。`);
+  console.log("  還原前先停止原服務並等程序完整結束。先還原至全新隔離目錄、核對 manifest 雜湊，再啟動驗證。");
+  console.log(`  本次解析 DATA_DIR=${lease.canonicalDataDir}`);
+  console.log(`  本次解析 DB_PATH=${lease.canonicalDbPath}；包內 stock1-db.json 是這個現役主檔。`);
+  console.log("  還原時以新 DATA_DIR／DB_PATH 對應主檔及 sidecar；驗證完成後先停驗證服務，再切換設定啟動。");
+  if (weakSecret) console.log(`  APP_SECRET 未達安全強度：${manifest.brokerCredentialsStripped ? "已略過 brokerCredentials 券商憑證" : "沒有券商憑證可略過"}；還原後重新設定。`);
+  else console.log("  券商憑證保留加密內容；APP_SECRET 與券商憑證檔須獨立安全保管，不在備份包內。");
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const target = process.argv[2] || process.env.STOCK1_BACKUP_DIR;
+  try {
+    if (!target) throw new Error('沒有指定備份目標；用法：npm run backup "異地資料夾"');
+    if (target === "--verify") {
+      const directory = resolve(process.argv[3] || "");
+      if (!process.argv[3]) throw new Error("缺少備份包路徑");
+      if (!existsSync(join(directory, "manifest.json")) && /^stock1-backup-\d{8}-\d{4}$/.test(directory.split(sep).pop())) {
+        // 舊格式沒有 checksum，不可假裝已證明跨檔一致，也不可納入自動輪替。
+        for (const [index, file] of SOURCES.entries()) {
+          try { parseObject(await readFile(join(directory, file))); }
+          catch (error) { if (index !== 0 && error.code === "ENOENT") continue; throw error; }
+        }
+        console.log("[Stock1] 可辨識舊格式備份，JSON 可解析；沒有 manifest／雜湊，無法證明跨檔一致。還原前須人工確認來源，再於隔離目錄驗證。");
+      } else {
+        const manifest = await verifyMachineBackup(directory);
+        console.log(`[Stock1] 整機備份驗證通過：${manifest.files.length} 個 JSON 與 SHA-256 一致。`);
+      }
+    } else await backup(target);
+  } catch (error) {
+    // 不把來源 JSON 片段、密鑰或私密絕對路徑輸出到錯誤紀錄。
+    console.error(`[Stock1] 備份中止（${error.code || "BACKUP_INVALID"}）。請停止原服務，檢查 DATA_DIR／DB_PATH、來源 JSON 與目的地存取權限。`);
+    if (!target) console.error('  用法：npm run backup "異地資料夾"（或 STOCK1_BACKUP_DIR）');
     process.exitCode = 1;
-  } else {
-    // 輪替：只留最新的 KEEP 份，免得雲端資料夾無限長大。
-    const entries = (await readdir(destRoot, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory() && /^stock1-backup-\d{8}-\d{4}$/.test(entry.name))
-      .map((entry) => entry.name)
-      .sort();
-    while (entries.length > KEEP) {
-      await rm(join(destRoot, entries.shift()), { recursive: true, force: true }).catch(() => {});
-    }
-
-    console.log("");
-    console.log(`[Stock1] 備份完成 → ${destination}`);
-    for (const item of copied) {
-      console.log(`  ${item.file.padEnd(28)} ${String(Math.round(item.size / 1024)).padStart(6)} KB  ${item.label}`);
-    }
-    console.log("");
-    console.log(`  保留最新 ${KEEP} 份，目前 ${Math.min(entries.length, KEEP)} 份。`);
-    console.log("  要還原：把這些檔案複製回 .data/ 蓋掉原檔，然後重啟伺服器。");
-    console.log("");
-    if (strippedBroker) {
-      console.log("  ⚠ 這台沒有設定 APP_SECRET，券商憑證等同明文，本次備份已略過 brokerCredentials（其餘完整）。");
-      console.log("    要連憑證一起備份：先 npm run secret，把結果寫進 .env 的 APP_SECRET，再到 App 裡重新儲存富邦設定。");
-    } else if (appSecretWeak) {
-      console.log("  ⚠ 這台沒有設定 APP_SECRET（目前 DB 裡也沒有券商憑證，所以沒有東西需要略過）。");
-    } else {
-      console.log("  ⚠ 主資料庫裡有密碼 hash 與加密後的券商憑證（解密金鑰 APP_SECRET 不在備份裡）。");
-      console.log("    放到雲端同步資料夾前請自行斟酌。");
-    }
-    console.log("");
   }
 }

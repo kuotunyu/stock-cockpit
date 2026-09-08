@@ -57,6 +57,7 @@ const encryptionKey = scryptSync(appSecret, "stock1-broker-credentials-v1", 32);
 let lifecycleStatus = "idle";
 let serverStartedAt = "";
 let startPromise = null;
+let backupSourceLeaseActive = false;
 let shutdownPromise = null;
 let shutdownRequested = false;
 let serverCloseCleanupPromise = null;
@@ -15772,6 +15773,44 @@ async function acquireDbPathLeases(canonicalDbPath) {
   }
 }
 
+// 整機備份專用：只取得與 server 相同的 writer leases，不載入／遷移／保存 DB。
+// 必須由獨立 CLI 程序使用，不能借用運作中 server 的租約再釋放它。
+async function acquireBackupSourceLease() {
+  if (backupSourceLeaseActive || dataDirLeaseServer || dataDirLeasePromise || startPromise || server.listening) {
+    throw Object.assign(new Error("備份必須使用獨立且未啟動服務的程序"), { code: "BACKUP_LEASE_CONTEXT" });
+  }
+  backupSourceLeaseActive = true;
+  try {
+    if (!(await lstat(await realpath(dataDir))).isDirectory()) {
+      throw Object.assign(new Error("DATA_DIR 必須是既有目錄"), { code: "BACKUP_DATA_DIR_INVALID" });
+    }
+    const paths = await acquireDataDirLease();
+    const canonicalDbPath = await validateDbPathWithinDataDir(paths.canonicalDataDir, paths.canonicalBackupDir);
+    await acquireDbPathLeases(canonicalDbPath);
+    let released = false;
+    return {
+      ...paths,
+      canonicalDbPath,
+      assertHealthy() {
+        const leases = [dataDirLeaseServer, backupDirLeaseServer, ...sidecarLeaseServers, ...dbPathLeaseServers];
+        if (!dataDirLeaseHealthy || leases.length !== 10 || leases.some((lease) => !lease?.listening)) {
+          throw Object.assign(new Error("備份期間 writer lease 已失效"), { code: "DATA_DIR_LEASE_LOST" });
+        }
+      },
+      async release() {
+        if (released) return;
+        released = true;
+        try { await releaseDataDirLease(); }
+        finally { backupSourceLeaseActive = false; }
+      },
+    };
+  } catch (error) {
+    try { await releaseDataDirLease(); }
+    finally { backupSourceLeaseActive = false; }
+    throw error;
+  }
+}
+
 async function releaseDataDirLease() {
   const leases = [...dbPathLeaseServers].reverse();
   leases.push(...[...sidecarLeaseServers].reverse());
@@ -16182,6 +16221,7 @@ function stopCloseScheduler() {
 }
 
 function shutdownServer(_options = {}) {
+  if (backupSourceLeaseActive) return Promise.reject(Object.assign(new Error("備份租約須由備份流程釋放"), { code: "BACKUP_LEASE_CONTEXT" }));
   shutdownRequested = true;
   stopCloseScheduler();
   if (!shutdownPromise) shutdownPromise = performShutdown();
@@ -16275,6 +16315,7 @@ async function performStart(listenPort, listenHost) {
 
 // 可由測試呼叫：綁任意埠（測試用 0＝臨時埠，絕不佔用預設 5174）。預設路徑行為與原本完全相同。
 function startServer(listenPort = port, listenHost = host) {
+  if (backupSourceLeaseActive) return Promise.reject(Object.assign(new Error("備份持鎖期間不可啟動服務"), { code: "BACKUP_LEASE_CONTEXT" }));
   try {
     validateStartupSecurity(listenHost);
   } catch (error) {
@@ -16332,6 +16373,7 @@ if (!process.env.STOCK1_SKIP_LISTEN) {
 
 // 給單元測試用的匯出：純函式＋資料層＋伺服器控制。不影響 `node server.mjs` 的執行行為。
 export {
+  acquireBackupSourceLease,
   calculatePortfolioPlanRisk, calculateNewPositionSize,
   buildTradePlanLinkEvidence,
   canonicalizeTradePlans, validatePortableTradePlans, emptyTradePlans,

@@ -209,17 +209,31 @@ LAN 啟動會覆寫 `HOST` 為 `0.0.0.0`，並印出手機網址。第一次啟�
 
 > PWA 的「加到主畫面」需要 HTTPS（`localhost` 例外），所以純 http 的區域網路位址只能用瀏覽器開。想要完整 PWA 體驗得自備憑證或走 Tailscale 之類的方案。
 
-### 4. 備份（建議設定一次就好）
+### 4. 整機異地備份與停止服務後還原
+
+「更多 → 個人資料備份」匯出本人資料，適合帳號搬移；以下 CLI 是整機備份，包含所有帳號、帳本、計畫、正式發布 identity、pending／final 前向證據，以及基本面與處置歷史。每日 `.data/backups/` 與主檔在同一顆硬碟，只能防部分檔案損壞；異地包請放雲端同步資料夾、外接硬碟或 NAS。
+
+先停止原 Stock1 服務，等程序完整結束，再以**相同工作目錄與 DATA_DIR／DB_PATH 設定**執行：
 
 ```powershell
 npm run backup "D:\OneDrive\stock1-backup"
 ```
 
-`.data/backups/` 的每日還原點**跟主檔在同一顆硬碟**，它防的是「檔案寫壞」，不防「硬碟掛掉或資料夾被誤刪」。這個指令把不可重建的資料複製到你指定的異地位置（雲端同步資料夾、外接硬碟、NAS 都可以），並保留最新 30 份。
+`npm run backup` 載入 `.env`；命令列目標優先於 `STOCK1_BACKUP_DIR`，不會自動記住。直接 `node scripts/backup.mjs` 時，DATA_DIR／DB_PATH 必須由環境提供（僅 APP_SECRET 保留讀 `.env` 的備援）。自訂 DB_PATH 必須在 canonical DATA_DIR 內且父目錄已存在；CLI 會顯示實際解析路徑。包內 `stock1-db.json` 永遠是該現役主檔，不能憑包內檔名推定原主檔路徑。
 
-最不能重來的不是交易帳本（那還有券商對帳單可對），是**前向驗證紀錄**與**月營收／EPS 的歷史累積**——官方 API 只回最新一期，過去的期數是這個 App 一天一天存下來的。
+備份全程持有與 server 相同的 writer leases；服務仍在執行或備份中重啟服務會明確拒絕。這是**停止寫入後的一致備份**，不提供熱備份。每次先寫入唯一 `.stock1-backup-incomplete-*` 暫存目錄，JSON、長度、SHA-256 與 manifest 全部核對後，才 rename 發布 `stock1-backup-日期時間-UUID` 成功包。失敗不覆寫或輪替舊包；只輪替已驗證的新格式成功包，保留最新 30 份。異常中断殘留的 incomplete 目錄不是成功包。
 
-要自動化可用 Windows 工作排程器：程式填 `npm.cmd` 的完整路徑，引數填 `run backup "D:\OneDrive\stock1-backup"`，起始位置填專案資料夾。也可在 `.env` 設定 `STOCK1_BACKUP_DIR` 後只傳 `run backup`；第一次執行帶入的目標不會自動記住。
+`manifest.json` 記錄格式版本、時間、stopped-writer 一致性、檔案清單與 hash、是否剝除券商憑證，不記錄密鑰或來源私密路徑。弱／未設定 APP_SECRET 時移除券商憑證；強密鑰時保留加密內容，**APP_SECRET 與券商憑證檔須另行安全保管**，不在此包內。風險 last-good 快取與同地 backups 不收錄；基本面歷史不可重建，必須保留。
+
+還原流程：
+
+1. 停止原服務，等程序完整結束；保留原 DATA_DIR 與設定作為回復點。
+2. 驗證選中的完整包：`node scripts/backup.mjs --verify "D:\OneDrive\stock1-backup\選中的成功包"`。驗證失敗先中止。舊 `stock1-backup-YYYYMMDD-HHMM` 包仍可辨識和讀取，但只有 JSON 解析檢查，沒有跨檔一致性或雜湊保證，須人工確認來源；它們不會自動輪替。
+3. 建立全新隔離 DATA_DIR，複製包內 `stock1-db.json` 至選定的新 DB_PATH；其他 JSON sidecar 依原檔名放在新 DATA_DIR 根目錄。若包未包含可選 sidecar，不從其他包補入。DB_PATH 父目錄先建立；manifest 留在備份包供核對。
+4. 使用新 DATA_DIR／DB_PATH、獨立測試埠（例如 `PORT=0`）及 `SCHEDULER=off` 啟動驗證，確認帳本、計畫、正式發布、pending／final 與基本面累積；券商連線需另還原密鑰／憑證檔，弱密鑰包則重新設定。
+5. 驗證完成後先停止驗證服務，再切換正式設定並啟動。不要將檔案覆蓋到仍運作的服務目錄。需要回復時，同樣先停止新服務，再切回保留的原資料與設定。
+
+工作排程器也必須安排在服務已停止的時段；程式填 `npm.cmd` 完整路徑，引數填 `run backup "D:\OneDrive\stock1-backup"`，起始位置填專案資料夾。不要把失敗重跑當成熱備份。
 
 ### 個人交易計畫與可攜備份
 
