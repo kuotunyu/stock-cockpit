@@ -4338,6 +4338,17 @@ button.today-focus-card:focus-visible {
   color: var(--green);
 }
 
+.more-detail .version-identities dd {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+.version-details { margin-block-start: 18px; }
+.version-details summary { cursor: pointer; padding-block: 12px; color: var(--muted-2); }
+
 .more-detail dd.is-warn {
   color: var(--warn-text);
 }

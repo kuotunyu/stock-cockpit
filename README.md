@@ -173,7 +173,9 @@ npm install
 npm start
 ```
 
-啟動後開 <http://127.0.0.1:5174>。Windows 也可以直接雙擊專案根目錄的 **`start.bat`**（會自動補跑 `npm install` 並開好瀏覽器），把它「傳送到 → 桌面（建立捷徑）」就不用每次開終端機。
+啟動後開 <http://127.0.0.1:5174>。Windows 也可以直接雙擊專案根目錄的 **`start.bat`**，把它「傳送到 → 桌面（建立捷徑）」就不用每次開終端機。啟動器先檢查 runtime Node 範圍（22.13 以上的 22.x 或 24+）、lock 與已安裝 runtime 套件。缺套件、檔案消失或 lock 更新時以 `npm ci` 修復；一般使用只安裝 runtime 套件，原本已有開發套件時則保留開發安裝。開發／測試的 jsdom Node 要求仍較高。
+
+`start.bat` 透過 `scripts/start-local.mjs` 啟動真正的 `server.mjs`，載入 `.env`，等本次子程序的 IPC 與 `/api/health` 身份都確認 ready 才開瀏覽器，使用實際綁定埠（含自訂 `PORT`）。port 已被使用、初始化或安裝失敗會保留錯誤訊息，不會把另一個服務當成啟動成功。Ctrl+C 或關閉啟動器會停止子程序；正常關閉會排空寫入並釋放資料租約。強制終止或作業系統強制關窗仍不保證完成尚未落盤的工作。
 
 **第一次啟動的預設帳號是 `admin` / `admin1234`**（未指定管理密碼且資料庫為空時建立）。登入後到「更多 → 帳號管理」修改；預設綁 `127.0.0.1`。既有帳號的密碼不會因為修改 `.env` 而自動重設。
 
@@ -184,7 +186,11 @@ git pull --ff-only
 npm install
 ```
 
-改到後端（`server.mjs`）必須**重新啟動伺服器**（Node 不會熱載）；只改前端的話瀏覽器 **Ctrl+F5** 一次即可。不確定自己是不是舊版，就到「更多 → 版本與更新」看——那裡會顯示這台跑的 commit，並跟 GitHub 上的最新版比對。
+更新程式前先停止原伺服器並等待完整結束，更新完成後再啟動；Node 不會熱載。只改前端時，瀏覽器 **Ctrl+F5** 即可。到「更多 → 版本與更新」可分別看執行中後端、磁碟後端與本分頁外殼，判斷需要重啟或刷新；純文件 commit 不會要求重啟。
+
+後端身份在模組載入時固定，指紋涵蓋 `server.mjs`、`portfolio-risk.js`、`verification-evidence.mjs`、`package.json`、`package-lock.json` 的來源快照，並附當時的 Git commit／dirty。它不涵蓋環境設定、實際 node_modules bytes 或 V8 bytecode，也不保證邊更新邊載入時各檔案一致；dirty、無 Git 或 Git 狀態未知時，commit 不能精確代表全部來源。GitHub 比對以啟動時 commit 為起點，不代表磁碟或本分頁已更新。
+
+前端 `APP_SHELL_VERSION` 是載入 `app.js` 時固定的外殼發行宣告，不是後來重新抓檔案算出的身份，也不是逐 byte 校驗。維護 HTML／CSS／JS／其他外殼資產時，須同時遞增 `app.js` 的 `APP_SHELL_VERSION` 與 `sw.js` 的 `CACHE_NAME`，保持相同版號。啟動器的 runtime 安裝 stamp 同樣不是完整性認證：它比對 lock metadata、套件版本／入口與實際檔案清單及大小；不替代 npm tarball integrity 或安全稽核。
 
 ### 3. 從手機／平板看盤（同一個 Wi-Fi）
 

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { execFileSync } from "node:child_process";
 import './portfolio-risk.js';
 import { prepareCompletedBenchmark } from './verification-evidence.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
@@ -21,6 +22,7 @@ import {
 } from "node:crypto";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
+const instanceId = randomBytes(16).toString("hex");
 const require = createRequire(import.meta.url);
 const appVersion = String(require("./package.json")?.version || "0.0.0");
 const port = Number(process.env.PORT || 5174);
@@ -4369,8 +4371,7 @@ async function loadWithLastGood(state, { ttlMs, retryMs, load }) {
 // ===== 版本與更新檢查 =====
 // 三個人各自 git pull、各自 npm start，出事時第一個要問的是「你那份是哪一版」。
 // package.json 的 version 幾乎不會動，真正能辨識一份 code 的是 commit——所以直接讀 .git。
-// 刻意不 spawn `git rev-parse`：啟動路徑不該多一個外部程序，而且拿 zip 解壓來跑的機器
-// 不一定有 git CLI。讀不到就誠實回 available:false，不要編一個看起來像版本號的東西。
+// commit 直接讀 Git；dirty 用有界 Git 查詢，無 CLI 時明示未知。來源指紋不依賴 Git。
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const GIT_REF_PATTERN = /^refs\/[A-Za-z0-9._\-/]+$/;
 const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
@@ -4379,11 +4380,10 @@ const UPDATE_CHECK_RETRY_MS = 30 * 60 * 1000;
 const updateCheckDisabled = ["off", "0", "false", "no"].includes(
   String(process.env.UPDATE_CHECK || "").trim().toLowerCase(),
 );
-let appBuildCache = null;
 let updateCheckCache = { value: null, expiresAt: 0, retryAt: 0, lastError: "", inFlight: null };
 
-function resolveGitDir() {
-  const candidate = join(root, ".git");
+function resolveGitDir(buildRoot = root) {
+  const candidate = join(buildRoot, ".git");
   let stats;
   try {
     stats = statSync(candidate);
@@ -4398,7 +4398,7 @@ function resolveGitDir() {
     if (!pointer.startsWith("gitdir:")) return "";
     const target = pointer.slice("gitdir:".length).trim();
     if (!target) return "";
-    return isAbsolute(target) ? target : resolve(root, target);
+    return isAbsolute(target) ? target : resolve(buildRoot, target);
   } catch {
     return "";
   }
@@ -4449,20 +4449,41 @@ function readGitHubRepo(gitDir) {
   return { owner: parsed[1], repo: parsed[2] };
 }
 
-function readAppBuildInfo() {
-  const gitDir = resolveGitDir();
-  const empty = { available: false, commit: "", shortCommit: "", branch: "", repo: null };
+function readAppBuildInfo(buildRoot = root) {
+  const gitDir = resolveGitDir(buildRoot);
+  // 固定的後端來源／相依宣告範圍；不含文件、前端、環境設定或 node_modules 的實際 bytes。
+  const sourceFiles = ["server.mjs", "portfolio-risk.js", "verification-evidence.mjs", "package.json", "package-lock.json"];
+  let fingerprint = "";
+  try {
+    const hash = createHash("sha256");
+    for (const file of sourceFiles) {
+      const bytes = readFileSync(join(buildRoot, file));
+      hash.update(`${file}\0${bytes.length}\0`).update(bytes);
+    }
+    fingerprint = hash.digest("hex");
+  } catch { /* 缺檔不把部分 hash 當完整身份。 */ }
+  let dirty = null;
+  if (gitDir) {
+    try {
+      dirty = Boolean(execFileSync("git", ["-C", buildRoot, "status", "--porcelain", "--untracked-files=normal"], {
+        encoding: "utf8", timeout: 2000, maxBuffer: 1024 * 1024, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+      }).trim());
+    } catch { /* 無 Git CLI／查詢失敗：未知，不宣稱乾淨。 */ }
+  }
+  const empty = { available: false, commit: "", shortCommit: "", branch: "", repo: null, dirty, fingerprint, sourceFiles };
   if (!gitDir) return empty;
+  let commonDir = gitDir;
+  try { commonDir = resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()); } catch { /* 一般 repo */ }
   let head = "";
   try {
     head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
   } catch {
     return empty;
   }
-  const repo = readGitHubRepo(gitDir);
+  const repo = readGitHubRepo(commonDir);
   if (GIT_SHA_PATTERN.test(head)) {
     // detached HEAD：有 commit 但沒有分支名。
-    return { available: true, commit: head, shortCommit: head.slice(0, 7), branch: "", repo };
+    return { ...empty, available: true, commit: head, shortCommit: head.slice(0, 7), branch: "", repo };
   }
   if (!head.startsWith("ref:")) return { ...empty, repo };
   const ref = head.slice(4).trim();
@@ -4472,15 +4493,27 @@ function readAppBuildInfo() {
   try {
     commit = readFileSync(join(gitDir, ref), "utf8").trim();
   } catch {
-    commit = readPackedRef(gitDir, ref);
+    try { commit = readFileSync(join(commonDir, ref), "utf8").trim(); } catch { commit = readPackedRef(commonDir, ref); }
   }
   if (!GIT_SHA_PATTERN.test(commit)) return { ...empty, branch, repo };
-  return { available: true, commit, shortCommit: commit.slice(0, 7), branch, repo };
+  return { ...empty, available: true, commit, shortCommit: commit.slice(0, 7), branch, repo };
 }
 
+// 模組求值時立即固定，不能等第一個 health/version 請求才讀更新後的磁碟。
+// 這是載入時來源快照，並非 V8 bytecode／套件／設定證明；更新檔案期間請先停服務。
+const appBuild = Object.freeze({ ...readAppBuildInfo(), capturedAt: new Date().toISOString() });
 function getAppBuild() {
-  if (!appBuildCache) appBuildCache = readAppBuildInfo();
-  return appBuildCache;
+  return appBuild;
+}
+
+function getAppIdentity() {
+  const disk = readAppBuildInfo();
+  let shellVersion = "";
+  try { shellVersion = /const APP_SHELL_VERSION = "([A-Za-z0-9._-]+)";/.exec(readFileSync(join(root, "app.js"), "utf8"))?.[1] || ""; } catch { /* 未知 */ }
+  return {
+    runtime: getAppBuild(), disk, shellVersion,
+    restartRequired: appBuild.fingerprint && disk.fingerprint ? appBuild.fingerprint !== disk.fingerprint : null,
+  };
 }
 
 // GitHub 的 compare 是 `base...head`，回傳的 status／ahead_by 描述的是 **head 相對於 base**。
@@ -14103,6 +14136,7 @@ async function handleApi(request, requestUrl, response) {
     jsonResponse(response, ready ? 200 : 503, {
       ok: ready,
       status: lifecycleStatus,
+      instanceId,
       version: appVersion,
       // build 只讀本機 .git（有快取、不打網路），符合「探針不得觸發昂貴上游」。
       // 要比對上游有沒有新版請走 /api/app-version。
@@ -14140,6 +14174,7 @@ async function handleApi(request, requestUrl, response) {
         repo: build.repo ? `${build.repo.owner}/${build.repo.repo}` : "",
       },
       update,
+      identity: getAppIdentity(),
       generatedAt: new Date().toISOString(),
     });
     return true;
@@ -16356,18 +16391,35 @@ function startServer(listenPort = port, listenHost = host) {
 
 // 測試（node --test）import 本檔時設 STOCK1_SKIP_LISTEN=1，改用 startServer(0) 綁臨時埠。
 if (!process.env.STOCK1_SKIP_LISTEN) {
+  const closeFromLauncher = (reason) => {
+    process.exitCode = process.exitCode || 0;
+    void shutdownServer({ reason }).catch(() => {
+      console.error("[Stock1] 安全關機失敗，請檢查本機持久化狀態。");
+      process.exitCode = 1;
+    }).finally(() => { if (process.connected) process.disconnect(); });
+  };
   for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.once(signal, () => {
-      process.exitCode = 0;
-      void shutdownServer({ reason: signal }).catch((error) => {
-        console.error(`[Stock1] ${signal} 安全關機失敗：`, error);
-        process.exitCode = 1;
-      });
-    });
+    process.once(signal, () => closeFromLauncher(signal));
   }
-  void startServer().catch((error) => {
+  // IPC 只由真正父程序建立；視窗關閉／父程序退出使管道斷線，也必須停止 writer。
+  if (process.send) {
+    process.on("message", message => { if (message?.type === "stock1-stop") closeFromLauncher("launcher"); });
+    process.once("disconnect", () => closeFromLauncher("launcher-disconnect"));
+  }
+  const startFromEntry = process.send && !process.connected
+    ? Promise.resolve().then(() => closeFromLauncher("launcher-already-disconnected"))
+    : startServer();
+  void startFromEntry.then(() => {
+    if (process.connected && !shutdownRequested) {
+      const address = server.address();
+      process.send({ type: "stock1-ready", pid: process.pid, instanceId, port: address.port, host }, error => {
+        if (error) closeFromLauncher("launcher-disconnect");
+      });
+    }
+  }).catch((error) => {
     console.error("[Stock1] 伺服器啟動失敗：", error);
     process.exitCode = 1;
+    if (process.connected) process.disconnect();
   });
 }
 
@@ -16475,7 +16527,7 @@ export {
   peekDividendSchedule, getCompanyDirectory, getIssuedShares, getCompanyMeta, buildFundamentals,
   fundamentalsSourceState, resetFundamentalsSourceCacheForTest,
   // 版本與更新檢查（app-version.test）
-  readAppBuildInfo, readGitHubRepo, readPackedRef, normalizeUpdateComparison,
+  readAppBuildInfo, getAppIdentity, readGitHubRepo, readPackedRef, normalizeUpdateComparison,
   // 靜態資產快取（api-data.test 的 ETag／gzip 契約）
   loadStaticAsset,
   // 收盤後排程（close-scheduler.test）

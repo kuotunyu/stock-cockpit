@@ -1,5 +1,9 @@
 # Stock1 測試套件
 
+`runtime-version` 以臨時 Git repo／worktree 與冷程序鎖住模組載入身份：首次版本查詢前後改檔、重啟、dirty、無 Git 與純文件 commit；後端指紋只涵蓋公開來源及相依宣告，不代表實際套件或環境設定。`app-version-panel` 與 Chromium `app-version` 分辨執行後端／磁碟／載入 app.js 的外殼宣告，驗舊新分頁、舊後端缺身份、重啟／刷新優先訊息，以及 375／768／1280／1440 px 和 200% 文字。外殼改動須同步 `APP_SHELL_VERSION` 與 SW `CACHE_NAME`。
+
+`windows-launcher` 使用臨時 `.env`／DATA_DIR／port 0 或 OS 配發後保留的自訂埠、真 server child 與離線 preload，驗 Node runtime 範圍、安裝失敗／lock 改變／實際缺檔／保留既有 dev 安裝、本次 IPC＋health 身份、占用埠、初始化／安全門檻、排程啟動、Ctrl+C 處理器、ready 逾時，以及模組載入前後父程序斷線。測試不開真瀏覽器或新視窗；開頁動作以局部注入記錄 URL，npm 安裝用臨時套件替身，不連 registry。Windows IPC 斷線後以 child `exit` 判斷程序結束，不能等待可能不送出的 `close`。可先跑 `node --test tests/backend/runtime-version.test.mjs tests/backend/windows-launcher.test.mjs tests/frontend/app-version-panel.test.mjs`。
+
 `request-deadline` 驗 UI 分級等待上限、headers／JSON body、取消與來源切換、401、唯讀 fallback、寫入不跨候選重送，以及搜尋／分析／掃描的舊 finally 護欄。`write-outcome` 驗原 payload／rev／穩定 ID 的未確認恢復、背景 canonical 與後續草稿、watchlists／alerts 停止自動重送、復原未知與秘密不持久化；`backend/write-confirmation` 用 port 0、臨時 DATA_DIR、真實 transaction queue 驗同 rev 最多提交一次及正規資料確認。`trade-plan-outcome` 另鎖成交關聯與部分檢討 delta 的 canonical 確認、保存中意圖不可變、背景 GET 先到後修改草稿的恢復順序。未知後 GET 尚未看見資料不是失敗證據；只有使用者再次操作才可重試原 CAS payload，不能改 rev 盲重放。
 
 `glossary-navigation` 的 DOM／Chromium 測試涵蓋七頁問號入口：首次定位當頁說明，切分類解除系統預填頁名，手動搜尋仍保留。另驗重新開啟、一般名詞表／名詞連結、分類重繪焦點及 Escape 回到問號；瀏覽器驗 375／768／1280／1440 px，截圖為 `test-results/browser/glossary-category-*`。

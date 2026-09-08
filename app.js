@@ -1,3 +1,7 @@
+// 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
+// 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
+const APP_SHELL_VERSION = "stock1-shell-v31";
+
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
 }
@@ -286,6 +290,7 @@ const appVersionState = {
   version: "",
   build: null,
   update: null,
+  identity: null,
   error: "",
 };
 
@@ -5428,6 +5433,7 @@ async function loadAppVersion({ force = false } = {}) {
     appVersionState.version = String(payload?.version || "");
     appVersionState.build = payload?.build || null;
     appVersionState.update = payload?.update || null;
+    appVersionState.identity = payload?.identity || null;
     appVersionState.loaded = true;
   } catch (error) {
     appVersionState.error = error?.message || "版本資訊讀取失敗";
@@ -5441,6 +5447,13 @@ async function loadAppVersion({ force = false } = {}) {
 // 把 /api/app-version 的 update.state 翻成畫面文案。
 // 刻意把「不知道」跟「已是最新」分開講：更新檢查連不上 GitHub 是常態（離線、限流、
 // 還沒 push），那時候說「已是最新」就是在騙人。
+function appBuildIdentityLabel(build) {
+  if (!build) return "未知";
+  const git = build.commit ? String(build.commit).slice(0, 7) : "無 Git commit";
+  const changes = build.dirty === true ? " · 未提交修改" : build.dirty === false ? "" : " · Git 狀態未知";
+  return `${git}${changes}`;
+}
+
 function appVersionSummary() {
   const build = appVersionState.build;
   const update = appVersionState.update;
@@ -5451,10 +5464,16 @@ function appVersionSummary() {
   if (!appVersionState.loaded) {
     return { badge: appVersionState.loading ? "查詢中" : "查看", tone: "", headline: "", hint: "", stamp };
   }
+  const identity = appVersionState.identity;
+  if (!identity) return { badge: "身份未確認", tone: "is-warn", headline: "舊版後端未提供執行身份，無法確認是否已載入磁碟更新。", hint: "更新後請重新啟動伺服器，再按重新檢查。", stamp };
+  if (identity.restartRequired === true) return { badge: "需要重啟", tone: "is-warn", headline: "執行中後端與磁碟來源不同，需要重新啟動伺服器。", hint: "先停止原伺服器並等它完整結束，再執行 start.bat；頁面以 Ctrl+F5 重新載入。", stamp };
+  if (identity.shellVersion && identity.shellVersion !== APP_SHELL_VERSION) return { badge: "需要刷新", tone: "is-warn", headline: "本分頁外殼與磁碟外殼宣告版本不同。", hint: "請按 Ctrl+F5，重新載入前端資產。", stamp };
+  if (identity.restartRequired !== false || !identity.shellVersion) return { badge: "身份未確認", tone: "is-warn", headline: "來源指紋或磁碟外殼宣告不足，無法確認更新狀態。", hint: "請確認專案檔案完整，再重新檢查。", stamp };
   const behindBy = Number(update?.behindBy) || 0;
   const localAhead = Number(update?.localAhead) || 0;
   switch (String(update?.state || "")) {
     case "current":
+      if (identity.runtime?.dirty !== false) return { badge: "來源有限", tone: "is-warn", headline: "執行來源包含未提交修改，或 Git 工作目錄狀態未知；commit 不能精確代表這份來源。", hint: "GitHub 比對只涵蓋 commit。", stamp };
       return { badge: "最新", tone: "is-good", headline: "已是 GitHub 上的最新版本。", hint: "", stamp };
     case "behind":
       return {
@@ -5487,7 +5506,7 @@ function appVersionSummary() {
         badge: "無法確認",
         tone: "",
         headline: `目前無法跟 GitHub 對版：${update?.reason || "未知原因"}`,
-        hint: "這不影響任何看盤功能，本機版本資訊仍然是準的。",
+        hint: "這不影響任何看盤功能；執行與磁碟身份請看上方來源資訊。",
         stamp,
       };
   }
@@ -5536,6 +5555,7 @@ function renderMorePanel() {
   }[notificationPermission] || "尚未開啟";
   const notificationTone = notificationPermission === "granted" ? "is-good" : notificationPermission === "denied" ? "is-warn" : "";
   const versionSummary = appVersionSummary();
+  const versionDetailsOpen = Boolean(detail.querySelector('.version-details')?.open);
   const activePanel = state.morePanel || "source";
   const items = [
     {
@@ -5694,16 +5714,29 @@ function renderMorePanel() {
         <span class="more-kicker">這台機器</span>
         <h2>版本與更新</h2>
       </header>
-      <p>三個人各自 <code>git pull</code>、各自 <code>npm start</code>，畫面對不上時第一件事是確認彼此跑的是不是同一份 code。下面的 commit 就是這台伺服器實際載入的版本。</p>
-      <dl>
-        <div><dt>版本號</dt><dd>${escapeHtml(appVersionState.version || "—")}</dd></div>
-        <div><dt>本機 commit</dt><dd>${escapeHtml(versionSummary.stamp)}</dd></div>
-        <div><dt>更新狀態</dt><dd class="${versionSummary.tone}">${escapeHtml(versionSummary.badge)}</dd></div>
-      </dl>
       ${versionSummary.headline ? `<p>${escapeHtml(versionSummary.headline)}</p>` : ""}
       ${versionSummary.hint ? `<p>${escapeHtml(versionSummary.hint)}</p>` : ""}
-      <p class="more-note">上游：${escapeHtml(appVersionState.build?.repo || "沒有 GitHub origin，無法比對")}。更新檢查每 6 小時最多向 GitHub 問一次比對結果，除此之外不送出任何資料；要完全關掉就在 .env 設 <code>UPDATE_CHECK=off</code> 再重啟伺服器。</p>
+      <dl class="version-identities">
+        <div><dt>執行中後端</dt><dd>${escapeHtml(appBuildIdentityLabel(appVersionState.identity?.runtime))}</dd></div>
+        <div><dt>磁碟後端</dt><dd>${escapeHtml(appBuildIdentityLabel(appVersionState.identity?.disk))}</dd></div>
+        <div><dt>本分頁外殼</dt><dd>${escapeHtml(APP_SHELL_VERSION)}</dd></div>
+        <div><dt>更新狀態</dt><dd class="${versionSummary.tone}">${escapeHtml(versionSummary.badge)}</dd></div>
+      </dl>
+      ${appVersionState.identity?.restartRequired === false ? '<p>後端來源一致；純文件或 commit 變更不要求重啟。</p>' : ''}
       <button class="more-primary" data-action="refresh-app-version" type="button"${appVersionState.loading ? " disabled" : ""}>${appVersionState.loading ? "查詢中…" : "重新檢查"}</button>
+      <details class="version-details"${versionDetailsOpen ? " open" : ""}>
+        <summary id="appVersionDetailsToggle">版本來源與比對詳情</summary>
+        <dl class="version-identities">
+          <div><dt>版本號</dt><dd>${escapeHtml(appVersionState.version || "—")}</dd></div>
+          <div><dt>本機 commit</dt><dd>${escapeHtml(versionSummary.stamp)}</dd></div>
+          <div><dt>磁碟外殼宣告</dt><dd>${escapeHtml(appVersionState.identity?.shellVersion || "未知")}</dd></div>
+          <div><dt>執行來源指紋</dt><dd>${escapeHtml(appVersionState.identity?.runtime?.fingerprint || "未知")}</dd></div>
+          <div><dt>磁碟來源指紋</dt><dd>${escapeHtml(appVersionState.identity?.disk?.fingerprint || "未知")}</dd></div>
+        </dl>
+        <p class="more-note">執行中後端在程序載入時固定；磁碟資訊在本次查詢讀取。本分頁外殼是載入 app.js 時固定的發行宣告，不是全部資產逐 byte 驗證。</p>
+        <p class="more-note">後端指紋涵蓋 server.mjs、portfolio-risk.js、verification-evidence.mjs、package.json、package-lock.json 的載入時磁碟快照；不含環境設定、實際套件 bytes，也不保證更新過程中跨檔案同時載入。更新程式前應先停止服務。dirty 或未知狀態下，commit 僅供追溯。</p>
+        <p class="more-note">上游：${escapeHtml(appVersionState.build?.repo || "沒有 GitHub origin，無法比對")}。GitHub 比對以啟動時 commit 為起點，每 6 小時最多查詢一次，除此之外不送出任何資料；要完全關掉就在 .env 設 <code>UPDATE_CHECK=off</code> 再重啟伺服器。</p>
+      </details>
     `,
     risk: `
       <header>

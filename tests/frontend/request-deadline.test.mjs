@@ -4,9 +4,14 @@ import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { createAppWindow } from '../helpers/dom-harness.mjs';
 
-async function fixture(t) {
-  const app = await createAppWindow();
-  t.after(() => app.cleanup());
+// 外層只限制讀檔/jsdom/bootstrap＋測試的總時間；產品 deadline 仍按下方20/1000ms驗證。
+const BOOTSTRAP_TEST_TIMEOUT = 10_000;
+async function fixture(t, createWindow = createAppWindow) {
+  let app; let cleaned = false;
+  const cleanup = () => { if (app && !cleaned) { cleaned = true; app.cleanup(); } };
+  t.after(cleanup);
+  app = await createWindow();
+  if (t.signal.aborted) { cleanup(); throw t.signal.reason; }
   app.evalIn('pendingFetchCount = 0');
   const requests=[];
   app.win.fetch=(url,init)=>new Promise((resolve,reject)=>requests.push({url,init,resolve,reject}));
@@ -14,7 +19,25 @@ async function fixture(t) {
 }
 const response=(json,status=200)=>({ok:status<400,status,json});
 
-test('headers 已回而 body 未完成仍在 loading，deadline 釋放並可重試', { timeout: 1200 }, async(t)=>{
+test('fixture 在初始化被取消後才建立 window，仍立即關閉且不繼續測試請求', async () => {
+  const controller = new AbortController(); const cleanups = [];
+  let release; let closed = 0; let setupCalls = 0;
+  const lateWindow = { cleanup: () => { closed++; }, evalIn: () => { setupCalls++; }, win: {} };
+  const creation = new Promise(resolve => { release = resolve; });
+  const pending = fixture({ signal: controller.signal, after: callback => cleanups.push(callback) }, () => creation);
+  try {
+    assert.equal(cleanups.length, 1, '初始化 await 之前先註冊清理');
+    controller.abort(new Error('fixture cancelled'));
+    for (const cleanup of cleanups) cleanup();
+    release(lateWindow);
+    await assert.rejects(pending, /fixture cancelled/);
+    for (const cleanup of cleanups) cleanup();
+    assert.equal(closed, 1);
+    assert.equal(setupCalls, 0); assert.equal(lateWindow.win.fetch, undefined, '取消後不安裝測試請求或執行fallback');
+  } finally { release(lateWindow); await pending.then(app => app.cleanup(), () => {}); }
+});
+
+test('headers 已回而 body 未完成仍在 loading，deadline 釋放並可重試', { timeout: BOOTSTRAP_TEST_TIMEOUT }, async(t)=>{
   const app=await fixture(t);
   const pending=app.win.fetchApi('/api/symbols',{timeoutMs:20});
   const outcome=pending.catch(e=>e);
@@ -30,7 +53,7 @@ test('headers 已回而 body 未完成仍在 loading，deadline 釋放並可重�
   assert.equal((await retry).ok,true);
 });
 
-test('無 headers 的取消有獨立分類；舊 finally 不結束新請求', { timeout: 1200 }, async(t)=>{
+test('無 headers 的取消有獨立分類；舊 finally 不結束新請求', { timeout: BOOTSTRAP_TEST_TIMEOUT }, async(t)=>{
   const app=await fixture(t),controller=new app.win.AbortController();
   const old=app.win.fetchApi('/api/symbols',{signal:controller.signal,timeoutMs:1000}).catch(e=>e);
   const fresh=app.win.fetchApi('/api/symbols',{timeoutMs:1000});
@@ -42,7 +65,7 @@ test('無 headers 的取消有獨立分類；舊 finally 不結束新請求', { 
   assert.equal(app.evalIn('pendingFetchCount'),0);
 });
 
-test('錯誤 body 卡住保留 401；慢錯誤及解析失敗仍結束 loading', { timeout: 1200 }, async(t)=>{
+test('錯誤 body 卡住保留 401；慢錯誤及解析失敗仍結束 loading', { timeout: BOOTSTRAP_TEST_TIMEOUT }, async(t)=>{
   const app=await fixture(t);
   const expired=app.win.fetchApi('/api/trades',{timeoutMs:20}).catch(e=>e);
   app.requests[0].resolve(response(()=>new Promise(()=>{}),401));
@@ -59,7 +82,7 @@ test('錯誤 body 卡住保留 401；慢錯誤及解析失敗仍結束 loading',
   assert.equal(app.evalIn('pendingFetchCount'),0);
 });
 
-test('寫入無 headers/成功 body 不完整均屬未確認且不嘗試候選 URL', { timeout: 1200 }, async(t)=>{
+test('寫入無 headers/成功 body 不完整均屬未確認且不嘗試候選 URL', { timeout: BOOTSTRAP_TEST_TIMEOUT }, async(t)=>{
   const app=await fixture(t);
   app.evalIn('apiCandidates = () => ["/one", "/two"]');
   for(const withHeaders of [false,true]){
@@ -72,7 +95,7 @@ test('寫入無 headers/成功 body 不完整均屬未確認且不嘗試候選 U
   assert.equal(app.requests.length,2);
 });
 
-test('唯讀 fallback 共用 deadline，慢掃描享有較長預算', { timeout: 1200 }, async(t)=>{
+test('唯讀 fallback 共用 deadline，慢掃描享有較長預算', { timeout: BOOTSTRAP_TEST_TIMEOUT }, async(t)=>{
   const app=await fixture(t);
   app.evalIn('apiCandidates = () => ["/one", "/two"]');
   const pending=app.win.fetchApi('/api/symbols',{timeoutMs:1000});
