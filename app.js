@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v36";
+const APP_SHELL_VERSION = "stock1-shell-v37";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -438,6 +438,9 @@ const strategyState = {
   generatedAt: "",
   riskPolicy: "",
   warnings: [],
+  // /api/swing 每條路徑都回 publication（kind：formal／correction／research／provisional／not-persisted）；
+  // 切場景與載入失敗時清空，不借上一個場景的發布身份。
+  publication: null,
 };
 
 const technicalState = {
@@ -6907,6 +6910,7 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
     if (requestId !== strategyLoadSeq) return; // 過期的錯誤不要覆蓋目前場景的狀態
     if (handleAuthRequired(error)) return;
     strategyState.error = error.message;
+    strategyState.publication = null; // 失敗的這次沒有發布身份；不留上一次成功的
     if (notify) showToast(error.code === "REQUEST_TIMEOUT" ? "策略雷達等待逾時，伺服器可能仍在處理" : "策略雷達計算失敗");
   } finally {
     if (requestId === strategyLoadSeq) {
@@ -7086,6 +7090,55 @@ const SWING_SCENARIO_INFO = {
 
 function swingScenarioInfo() {
   return SWING_SCENARIO_INFO[strategyState.scenario] || SWING_SCENARIO_INFO.midBandDefense;
+}
+
+// 發布身份 → 使用者看得懂的文案。kind 由 server 的 publishVerification 決定：
+//   formal＝當日 canonical scope 的首次完整正式清單；correction＝同基準日的更正版本（不取代首次樣本）；
+//   research＝非 canonical scope（例如較小候選池）；provisional＝來源未完整、之後會重算；
+//   not-persisted＝這次沒有寫進資料庫。缺 kind 的舊回應只能說「未確認」，不能因為收盤時間就猜正式。
+// 回傳的 kind 只對應既有 .provenance-badge[data-kind] 色調，不另發明樣式。
+const STRATEGY_PUBLICATION_VIEWS = {
+  formal: {
+    label: "正式採集清單",
+    kind: "frozen",
+    title: "當日完整掃描的首次正式發布：一天只算一次、盤中不會跳動。內容為技術統計，非買賣建議，也不代表可成交或獲利。",
+    recompute: "同一基準日的正式清單只算一次；要重算請按右下角「重新整理」。",
+  },
+  correction: {
+    label: "更正版本",
+    kind: "frozen",
+    title: "同一基準日的更正版本；首次正式清單與其驗證樣本仍保留，不被這份取代。內容為技術統計，非買賣建議。",
+    recompute: "這是同一基準日的更正版本，首次正式清單仍保留；要重算請按右下角「重新整理」。",
+  },
+  research: {
+    label: "研究清單",
+    kind: "estimated",
+    title: "非正式範圍（例如較小的候選池或場景）的研究清單，不進正式發布與驗證母體。非買賣建議。",
+    recompute: "研究範圍的清單不進正式發布；要重算請按右下角「重新整理」。",
+  },
+  provisional: {
+    label: "暫定清單・資料未完整",
+    kind: "estimated",
+    title: "掃描時來源尚未完整（例如上市／上櫃整批日期未對齊），這不是收盤凍結的正式清單；資料補齊後會重算。非買賣建議。",
+    recompute: "資料尚未完整，之後補齊時會再算一次；也可按右下角「重新整理」先再算。",
+  },
+  "not-persisted": {
+    label: "清單尚未確認保存",
+    kind: "stale",
+    title: "這次結果沒有成功寫入資料庫，不能當作已保存的正式清單；重新整理會再算一次。非買賣建議。",
+    recompute: "本次結果尚未確認保存，重新整理會再算一次。",
+  },
+};
+const STRATEGY_PUBLICATION_UNKNOWN_VIEW = {
+  label: "發布狀態未確認",
+  kind: "stale",
+  title: "這份回應沒有附發布身份，無法判定是否為正式清單；非買賣建議。",
+  recompute: "發布狀態未確認；要重算請按右下角「重新整理」。",
+};
+
+function strategyPublicationView(publication) {
+  const kind = typeof publication?.kind === "string" ? publication.kind : "";
+  return STRATEGY_PUBLICATION_VIEWS[kind] || STRATEGY_PUBLICATION_UNKNOWN_VIEW;
 }
 
 // 把 ISO 時間轉成台北時間的 HH:MM（顯示榜單何時計算）。即使使用者人在國外，計算時間也以台股時區呈現。
@@ -7334,17 +7387,16 @@ function renderStrategyBoard() {
     }
   });
   const info = swingScenarioInfo();
+  // 基準日用 MM/DD（與卡片「06/16 收盤」同格式、較精簡）；完整日期放 title。空結果文案也用它標明基準日。
+  const asOfStr = String(strategyState.asOf || "");
+  const baseMD = asOfStr.length >= 10 ? `${asOfStr.slice(5, 7)}/${asOfStr.slice(8, 10)}` : (asOfStr || "--");
+  // 徽章與 tooltip 依實際發布身份，不再一律寫「收盤凍結」——provisional 是會重算的暫定清單，
+  // research 不進正式發布，not-persisted 根本沒存；只有 formal／correction 才是一天只算一次的正式清單。
+  const publicationView = strategyPublicationView(strategyState.publication);
   if (el.strategyMeta) {
     const genClock = formatClockFromIso(strategyState.generatedAt);
     const genDateRaw = formatTaipeiDate(strategyState.generatedAt);
-    const generatedToday = genDateRaw && genDateRaw === formatTaipeiDate(new Date().toISOString());
-    const intraday = isTaiwanMarketOpenNow();
-    // 計算時間的副標：盤中時強調「不變動」，盤後則標「本日凍結」——都在說明這份榜單一天只算一次、不會即時跳。
-    const timeSub = intraday ? "盤中不變動" : generatedToday ? "本日凍結" : "已凍結";
-    const timeTitle = `這份榜單於 ${genDateRaw || "--"} ${genClock} 算出（台北時間），採用 ${strategyState.asOf || "--"} 的官方收盤資料。同一基準日只算一次；要重算請按右下角「重新整理」。`;
-    // 基準日用 MM/DD（與卡片「06/16 收盤」同格式、較精簡）；完整日期放 title。
-    const asOfStr = String(strategyState.asOf || "");
-    const baseMD = asOfStr.length >= 10 ? `${asOfStr.slice(5, 7)}/${asOfStr.slice(8, 10)}` : (asOfStr || "--");
+    const timeTitle = `這份榜單於 ${genDateRaw || "--"} ${genClock} 算出（台北時間），採用 ${strategyState.asOf || "--"} 的官方收盤資料。${publicationView.recompute}`;
     el.strategyMeta.innerHTML = strategyState.loaded
       ? `
         <div class="strategy-statpanel">
@@ -7357,7 +7409,7 @@ function renderStrategyBoard() {
             <span class="m-sep" aria-hidden="true"></span>
             <span class="m" title="注意股／處置股改為標示、不再排除（可在『更多 → 風險規則』切換隱藏）；低流動性個股仍先濾掉">${state.showSurveillance ? `含 <span class="m-v2">注意／處置股</span>` : `已隱藏 <span class="m-v2">注意／處置股</span>`}</span>
             <span class="m-sep" aria-hidden="true"></span>
-            <span class="m m-note provenance-badge" data-kind="frozen" title="波段型態當日收盤凍結（非即時）——這份榜單一天只算一次、盤中不會跳動；內容為技術統計，非買賣建議。"><span class="note-ic" aria-hidden="true">ⓘ</span>收盤凍結・非買賣建議</span>
+            <span class="m m-note provenance-badge" data-kind="${escapeHtml(publicationView.kind)}" data-publication-badge title="${escapeHtml(publicationView.title)}"><span class="note-ic" aria-hidden="true">ⓘ</span>${escapeHtml(publicationView.label)}・非買賣建議</span>
           </div>
         </div>
       `
@@ -7372,15 +7424,10 @@ function renderStrategyBoard() {
     el.strategyBoard.innerHTML = `<div class="strategy-empty is-error">策略雷達計算失敗<small>${escapeHtml(strategyState.error)}</small></div>`;
     return;
   }
-  if (strategyState.loaded && !strategyState.picks.length) {
-    el.strategyBoard.innerHTML = `<div class="strategy-empty">今天沒有符合「${info.name}」的標的。<small>${info.emptyHint}可切換另一個場景，或按右下角「重新整理」再算一次。</small></div>`;
-    return;
-  }
   if (!strategyState.loaded) {
     el.strategyBoard.innerHTML = `<div class="strategy-empty">切到這頁會自動計算波段型態。<small>若沒有自動開始，按右下角「重新整理」。</small></div>`;
     return;
   }
-  const visiblePicks = strategyState.picks.filter((pick) => state.showSurveillance || !pick.surveillance);
   // 後端一直有回 warnings（掃描覆蓋率、公司行動未定案、單一市場、last-good…），
   // 前端也一直存進 strategyState.warnings——但**全檔沒有任何讀取點**，等於沒做。
   // server.mjs 組裝這批 warnings 的地方自己寫著：「這個失敗模式在開發期間三天內出現三次
@@ -7389,6 +7436,9 @@ function renderStrategyBoard() {
   // 沒有它的後果不是少一行字：證交所限流那天，看板照樣列出十幾檔、每張卡片照樣寫
   // 「進場 X／停損 Y／目標 Z／盈虧比 2.0」，而那些均線、布林、MACD 是跑在**沒還原權息**的
   // 價格上——與正常日完全無法分辨。
+  //
+  // 2026-09-09（CUA-02）：這段必須排在零候選分支之前。原本零筆就 return，限流那天掃出 0 檔
+  // 會顯示成安心的「今天沒有符合…」，和真正空手的日子完全一樣。
   const boardWarnings = (strategyState.warnings || []).filter(Boolean);
   const warningHtml = boardWarnings.length
     ? `<div class="strategy-empty is-error" role="status">
@@ -7396,6 +7446,14 @@ function renderStrategyBoard() {
         <small>${escapeHtml(boardWarnings.slice(0, 3).join("；"))}${boardWarnings.length > 3 ? `（另有 ${boardWarnings.length - 3} 則）` : ""}</small>
       </div>`
     : "";
+  if (!strategyState.picks.length) {
+    // 有警告：只能說「本次可用資料」找不到，不能越過覆蓋證據說全市場沒有，也不推斷市場原因。
+    el.strategyBoard.innerHTML = warningHtml + (boardWarnings.length
+      ? `<div class="strategy-empty">本次可用資料未找到符合「${info.name}」的標的。<small>資料尚有缺漏（見上方警告），不代表全市場沒有符合；資料補齊後可按右下角「重新整理」再算一次，或先切換另一個場景。</small></div>`
+      : `<div class="strategy-empty">${escapeHtml(baseMD)} 收盤的掃描沒有符合「${info.name}」的標的。<small>${info.emptyHint}可切換另一個場景，或按右下角「重新整理」再算一次。</small></div>`);
+    return;
+  }
+  const visiblePicks = strategyState.picks.filter((pick) => state.showSurveillance || !pick.surveillance);
   el.strategyBoard.innerHTML = warningHtml + (visiblePicks.length
     ? visiblePicks.map(renderSwingCard).join("")
     : `<div class="strategy-empty">這個場景今天的標的都是注意/處置股，已被你隱藏。<small>到「更多 → 風險規則」可重新顯示。</small></div>`);
@@ -12934,6 +12992,7 @@ document.addEventListener("click", async (event) => {
       strategyState.picks = [];
       strategyState.matchedCount = 0;
       strategyState.warnings = [];
+      strategyState.publication = null;
     }
     state.screen = "strategy";
     render();

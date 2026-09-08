@@ -66,6 +66,28 @@ test("P3：警告很多時只列前 3 則並講出剩餘則數", () => {
   assert.match(html, /另有 2 則/);
 });
 
+// 2026-09-09 CUA-01～03 施工（computer use 心得 F02）：零候選分支在 warningHtml 建立之前就 return，
+// 證交所限流那天掃出 0 檔會顯示成安心的「今天沒有符合…」，與真正空手的日子無法分辨。
+test("P3：零候選時警告仍必須顯示，空結果不得說成全市場沒有", () => {
+  const html = renderBoard(["上市整批收盤資料尚未更新到 2026/09/08，這份清單暫時只涵蓋已更新的市場。"], 0);
+  assert.match(html, /上市整批收盤資料尚未更新/, "零筆也要把警告畫出來");
+  assert.match(html, /1 項資料品質問題/);
+  assert.match(html, /可用資料/, "空結果要說是「本次可用資料」找不到，不是全市場沒有");
+  assert.match(html, /缺漏/);
+  assert.doesNotMatch(html, /今天沒有符合/, "有警告時不得用無警告的安心文案");
+  assert.doesNotMatch(html, /整體偏強|沒有回檔/, "不推斷市場原因");
+});
+
+test("P3：零候選且無警告時，空結果標明基準日，不亮警告區", () => {
+  const html = app.evalIn(`(() => {
+    strategyState.asOf = "2026-09-08";
+    return "";
+  })()`) + renderBoard([], 0);
+  assert.match(html, /09\/08 收盤的掃描沒有符合「中軌攻防」的標的/);
+  assert.doesNotMatch(html, /資料品質問題/);
+  assert.doesNotMatch(html, /is-error/);
+});
+
 // ---- P2：技術頁基本面 ----
 
 const renderFundamentals = (over) => app.evalIn(`(() => {

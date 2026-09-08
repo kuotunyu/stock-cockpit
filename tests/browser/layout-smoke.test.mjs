@@ -58,7 +58,7 @@ test("empty 與 partial：明確驗證零張卡及部分資料警告", { timeout
     const fixture = await createBrowserFixture({ scenario: "empty" });
     try {
       await visibleNav(fixture.page, "strategy").click();
-      await fixture.page.getByText("今天沒有符合「中軌攻防」的標的").waitFor();
+      await fixture.page.getByText(/收盤的掃描沒有符合「中軌攻防」的標的/).waitFor();
       assert.equal(await fixture.page.locator(".swing-card").count(), 0);
     } catch (error) {
       await fixture.captureFailure("layout-empty");
