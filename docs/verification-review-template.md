@@ -25,8 +25,11 @@ node tests/helpers/verification-review-fixtures.mjs
 
 | 欄位 | 人工填寫 |
 | --- | --- |
-| `modelKey` | 〔完整值，不省略七軸〕 |
-| `selectedModelKey` | 〔完整值；若本次檢視的模型不是 headline，兩者都保留〕 |
+| 成熟母體 `cohort.modelKey` | 〔完整值，不省略七軸〕 |
+| 成熟母體 `cohort.selectedModelKey` | 〔完整值；若本次檢視的模型不是 headline，兩者都保留〕 |
+| 固定期間 `benchmarks.modelKey` | 〔完整值；它包含自己的 `captureIdentity` 與 `benchmarkSpec`，不得借 cohort identity〕 |
+| 固定期間 `benchmarks.captureIdentity`／`benchmarkSpec` | 〔逐欄保留原值；固定期間成本、日曆、進出欄位與 capture 身份分開〕 |
+| 固定期間 `benchmarks.selectedModelKey` | 〔目前來源沒有這個欄位，填「不適用（not-provided-by-summary）」；不得借 cohort.selectedModelKey〕 |
 | 成熟母體窗口 | 〔`cohort.policy`、起訖、實際官方交易日證據〕 |
 | 固定期間比較窗口 | 〔照抄 `benchmarks.window`；保留 policy、asOf、requestedFromDate、fromDate、throughDate、limit、allModels〕 |
 | 實際觀察區間 | 〔只能寫來源已涵蓋的日期〕 |
@@ -110,8 +113,16 @@ node tests/helpers/verification-review-fixtures.mjs
 {"cohortPolicyVersion":"mature-issued-15-official-sessions-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"swing-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}
 ```
 
+固定期間比較有自己的完整 model key（`benchmark.modelKey`）：
+
+```text
+{"benchmarkSpec":{"adjustmentVersion":"official-reference-ratio-v1","calendarVersion":"TWSE-FMTQIK-official-monthly-sessions-v2","costModelVersion":"flat-round-trip-0.471pct-v1","costPct":0.471,"entryField":"open","horizon":"next-open-to-session-15-close","poolPolicy":"complete-exchange-pool-only","priceSourceVersion":"official-stock-month-v1","returnBasis":"adjusted-reference-price","sessions":15,"strategy":"swing","timingPolicy":"price-observation-with-publication-disclosure-v1","version":"frozen-pool-fixed-price-v1","weighting":"equal-weight-frozen-pool-by-exchange"},"captureIdentity":{"cohortPolicyVersion":"first-canonical-publication-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"swing-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}}
+```
+
+`benchmark.captureIdentity` 與 `benchmark.benchmarkSpec` 保留上列兩個子物件；`benchmark.selectedModelKey` 為不適用（`not-provided-by-summary`），不借用 cohort 的 selectedModelKey。
+
 - 採集：`captureCoverage` 為預期 1 份、完整 1 份、100%，完整格式起點 2026-08-03；來源路徑為 `captureCoverage.expectedCount`、`completeCount`、`coverageRate`、`fullRecordStartDate`。本例官方日期來源標 `fresh`。這個 100% 只描述合成輸入的一個預期日。
-- 母體：issued 2 = no-entry 0 + pending 0 + resolved 2 + unresolved 0；成熟 2、未成熟 0、不明 0。毛報酬平均 2%，淨報酬平均 1.529%，淨值有效 2／總數 2／缺值 0；來源為 `cohort.*`。
+- 母體：issued 2 = no-entry 0 + pending 0 + resolved 2 + unresolved 0；成熟 2、未成熟 0、不明 0。`metricCoverage` 逐欄為：`avgResultPct` value 2、valid 2、total 2、missing 0、validDays 1、reason null；`avgResultPctNet` value 1.529、valid 2、total 2、missing 0、validDays 1、reason null；`netProfitRate` value 50、valid 2、total 2、missing 0、validDays 1、reason null；`targetHitRate` value 50、valid 2、total 2、missing 0、validDays 1、reason null；`avgDaysHeld` value 11.5、valid 2、total 2、missing 0、validDays 1、reason null。`validDays` 是有有效值的日期數；來源為 `cohort.metricCoverage.*`。
 - 比較：固定期間為 2026-08-04 至 2026-08-24，eligible 2、paired 2、eligibleDays 1、pairedDays 1，策略平均 3%、候選池平均 2%、平均差 1 個百分點；來源為 `benchmark.*`。`countGrain=issued-signal`、`includesSelected=true`、`poolPolicy=complete-exchange-pool-only`，沒有拿提前退出結果相減。
 - 比較窗口：`last-90-calendar-days-latest-260-formal-captures-v1`，asOf 2026-08-24、requestedFromDate 2026-05-26、實際 fromDate／throughDate 都是 2026-08-03、limit 260、allModels=true；來源為 `benchmarkWindow.*`。
 - 風險：額外成本 0／10／25／50 bps 的淨報酬分別為 1.529%／1.429%／1.279%／1.029%，每格都是有效 2／總數 2；模型 netR 平均 0.3058、有效 2／總數 2。來源為 `cohort.costRisk`。集中度沒有來源，標未知；這些情境也不是最大可能虧損。
@@ -128,8 +139,16 @@ node tests/helpers/verification-review-fixtures.mjs
 {"cohortPolicyVersion":"complete-issued-next-session-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"overnight-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"overnight-v4-tpex-exright","snapshotSchemaVersion":2}
 ```
 
+固定期間 `benchmark.modelKey`：
+
+```text
+{"benchmarkSpec":{"adjustmentVersion":"official-reference-ratio-v1","calendarVersion":"TWSE-FMTQIK-official-monthly-sessions-v2","costModelVersion":"flat-round-trip-0.471pct-v1","costPct":0.471,"entryField":"close","horizon":"signal-close-to-next-close","poolPolicy":"complete-exchange-pool-only","priceSourceVersion":"official-stock-month-v1","returnBasis":"adjusted-reference-price","sessions":1,"strategy":"overnight","timingPolicy":"price-observation-with-publication-disclosure-v1","version":"frozen-pool-fixed-price-v1","weighting":"equal-weight-frozen-pool-by-exchange"},"captureIdentity":{"cohortPolicyVersion":"first-canonical-publication-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"overnight-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"overnight-v4-tpex-exright","snapshotSchemaVersion":2}}
+```
+
+`benchmark.selectedModelKey` 為不適用（`not-provided-by-summary`）；captureIdentity／benchmarkSpec 不借 cohort identity。
+
 - 採集：預期 1 份、完整 1 份、100%，狀態是 `complete-zero`，完整格式起點 2026-08-03；來源為 `captureCoverage.*`。它是成功採集，不是未採集。
-- 母體：issued／no-entry／pending／resolved／unresolved 都是 0；成熟、未成熟、不明也都是 0。淨報酬未知，分母 0；來源為 `cohort.*`。
+- 母體：issued／no-entry／pending／resolved／unresolved 都是 0；成熟、未成熟、不明也都是 0。`metricCoverage` 的 `avgOpenReturn`、`avgCloseReturn`、`avgHighReturn`、`avgOpenReturnNet`、`avgCloseReturnNet`、`hitPlus2`、`brokeMinus2`、`winAtOpen`、`winAtClose` 每個都逐欄為 value unknown、valid 0、total 0、missing 0、validDays 0、reason `no-valid-values`。`validDays` 是日期數；來源為 `cohort.metricCoverage.*`。隔日策略不借用波段的 `avgResultPctNet` 欄位。
 - 比較：eligible 0、paired 0、eligibleDays 0、pairedDays 0，策略平均、候選池平均與平均差都未知；來源為 `benchmark.*`。不得把未知顯示成 0% 報酬。
 - 比較窗口：`latest-260-formal-captures-v1`，asOf 2026-08-03，實際 fromDate／throughDate 都是 2026-08-03，limit 260、allModels=true；來源為 `benchmarkWindow.*`。
 - 風險：0／10／25／50 bps 各情境都是有效 0／總數 0，數值未知；公司行動、集中度、停損與最大虧損都沒有母體可估，標未知。
@@ -146,8 +165,16 @@ node tests/helpers/verification-review-fixtures.mjs
 {"cohortPolicyVersion":"mature-issued-15-official-sessions-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"swing-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}
 ```
 
+固定期間 `benchmark.modelKey`：
+
+```text
+{"benchmarkSpec":{"adjustmentVersion":"official-reference-ratio-v1","calendarVersion":"TWSE-FMTQIK-official-monthly-sessions-v2","costModelVersion":"flat-round-trip-0.471pct-v1","costPct":0.471,"entryField":"open","horizon":"next-open-to-session-15-close","poolPolicy":"complete-exchange-pool-only","priceSourceVersion":"official-stock-month-v1","returnBasis":"adjusted-reference-price","sessions":15,"strategy":"swing","timingPolicy":"price-observation-with-publication-disclosure-v1","version":"frozen-pool-fixed-price-v1","weighting":"equal-weight-frozen-pool-by-exchange"},"captureIdentity":{"cohortPolicyVersion":"first-canonical-publication-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"swing-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}}
+```
+
+`benchmark.selectedModelKey` 為不適用（`not-provided-by-summary`）；captureIdentity／benchmarkSpec 不借 cohort identity。
+
 - 採集：現有 union 中預期 1 份、完整 1 份、coverageRate 100%，完整格式起點 2026-08-03；但 `expectedDateSource=unavailable`。來源為 `captureCoverage.*`。因此不能聲稱 2026-08-03 至 2026-08-24 的官方日期全集完整。
-- 母體：issued 1 = resolved 1，其餘狀態 0；成熟 0、未成熟 0、不明 1，`calendarReason=official-calendar-coverage-unknown`。毛／淨報酬都未知；來源為 `cohort.*`。已結案不等於已證成熟。
+- 母體：issued 1 = resolved 1，其餘狀態 0；成熟 0、未成熟 0、不明 1，`calendarReason=official-calendar-coverage-unknown`。`metricCoverage` 的 `avgResultPct`、`avgResultPctNet`、`netProfitRate`、`targetHitRate`、`avgDaysHeld` 每個都逐欄為 value unknown、valid 0、total 0、missing 0、validDays 0、reason `no-valid-values`。`validDays` 是日期數；來源為 `cohort.metricCoverage.*`。已結案不等於已證成熟。
 - 比較：eligible 1、paired 0、eligibleDays 1、pairedDays 0，狀態 pending，原因 `official-calendar-source-unavailable`；所有平均與差值未知。來源為 `benchmark.*`。
 - 比較窗口仍是 benchmark 自己的近 90 曆日／最多 260 份窗口（asOf 2026-08-24、requestedFromDate 2026-05-26、實際 capture 只有 2026-08-03）；它不能替成熟 cohort 補月曆。
 - 風險、個人流程與集中度均沒有足夠來源，標未知；不得用情境值補最大虧損。
@@ -169,8 +196,16 @@ headline 的 selectedModelKey 仍是目前含息模型，不能混算：
 {"cohortPolicyVersion":"mature-issued-15-official-sessions-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"swing-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}
 ```
 
+固定期間 `benchmark.modelKey`：
+
+```text
+{"benchmarkSpec":{"adjustmentVersion":"official-reference-ratio-v1","calendarVersion":"TWSE-FMTQIK-official-monthly-sessions-v2","costModelVersion":"flat-round-trip-0.471pct-v1","costPct":0.471,"entryField":"open","horizon":"next-open-to-session-15-close","poolPolicy":"complete-exchange-pool-only","priceSourceVersion":"official-stock-month-v1","returnBasis":"adjusted-reference-price","sessions":15,"strategy":"swing","timingPolicy":"price-observation-with-publication-disclosure-v1","version":"frozen-pool-fixed-price-v1","weighting":"equal-weight-frozen-pool-by-exchange"},"captureIdentity":{"cohortPolicyVersion":"first-canonical-publication-v1","costModelVersion":"legacy-unknown","entryModel":"signal-close-observation","evaluationVersion":"swing-price-observation-v1","returnBasis":"adjusted-reference-price","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}}
+```
+
+`benchmark.selectedModelKey` 為不適用（`not-provided-by-summary`）；captureIdentity／benchmarkSpec 不借 cohort identity。
+
 - 採集：預期 1、完整 1、coverageRate 100%，完整格式起點 2026-08-03；來源為 `captureCoverage.*`。
-- 母體：issued 1 = resolved 1，成熟 1；毛報酬 5%，有效 1。淨報酬未知，有效 0／總數 1／缺值 1、reason=`no-valid-values`；來源為 `cohort.*`。不能套今天的成本回填 legacy。
+- 母體：issued 1 = resolved 1，成熟 1。`metricCoverage` 逐欄為：`avgResultPct` value 5、valid 1、total 1、missing 0、validDays 1、reason null；`avgResultPctNet` value unknown、valid 0、total 1、missing 1、validDays 0、reason `no-valid-values`；`netProfitRate` value unknown、valid 0、total 1、missing 1、validDays 0、reason `no-valid-values`；`targetHitRate` value 100、valid 1、total 1、missing 0、validDays 1、reason null；`avgDaysHeld` value 15、valid 1、total 1、missing 0、validDays 1、reason null。`validDays` 是日期數；來源為 `cohort.metricCoverage.*`。不能套今天的成本回填 legacy。
 - 比較：固定期間為 2026-08-04 至 2026-08-24，eligible 1、paired 1、eligibleDays 1、pairedDays 1，策略與候選池都是 2%，平均差 0 個百分點；來源為 `benchmark.*`。這是 benchmark 自己的 `flat-round-trip-0.471pct-v1` 固定期間模型，不能拿來補 cohort 的未知成本。
 - 比較窗口：近 90 曆日後最新 260 份，asOf 2026-08-24、requestedFromDate 2026-05-26，實際 capture 只有 2026-08-03；來源為 `benchmarkWindow.*`。
 - 風險：0／10／25／50 bps 情境都未知，各為有效 0／總數 1，缺值原因 `cash-model-not-established`；來源為 `cohort.costRisk`。集中度未知，情境未知也不能說是 0 風險。
@@ -187,8 +222,16 @@ headline 的 selectedModelKey 仍是目前含息模型，不能混算：
 {"cohortPolicyVersion":"mature-issued-15-official-sessions-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"swing-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}
 ```
 
+固定期間 `benchmark.modelKey`：
+
+```text
+{"benchmarkSpec":{"adjustmentVersion":"official-reference-ratio-v1","calendarVersion":"TWSE-FMTQIK-official-monthly-sessions-v2","costModelVersion":"flat-round-trip-0.471pct-v1","costPct":0.471,"entryField":"open","horizon":"next-open-to-session-15-close","poolPolicy":"complete-exchange-pool-only","priceSourceVersion":"official-stock-month-v1","returnBasis":"adjusted-reference-price","sessions":15,"strategy":"swing","timingPolicy":"price-observation-with-publication-disclosure-v1","version":"frozen-pool-fixed-price-v1","weighting":"equal-weight-frozen-pool-by-exchange"},"captureIdentity":{"cohortPolicyVersion":"first-canonical-publication-v1","costModelVersion":"initial-notional-flat-0.471pct-v1","entryModel":"signal-close-observation","evaluationVersion":"swing-hypothetical-holding-v1","returnBasis":"cash-holding-return","selectionVersion":"swing-v22-net-rr-rank-tpex-exright","snapshotSchemaVersion":2}}
+```
+
+`benchmark.selectedModelKey` 為不適用（`not-provided-by-summary`）；captureIdentity／benchmarkSpec 不借 cohort identity。
+
 - 採集：預期 1、完整 1、coverageRate 100%，完整格式起點 2026-08-03；來源為 `captureCoverage.*`。採集完整不代表觀察窗成熟。
-- 母體：issued 1 = resolved 1，成熟 0、未成熟 1、不明 0。已觀察 5 個訊號後官方 session，毛／淨報酬仍不進成熟分母；來源為 `cohort.*` 與 `observedSessions=5`。
+- 母體：issued 1 = resolved 1，成熟 0、未成熟 1、不明 0。已觀察 5 個訊號後官方 session；`metricCoverage` 的 `avgResultPct`、`avgResultPctNet`、`netProfitRate`、`targetHitRate`、`avgDaysHeld` 每個都逐欄為 value unknown、valid 0、total 0、missing 0、validDays 0、reason `no-valid-values`，不進成熟分母。`validDays` 是日期數；來源為 `cohort.metricCoverage.*` 與 `observedSessions=5`。
 - 比較：eligible 1、paired 0、eligibleDays 1、pairedDays 0，狀態 pending，原因 `official-session-horizon-unavailable`；所有平均與差值未知。來源為 `benchmark.*`。
 - 比較窗口：asOf 2026-08-10、requestedFromDate 2026-05-12、實際 capture 2026-08-03、limit 260、allModels=true；來源為 `benchmarkWindow.*`。
 - 風險：0／10／25／50 bps 與 netR 都沒有成熟有效筆數；公司行動、集中度與最大虧損結論均未知。

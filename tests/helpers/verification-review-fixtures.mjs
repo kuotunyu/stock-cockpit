@@ -125,7 +125,6 @@ function swingEntry(mod, { signalId, captureId, status, resultPct, daysHeld }) {
 }
 
 function metricProjection(model) {
-  const coverage = model.metricCoverage?.avgResultPctNet || {};
   return {
     identity: model.identity,
     issued: model.issued,
@@ -136,14 +135,7 @@ function metricProjection(model) {
     matureCount: model.matureCount,
     immatureCount: model.immatureCount,
     unknownCount: model.unknownCount,
-    avgResultPct: model.avgResultPct ?? null,
-    avgResultPctNet: model.avgResultPctNet ?? null,
-    avgResultPctNetCoverage: {
-      validCount: coverage.validCount ?? 0,
-      totalCount: coverage.totalCount ?? model.issued,
-      missingCount: coverage.missingCount ?? model.issued,
-      reason: coverage.reason ?? null,
-    },
+    metricCoverage: model.metricCoverage ? structuredClone(model.metricCoverage) : null,
     costRisk: model.costRisk ?? null,
     missingReasons: model.missingReasons ?? {},
   };
@@ -153,6 +145,11 @@ function benchmarkProjection(summary) {
   const cohort = summary.cohorts[0];
   const model = summary.models[0];
   return {
+    modelKey: model?.modelKey ?? null,
+    selectedModelKey: null,
+    selectedModelKeyReason: 'not-provided-by-summary',
+    benchmarkSpec: structuredClone(model?.benchmarkSpec ?? null),
+    captureIdentity: structuredClone(model?.captureIdentity ?? null),
     status: cohort?.status || null,
     reason: cohort?.reason || summary.reason,
     eligibleCount: model?.eligibleCount ?? cohort?.eligibleCount ?? 0,
@@ -167,6 +164,10 @@ function benchmarkProjection(summary) {
     includesSelected: summary.includesSelected,
     poolPolicy: summary.poolPolicy,
   };
+}
+
+function cohortIdentityProjection(summary, model) {
+  return { modelKey: model.modelKey, selectedModelKey: summary.selectedModelKey };
 }
 
 function cohortWindowProjection(summary) {
@@ -265,8 +266,7 @@ function completeExample(mod) {
     id: 'complete',
     title: '完整合成觀察',
     strategy: 'swing',
-    modelKey: cohortSummary.headline.modelKey,
-    selectedModelKey: cohortSummary.selectedModelKey,
+    cohortIdentity: cohortIdentityProjection(cohortSummary, cohortSummary.headline),
     captureCoverage: { ...mod.summarizeCaptureCoverage([fixture.capture], [TRADE_DAY], { fromDate: TRADE_DAY, asOf: TRADE_DAY }), expectedDateSource: 'fresh' },
     cohort: { ...metricProjection(cohortSummary.headline), calendarReason: cohortSummary.calendarReason },
     cohortWindow: cohortWindowProjection(cohortSummary),
@@ -286,8 +286,8 @@ function zeroExample(mod) {
   const cohortSummary = mod.summarizeMatureVerification(fixture.db, 'overnight', { asOf: TRADE_DAY, population });
   const benchmarkSummary = mod.summarizeVerificationBenchmarks(fixture.db, 'overnight', { asOf: TRADE_DAY });
   return {
-    id: 'complete-zero', title: '完整零訊號', strategy: 'overnight', modelKey: cohortSummary.headline.modelKey,
-    selectedModelKey: cohortSummary.selectedModelKey,
+    id: 'complete-zero', title: '完整零訊號', strategy: 'overnight',
+    cohortIdentity: cohortIdentityProjection(cohortSummary, cohortSummary.headline),
     captureCoverage: { ...mod.summarizeCaptureCoverage([fixture.capture], [TRADE_DAY], { fromDate: TRADE_DAY, asOf: TRADE_DAY }), expectedDateSource: 'fresh' },
     cohort: { ...metricProjection(cohortSummary.headline), calendarReason: cohortSummary.calendarReason },
     cohortWindow: cohortWindowProjection(cohortSummary),
@@ -307,8 +307,8 @@ function calendarUnknownExample(mod) {
   const cohortSummary = mod.summarizeMatureVerification(fixture.db, 'swing', { asOf: '20260824', calendar, population });
   const benchmarkSummary = mod.summarizeVerificationBenchmarks(fixture.db, 'swing', { asOf: '20260824' });
   return {
-    id: 'calendar-unknown', title: '缺月曆', strategy: 'swing', modelKey: cohortSummary.headline.modelKey,
-    selectedModelKey: cohortSummary.selectedModelKey,
+    id: 'calendar-unknown', title: '缺月曆', strategy: 'swing',
+    cohortIdentity: cohortIdentityProjection(cohortSummary, cohortSummary.headline),
     captureCoverage: { ...mod.summarizeCaptureCoverage([fixture.capture], [], { fromDate: TRADE_DAY, asOf: TRADE_DAY }), expectedDateSource: 'unavailable' },
     cohort: { ...metricProjection(cohortSummary.headline), calendarReason: cohortSummary.calendarReason },
     cohortWindow: cohortWindowProjection(cohortSummary),
@@ -333,8 +333,8 @@ function costUnknownExample(mod) {
   const model = cohortSummary.models.find(item => item.identity.costModelVersion === 'legacy-unknown');
   const benchmarkSummary = mod.summarizeVerificationBenchmarks(fixture.db, 'swing', { asOf: '20260824' });
   return {
-    id: 'cost-unknown', title: '缺成本', strategy: 'swing', modelKey: model.modelKey,
-    selectedModelKey: cohortSummary.selectedModelKey,
+    id: 'cost-unknown', title: '缺成本', strategy: 'swing',
+    cohortIdentity: cohortIdentityProjection(cohortSummary, model),
     captureCoverage: { ...mod.summarizeCaptureCoverage([fixture.capture], [TRADE_DAY], { fromDate: TRADE_DAY, asOf: TRADE_DAY }), expectedDateSource: 'fresh' },
     cohort: { ...metricProjection(model), calendarReason: cohortSummary.calendarReason },
     cohortWindow: cohortWindowProjection(cohortSummary),
@@ -354,8 +354,8 @@ function immatureExample(mod) {
   const cohortSummary = mod.summarizeMatureVerification(fixture.db, 'swing', { asOf: '20260810', calendar: shortCalendar, population });
   const benchmarkSummary = mod.summarizeVerificationBenchmarks(fixture.db, 'swing', { asOf: '20260810' });
   return {
-    id: 'immature', title: '未成熟', strategy: 'swing', modelKey: cohortSummary.headline.modelKey,
-    selectedModelKey: cohortSummary.selectedModelKey,
+    id: 'immature', title: '未成熟', strategy: 'swing',
+    cohortIdentity: cohortIdentityProjection(cohortSummary, cohortSummary.headline),
     captureCoverage: { ...mod.summarizeCaptureCoverage([fixture.capture], [TRADE_DAY], { fromDate: TRADE_DAY, asOf: TRADE_DAY }), expectedDateSource: 'fresh' },
     cohort: { ...metricProjection(cohortSummary.headline), calendarReason: cohortSummary.calendarReason },
     cohortWindow: cohortWindowProjection(cohortSummary),

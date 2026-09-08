@@ -17,6 +17,9 @@ after(async () => {
 });
 
 const byId = new Map(buildSyntheticVerificationReviews(mod).map(example => [example.id, example]));
+const emptyCoverage = {
+  value: null, validCount: 0, totalCount: 0, missingCount: 0, validDays: 0, reason: 'no-valid-values',
+};
 
 test('完整案例保留成熟母體、固定期間配對與個人現金差額的不同口徑', () => {
   const example = byId.get('complete');
@@ -26,8 +29,12 @@ test('完整案例保留成熟母體、固定期間配對與個人現金差額�
   assert.equal(example.cohort.issued, 2);
   assert.equal(example.cohort.matureCount, 2);
   assert.equal(example.cohort.resolved, 2);
-  assert.equal(example.cohort.avgResultPctNet, 1.529);
-  assert.deepEqual(example.cohort.avgResultPctNetCoverage, { validCount: 2, totalCount: 2, missingCount: 0, reason: null });
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPct, {
+    value: 2, validCount: 2, totalCount: 2, missingCount: 0, reason: null, validDays: 1,
+  });
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPctNet, {
+    value: 1.529, validCount: 2, totalCount: 2, missingCount: 0, reason: null, validDays: 1,
+  });
   assert.equal(example.benchmark.eligibleCount, 2);
   assert.equal(example.benchmark.pairedCount, 2);
   assert.equal(example.benchmark.eligibleDays, 1);
@@ -52,7 +59,11 @@ test('完整零訊號算採集成功但沒有收益與配對分母', () => {
   assert.equal(example.captureCoverage.coverageRate, 100);
   assert.equal(example.cohort.issued, 0);
   assert.equal(example.cohort.matureCount, 0);
-  assert.equal(example.cohort.avgResultPctNet, null);
+  assert.deepEqual(example.cohort.metricCoverage.avgOpenReturn, emptyCoverage);
+  assert.deepEqual(example.cohort.metricCoverage.avgCloseReturn, emptyCoverage);
+  assert.deepEqual(example.cohort.metricCoverage.avgOpenReturnNet, emptyCoverage);
+  assert.deepEqual(example.cohort.metricCoverage.avgCloseReturnNet, emptyCoverage);
+  assert.equal(example.cohort.metricCoverage.avgResultPctNet, undefined, '隔日策略不借波段欄位');
   assert.equal(example.cohortWindow.maxSessions, 1);
   assert.equal(example.benchmark.eligibleCount, 0);
   assert.equal(example.benchmark.pairedCount, 0);
@@ -67,6 +78,8 @@ test('缺月曆時觀察到的100%覆蓋不能升格成完整預期窗口', () =
   assert.equal(example.cohort.matureCount, 0);
   assert.equal(example.cohort.unknownCount, 1);
   assert.equal(example.cohort.calendarReason, 'official-calendar-coverage-unknown');
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPct, emptyCoverage);
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPctNet, emptyCoverage);
   assert.equal(example.cohortWindow.calendarSource, null);
   assert.equal(example.benchmark.status, 'pending');
   assert.equal(example.benchmark.reason, 'official-calendar-source-unavailable');
@@ -75,9 +88,12 @@ test('缺月曆時觀察到的100%覆蓋不能升格成完整預期窗口', () =
 test('缺成本保留毛報酬但淨值與個人現金差額保持未知', () => {
   const example = byId.get('cost-unknown');
   assert.equal(example.cohort.identity.costModelVersion, 'legacy-unknown');
-  assert.equal(example.cohort.avgResultPct, 5);
-  assert.equal(example.cohort.avgResultPctNet, null);
-  assert.deepEqual(example.cohort.avgResultPctNetCoverage, { validCount: 0, totalCount: 1, missingCount: 1, reason: 'no-valid-values' });
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPct, {
+    value: 5, validCount: 1, totalCount: 1, missingCount: 0, reason: null, validDays: 1,
+  });
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPctNet, {
+    value: null, validCount: 0, totalCount: 1, missingCount: 1, reason: 'no-valid-values', validDays: 0,
+  });
   assert.equal(example.personal.buyCash, null);
   assert.equal(example.personal.sellCash, null);
   assert.equal(example.personal.cashDifference, null);
@@ -91,20 +107,32 @@ test('未成熟案例不因快速結案或管理節點提前進入有效分母',
   assert.equal(example.cohort.issued, 1);
   assert.equal(example.cohort.matureCount, 0);
   assert.equal(example.cohort.immatureCount, 1);
-  assert.equal(example.cohort.avgResultPctNet, null);
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPct, emptyCoverage);
+  assert.deepEqual(example.cohort.metricCoverage.avgResultPctNet, emptyCoverage);
   assert.equal(example.observedSessions, 5);
   assert.equal(example.cohortWindow.maxSessions, 15);
   assert.equal(example.reviewCadenceSessions, 20);
   assert.equal(example.benchmark.status, 'pending');
 });
 
-test('每例保留來源自己的窗口與完整model key', () => {
+test('每例分開保留cohort與benchmark的完整身份和窗口', () => {
   assert.deepEqual([...byId.keys()], ['complete', 'complete-zero', 'calendar-unknown', 'cost-unknown', 'immature']);
   for (const example of byId.values()) {
-    assert.ok(example.modelKey.startsWith('{'));
-    assert.equal(example.selectedModelKey.startsWith('{'), true);
+    assert.deepEqual(JSON.parse(example.cohortIdentity.modelKey), example.cohort.identity);
+    assert.ok(example.cohortIdentity.selectedModelKey);
+    const benchmarkKey = JSON.parse(example.benchmark.modelKey);
+    assert.deepEqual(benchmarkKey.captureIdentity, example.benchmark.captureIdentity);
+    assert.deepEqual(benchmarkKey.benchmarkSpec, example.benchmark.benchmarkSpec);
+    assert.equal(example.benchmark.selectedModelKey, null);
+    assert.equal(example.benchmark.selectedModelKeyReason, 'not-provided-by-summary');
+    assert.notEqual(example.benchmark.modelKey, example.cohortIdentity.modelKey);
     assert.equal(example.benchmarkWindow.limit, 260);
     assert.equal(example.benchmarkWindow.allModels, true);
     assert.equal(example.reviewCadenceIsThreshold, false);
   }
+  const costUnknown = byId.get('cost-unknown');
+  assert.equal(costUnknown.cohort.identity.costModelVersion, 'legacy-unknown');
+  assert.equal(costUnknown.benchmark.captureIdentity.costModelVersion, 'legacy-unknown');
+  assert.equal(costUnknown.benchmark.benchmarkSpec.costModelVersion, 'flat-round-trip-0.471pct-v1');
+  assert.notDeepEqual(JSON.parse(costUnknown.cohortIdentity.selectedModelKey), costUnknown.cohort.identity);
 });
