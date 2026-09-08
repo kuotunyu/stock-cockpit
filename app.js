@@ -13115,7 +13115,7 @@ const GLOSSARY = [
   { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
   { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "跳空略過"], cat: "成績單與決策", def: "波段驗證的另一個口徑：同一批驗證單改以<strong>第一個交易日的開盤價</strong>當進場價重算。訊號要等收盤後的整批資料才算得出來，真實進場多半是次日開盤，所以並陳。開盤已經在停損下方或目標上方的單，這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];
-const glossaryState = { cat: "", q: "" };
+const glossaryState = { cat: "", q: "", screenQuery: false };
 
 function renderGlossary() {
   const body = document.getElementById("glossaryBody");
@@ -13170,6 +13170,7 @@ function openGlossary(presetQuery = "", focusInput = true, trigger = document.ac
   if (!modal) return;
   glossaryState.cat = GLOSSARY_CATS.includes(presetCat) ? presetCat : "";
   glossaryState.q = presetQuery || "";
+  glossaryState.screenQuery = false;
   if (input) input.value = glossaryState.q;
   renderGlossary();
   openDialogLayer(modal, {
@@ -13538,6 +13539,7 @@ document.addEventListener("keydown", (event) => {
 });
 document.getElementById("glossarySearch")?.addEventListener("input", (event) => {
   glossaryState.q = event.target.value || "";
+  glossaryState.screenQuery = false;
   renderGlossary();
 });
 // 「這一頁是什麼」：分頁的定義以前只藏在 title 提示裡，手機沒有 hover 永遠看不到。
@@ -13553,6 +13555,7 @@ const SCREEN_HELP_TERMS = {
 };
 function openScreenHelp(trigger = document.activeElement) {
   openGlossary(SCREEN_HELP_TERMS[state.screen] || "", false, trigger, "畫面說明");
+  glossaryState.screenQuery = true;
 }
 document.getElementById("screenHelp")?.addEventListener("click", (event) => openScreenHelp(event.currentTarget));
 
@@ -13669,8 +13672,17 @@ glossaryModalEl?.addEventListener("click", (event) => {
   }
   const chip = event.target.closest("[data-glossary-cat]");
   if (chip) {
+    const restoreFocus = document.activeElement === chip;
+    // 頁名只用來定位第一次開啟的畫面說明；切分類後不再限制名詞。
+    // 使用者自行輸入的搜尋則保留，仍可搭配分類篩選。
+    if (glossaryState.screenQuery) {
+      glossaryState.q = "";
+      glossaryState.screenQuery = false;
+      document.getElementById("glossarySearch").value = "";
+    }
     glossaryState.cat = chip.dataset.glossaryCat || "";
     renderGlossary();
+    if (restoreFocus) document.querySelector("#glossaryCats .is-active")?.focus();
   }
 });
 

@@ -1,5 +1,7 @@
 # Stock1 測試套件
 
+`glossary-navigation` 的 DOM／Chromium 測試涵蓋七頁問號入口：首次定位當頁說明，切分類解除系統預填頁名，手動搜尋仍保留。另驗重新開啟、一般名詞表／名詞連結、分類重繪焦點及 Escape 回到問號；瀏覽器驗 375／768／1280／1440 px，截圖為 `test-results/browser/glossary-category-*`。
+
 持股情境風險的 `portfolio-plan-risk` 後端／前端測試涵蓋目前停損、部分計畫股數、到達／跌破、過期／多計畫衝突、缺行情與市場衝突、日期／來源有效性及集中度未知分母。共用 `portfolio-risk.js` 由 server 與 classic browser 載入同一份公式；以明確 `asOf` 驗盤中 120 秒產品容忍值與歷史官方收盤參考，不用星期推定最新交易日。可先跑 `node --test tests/backend/portfolio-plan-risk.test.mjs tests/frontend/portfolio-plan-risk.test.mjs tests/frontend/holdings-render.test.mjs`。
 
 新單部位測試驗風險預算與明確投入金額雙上限、買費四捨五入／最低額及整張／零股。`capital` 為本機偏好，`availableCash` 只存本頁 RAM、切帳號清空；未提供則顯示資金未檢查。Chromium 同名案例在 375／768／1280／1440 px 與 100%／200% 文字驗資金欄位、持股風險、原生 details、計畫連結與更新後回焦，產物為 `test-results/browser/portfolio-{size,risk}-*`。此範圍不表示全站 200% 完成；固定底部導覽已由 T11 修正並驗證，詳見下方 T11 範圍。
