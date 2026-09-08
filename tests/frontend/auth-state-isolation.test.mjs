@@ -1,3 +1,5 @@
+// DOM 互動與作用域契約；teardown 排空已完成回應再關閉視窗。
+import { setImmediate } from 'node:timers/promises';
 // 驗證帳號登出／失效時清除私人前端資料，且舊帳號的延遲回應不會污染新帳號。
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -95,7 +97,7 @@ function assertUserScopeCleared(app) {
 
 test("logout 會同步清空自選、提醒、帳本、隱藏 DOM 與私人追蹤代號", async (t) => {
   const app = await createAppWindow({ fetchRoutes: accountRoutes() });
-  t.after(() => app.cleanup());
+  t.after(async () => { await setImmediate(); app.cleanup(); });
 
   renderPrivateDom(app);
   const before = privateSnapshot(app);
@@ -113,7 +115,7 @@ test("logout 會同步清空自選、提醒、帳本、隱藏 DOM 與私人追�
 
 test("任何受保護 API 回 401 時，也走同一套私人資料清除流程", async (t) => {
   const app = await createAppWindow({ fetchRoutes: accountRoutes() });
-  t.after(() => app.cleanup());
+  t.after(async () => { await setImmediate(); app.cleanup(); });
 
   renderPrivateDom(app);
   const handled = app.evalIn(`handleAuthRequired(Object.assign(new Error("登入已逾期"), { status: 401, code: "AUTH_REQUIRED" }))`);
@@ -152,7 +154,7 @@ test("A 的延遲 watchlists／alerts／trades 回應在 B 登入後一律作廢
     },
   });
   const app = await createAppWindow({ fetchRoutes: routes });
-  t.after(() => app.cleanup());
+  t.after(async () => { await setImmediate(); app.cleanup(); });
 
   phase = "stale-a";
   const staleLoads = app.evalIn("Promise.all([loadWatchListsFromServer(), loadAlertsFromServer(), loadTradesFromServer()])");

@@ -436,6 +436,7 @@ const strategyState = {
 };
 
 const technicalState = {
+  controller: null,
   loading: false,
   error: "",
   data: null,
@@ -484,6 +485,7 @@ const fundamentalsState = {
 };
 
 const searchState = {
+  controller: null,
   token: 0,
   query: "",
   loading: false,
@@ -1401,47 +1403,134 @@ function endFetch() {
   }
 }
 
+// UI 等待上限；來源單次 20 秒、月 K 重試及全市場三路掃描的總耗時不同。
+// 這不是 server 工作取消契約；deadline 同時涵蓋 headers 與 JSON body。
+function apiDeadlineMs(path, options = {}) {
+  const route = path.split('?')[0];
+  if (route.startsWith('/api/personal-data/restore')) return 120000;
+  if (!['GET', 'HEAD'].includes(String(options.method || 'GET').toUpperCase())) return 90000;
+  if (/^\/api\/(overnight|swing|backtest)(\/|$)/.test(route) && route !== '/api/swing/inspect') return 600000;
+  if (['/api/technical-analysis', '/api/swing/inspect', '/api/fundamentals'].includes(route)) return 180000;
+  if (['/api/symbols', '/api/quotes', '/api/markets'].includes(route)) return 65000;
+  if (/^\/api\/(auth|admin|trades|trade-plans|watchlists|alerts|personal-data|notes|company|sources|app-version)(\/|$)/.test(route)) return 30000;
+  return 90000;
+}
+
 async function fetchApi(path, options = {}) {
+  const { timeoutMs = apiDeadlineMs(path, options), signal: callerSignal, ...requestOptions } = options;
+  const writing = !['GET', 'HEAD'].includes(String(options.method || 'GET').toUpperCase());
+  const controller = new AbortController();
+  let responseStatus = 0;
+  let stopWaiting;
+  const stopped = new Promise((_, reject) => { stopWaiting = reject; });
+  const abort = (code) => {
+    const error = new Error(code === 'REQUEST_TIMEOUT'
+      ? '等待回應逾時，可再試一次；伺服器可能仍在處理'
+      : '已停止等候此請求；伺服器可能仍在處理');
+    error.code = code;
+    // 身分已確定失效時，不能被未完成的錯誤 body 掩蓋。
+    if (responseStatus === 401 || responseStatus === 403) error.status = responseStatus;
+    controller.abort();
+    stopWaiting(error);
+  };
+  const onCancel = () => abort('REQUEST_CANCELLED');
+  callerSignal?.addEventListener('abort', onCancel, { once: true });
+  const timer = window.setTimeout(() => abort('REQUEST_TIMEOUT'), timeoutMs);
   beginFetch();
   try {
-  const failures = [];
-  for (const url of apiCandidates(path)) {
-    try {
-      const response = await fetch(url, {
-        cache: "no-store",
-        credentials: "include",
-        ...options,
-        headers: {
-          ...(options.body ? { "content-type": "application/json" } : {}),
-          ...(options.headers || {}),
-        },
-      });
-      if (!response.ok) {
-        let message = `HTTP ${response.status}`;
-        let code = "";
+    if (callerSignal?.aborted) onCancel();
+    const urls = apiCandidates(path);
+    // file:// 沒有可寫的同源 API；預先選定 localhost，不在寫入後再試候選 URL。
+    const candidates = writing ? [urls[urls.length - 1]] : urls;
+    const run = async () => {
+      for (let index = 0; index < candidates.length; index += 1) {
+        if (controller.signal.aborted) return stopped;
         try {
-          const payload = await response.json();
-          message = payload.error || payload.message || message;
-          code = payload.code || "";
-        } catch {
-          // Keep the HTTP status when the server does not return JSON.
+          const response = await fetch(candidates[index], {
+            cache: 'no-store', credentials: 'include', ...requestOptions,
+            signal: controller.signal,
+            headers: {
+              ...(options.body ? { 'content-type': 'application/json' } : {}),
+              ...(options.headers || {}),
+            },
+          });
+          responseStatus = response.status;
+          if (!response.ok) {
+            let payload = {};
+            try { payload = await response.json(); } catch { /* Preserve explicit HTTP rejection. */ }
+            const error = new Error(payload?.error || payload?.message || `HTTP ${response.status}`);
+            Object.assign(error, { fromServer: true, status: response.status, code: payload?.code || '' });
+            throw error;
+          }
+          return await response.json();
+        } catch (error) {
+          if (error.fromServer || writing || controller.signal.aborted || index === candidates.length - 1) throw error;
         }
-        const serverError = new Error(message);
-        serverError.fromServer = true;
-        serverError.status = response.status;
-        serverError.code = code;
-        throw serverError;
       }
-      return response.json();
-    } catch (error) {
-      if (error.fromServer) throw error;
-      failures.push(`${url}: ${error.message}`);
+    };
+    return await Promise.race([run(), stopped]);
+  } catch (error) {
+    if (writing && !error.fromServer && ![401,403].includes(error.status)) {
+      error.outcomeUnknown = true;
+      error.message = `儲存結果尚未確認，請先核對伺服器資料；${error.code === 'REQUEST_TIMEOUT' ? '等待逾時' : '未取得完整回應'}`;
+    } else if (!error.fromServer && !error.code) {
+      error.message = `後端連線或回應讀取失敗，請稍後重試：${error.message}`;
     }
-  }
-  throw new Error(`後端連線失敗，請確認 npm start 並開啟 http://127.0.0.1:5174/。${failures.join("；")}`);
+    throw error;
   } finally {
+    window.clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', onCancel);
     endFetch();
   }
+}
+
+// 僅供四個具有原 rev CAS 契約的個人資源使用；不追蹤密碼、憑證或復原 body。
+// 每個功能持有自己的 pending；未知後只 GET，下一次明確操作才重送原 body+rev。
+async function putConfirmedResource(path, body, cell, matches, intentKey = JSON.stringify({ ...body, rev: undefined })) {
+  body = JSON.parse(JSON.stringify(body));
+  const scope = captureAuthScope();
+  const previous = cell.pending;
+  const operation = previous || { body, matches, scope, intentKey };
+  if (!isCurrentAuthScope(operation.scope)) throw authScopeChangedError();
+  const unknown = () => Object.assign(new Error('儲存結果尚未確認；草稿保留，再次保存會先核對並只重試原送出版本'), { outcomeUnknown: true });
+  const conflict = (payload) => Object.assign(new Error('原送出版本已無法再次提交，但最新資料與原意圖不同；請核對後再操作'), { noReplay: true, canonical: payload });
+  const inspect = async () => {
+    let latest;
+    try { latest = await fetchApi(path); } catch (error) {
+      if ([401,403].includes(error.status)) throw error;
+      throw unknown();
+    }
+    if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
+    // rev 未前進時，GET 尚未看見資料不能證明原請求沒有在排隊。
+    if (!(Number(latest.rev) > Number(operation.body.rev))) return null;
+    cell.pending = null;
+    if (!operation.matches(latest)) throw conflict(latest);
+    return latest;
+  };
+  let payload;
+  if (previous) payload = await inspect();
+  if (!payload) {
+    try {
+      payload = await fetchApi(path, { method: 'PUT', body: JSON.stringify(operation.body) });
+      if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
+      cell.pending = null;
+    } catch (error) {
+      if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
+      if (error.outcomeUnknown || (previous && error.status === 409)) {
+        cell.pending = operation;
+        payload = await inspect();
+        if (!payload) throw unknown();
+      } else {
+        // 有明確拒絕也不能抹掉更早那份仍可能在處理的請求。
+        if (previous) throw unknown();
+        throw error;
+      }
+    }
+  }
+  if (previous && intentKey !== operation.intentKey) {
+    throw Object.assign(new Error('原送出版本已確認保存；本次修改尚未保存，請核對後再保存'), { noReplay: true, canonical: payload, previousBody: operation.body, previousConfirmed: true });
+  }
+  return payload;
 }
 
 // ===== 對話層焦點管理 =====
@@ -2033,7 +2122,13 @@ async function restorePersonalBackup() {
       setPersonalBackupError("復原預覽已過期或資料已變更，請重新選檔再預覽一次。");
       return;
     }
-    personalBackupState.status = `復原失敗：${error.message}`;
+    if (error.outcomeUnknown) {
+      personalBackupState.previewToken = '';
+      personalBackupState.preview = null;
+      if (confirm) confirm.checked = false;
+      personalBackupState.status = '復原結果尚未確認，伺服器可能已寫入。請先重新載入個人資料核對；如仍需復原，請重新選檔預覽。';
+      void Promise.allSettled([loadWatchListsFromServer(), loadAlertsFromServer(), loadTradesFromServer(), loadTradePlansFromServer()]);
+    } else personalBackupState.status = `復原失敗：${error.message}`;
     personalBackupState.statusTone = "error";
     syncPersonalBackupControls();
   } finally {
@@ -2050,6 +2145,11 @@ function clearUserScopedState({ renderNow = true } = {}) {
   notesState.code = "";
   notesState.notes = [];
   authScopeGeneration += 1;
+  watchListWrite.pending = null;
+  alertWrite.pending = null;
+  tradesWrite.pending = null;
+  pendingTradeAddition = null;
+  tradePlanWrite.pending = null;
   resetPersonalBackupRestoreState({ closeModal: true });
   resetTradePlansForAccount();
   Object.assign(holdingsPlanRiskState, { loadAttempted: false, loading: false, error: '', alertPct: null });
@@ -2250,6 +2350,7 @@ function applyWatchListsPayload(lists) {
   });
 }
 
+const watchListWrite = { pending: null };
 let watchListsRev = 0; // 蓋寫防護：伺服器端的資料版本號，PUT 帶舊版會被 409 擋下
 let watchListMutationVersion = 0;
 let watchListSyncInFlight = false;
@@ -2299,10 +2400,8 @@ async function syncWatchListsToServer() {
   const mutationVersion = watchListMutationVersion;
   const lists = watchListsPayload();
   try {
-    const payload = await fetchApi("/api/watchlists", {
-      method: "PUT",
-      body: JSON.stringify({ lists, rev: watchListsRev }),
-    });
+    const payload = await putConfirmedResource('/api/watchlists', { lists, rev: watchListsRev }, watchListWrite,
+      latest => Object.keys(lists).every(key => JSON.stringify([...(latest.lists?.[key] || [])].sort()) === JSON.stringify([...lists[key]].sort())));
     if (!isCurrentAuthScope(scope)) return;
     if (Number.isFinite(Number(payload?.rev))) watchListsRev = Number(payload.rev);
     if (mutationVersion === watchListMutationVersion) {
@@ -2314,6 +2413,13 @@ async function syncWatchListsToServer() {
     }
   } catch (error) {
     if (!isCurrentAuthScope(scope)) return;
+    if (error.outcomeUnknown || error.noReplay) {
+      watchListSyncPending = false;
+      window.clearTimeout(watchListSyncTimer);
+      if (error.canonical) watchListsRev = Number(error.canonical.rev);
+      showToast(error.message);
+      return;
+    }
     if (error?.status === 409) {
       // 別的分頁改過 → 以伺服器版為準（避免把別人剛存的清單蓋掉）
       await loadWatchListsFromServer();
@@ -2329,7 +2435,7 @@ async function syncWatchListsToServer() {
   } finally {
     if (runId !== watchListSyncRunId) return;
     watchListSyncInFlight = false;
-    if (watchListSyncPending && authState.user) {
+    if (watchListSyncPending && authState.user && !watchListWrite.pending) {
       watchListSyncPending = false;
       window.clearTimeout(watchListSyncTimer);
       watchListSyncTimer = window.setTimeout(syncWatchListsToServer, 0);
@@ -2345,6 +2451,7 @@ const priceAlertsState = {
   loaded: false,
   rev: 0, // 蓋寫防護版本號
 };
+const alertWrite = { pending: null };
 let alertSyncTimer = 0;
 let alertMutationVersion = 0;
 let alertSyncInFlight = false;
@@ -2375,9 +2482,10 @@ async function loadAlertsFromServer() {
   }
 }
 
-function scheduleAlertSync() {
+function scheduleAlertSync({ userInitiated = true } = {}) {
   if (!authState.user) return;
   alertMutationVersion += 1;
+  if (alertWrite.pending && !userInitiated) return;
   window.clearTimeout(alertSyncTimer);
   alertSyncTimer = window.setTimeout(syncAlertsToServer, 350);
 }
@@ -2395,10 +2503,8 @@ async function syncAlertsToServer() {
   const mutationVersion = alertMutationVersion;
   const alerts = priceAlertsState.alerts.map((alert) => ({ ...alert }));
   try {
-    const payload = await fetchApi("/api/alerts", {
-      method: "PUT",
-      body: JSON.stringify({ alerts, rev: priceAlertsState.rev }),
-    });
+    const payload = await putConfirmedResource('/api/alerts', { alerts, rev: priceAlertsState.rev }, alertWrite,
+      latest => JSON.stringify(latest.alerts) === JSON.stringify(alerts));
     if (!isCurrentAuthScope(scope)) return;
     if (Number.isFinite(Number(payload?.rev))) priceAlertsState.rev = Number(payload.rev);
     if (mutationVersion === alertMutationVersion) {
@@ -2409,6 +2515,13 @@ async function syncAlertsToServer() {
     }
   } catch (error) {
     if (!isCurrentAuthScope(scope)) return;
+    if (error.outcomeUnknown || error.noReplay) {
+      alertSyncPending = false;
+      window.clearTimeout(alertSyncTimer);
+      if (error.canonical) priceAlertsState.rev = Number(error.canonical.rev);
+      showToast(error.message);
+      return;
+    }
     if (error?.status === 409) {
       await loadAlertsFromServer();
       showToast("到價提醒已在其他視窗更新，已同步最新版——剛剛的變更請再操作一次");
@@ -2423,7 +2536,7 @@ async function syncAlertsToServer() {
   } finally {
     if (runId !== alertSyncRunId) return;
     alertSyncInFlight = false;
-    if (alertSyncPending && authState.user) {
+    if (alertSyncPending && authState.user && !alertWrite.pending) {
       alertSyncPending = false;
       window.clearTimeout(alertSyncTimer);
       alertSyncTimer = window.setTimeout(syncAlertsToServer, 0);
@@ -2534,7 +2647,7 @@ function checkPriceAlerts(eligibleCodes = null, { renderNow = true } = {}) {
   }
   if (fired) {
     playAlertBeep();
-    scheduleAlertSync();
+    scheduleAlertSync({ userInitiated: false });
     if (renderNow) render();
   }
   return fired;
@@ -2652,6 +2765,9 @@ async function refreshBackgroundPriceAlerts() {
 // ===== 持股損益（完整交易紀錄）=====
 // 紀錄與設定存伺服器（每人一份）；損益引擎在後端（加權平均法），前端只把
 // 持股跟即時報價配對算未實現損益。任何寫入都走 PUT 整包同步，伺服器擋「賣超」。
+const tradePlanWrite = { pending: null };
+const tradesWrite = { pending: null };
+let pendingTradeAddition = null;
 const tradePlansState = { plans: [], rev: 0, loaded: false, saving: false, requestSeq: 0, editorSeq: 0, editor: null, base: null, linkEvidence: {} };
 const tradePlanDrafts = new Map(); // 僅頁面記憶體，按帳號隔離；重新登入同帳號可取回未送出的草稿。
 let detailTradePlanContext = null;
@@ -2850,6 +2966,7 @@ async function openTradePlans(trigger = document.activeElement, create = false) 
   catch(error) { if(isCurrentAuthScope(scope) && editorSeq === tradePlansState.editorSeq && !handleAuthRequired(error)) document.getElementById('tradePlanError').textContent=error.message; }
 }
 async function putTradePlanIntent(operation) {
+  operation = JSON.parse(JSON.stringify(operation));
   const scope = captureAuthScope();
   const build = () => {
     const found = tradePlansState.plans.find(plan=>plan.planId===operation.planId);
@@ -2863,11 +2980,16 @@ async function putTradePlanIntent(operation) {
   };
   for(let attempt=0;attempt<2;attempt+=1) {
     try {
-      const payload=await fetchApi('/api/trade-plans',{method:'PUT',body:JSON.stringify({schemaVersion:1,rev:tradePlansState.rev,plans:build()})});
+      const payload=await putConfirmedResource('/api/trade-plans',{schemaVersion:1,rev:tradePlansState.rev,plans:build()},tradePlanWrite,
+        latest => {
+          const found=latest.plans?.find(plan=>plan.planId===operation.planId);
+          return found && Object.entries(operation.changes).every(([key,value])=>JSON.stringify(found[key])===JSON.stringify(value));
+        }, JSON.stringify(operation));
       if(!isCurrentAuthScope(scope))throw authScopeChangedError();
       tradePlansState.requestSeq+=1; applyTradePlansPayload(payload); return;
     } catch(error) {
-      if(error.status!==409 || attempt || !isCurrentAuthScope(scope))throw error;
+      if(isCurrentAuthScope(scope) && error.canonical) applyTradePlansPayload(error.canonical);
+      if(error.status!==409 || error.noReplay || attempt || !isCurrentAuthScope(scope))throw error;
       const latest=await fetchApi('/api/trade-plans');
       if(!isCurrentAuthScope(scope))throw authScopeChangedError();
       applyTradePlansPayload(latest);
@@ -2908,7 +3030,19 @@ async function submitTradePlan(event) {
     renderTradePlanList();
   }catch(error){
     if(!isCurrentAuthScope(scope))return;
-    if(!handleAuthRequired(error) && editorSeq===tradePlansState.editorSeq){
+    if (error.previousConfirmed && tradePlansState.editor?.planId === draft.planId) {
+      const canonical = error.canonical.plans.find(plan => plan.planId === draft.planId);
+      const sent = error.previousBody.plans.find(plan => plan.planId === draft.planId);
+      if (canonical && sent) {
+        rememberTradePlanDraft();
+        const laterChanges = tradePlanDelta(sent, tradePlansState.editor);
+        tradePlansState.base = canonical;
+        tradePlansState.editor = applyTradePlanDelta(canonical, laterChanges);
+        renderTradePlanEditor();
+        rememberTradePlanDraft();
+      }
+    }
+    if(!handleAuthRequired(error) && (editorSeq===tradePlansState.editorSeq || ((error.outcomeUnknown || error.previousConfirmed) && tradePlansState.editor?.planId===draft.planId))){
       const message=document.getElementById('tradePlanError');message.textContent=error.message;message.focus();
     }
   }finally{if(isCurrentAuthScope(scope)){tradePlansState.saving=false;button.disabled=false;}}
@@ -3268,10 +3402,11 @@ function beginTradeMutation() {
   }
   tradesState.mutating = true;
   tradesMutationVersion += 1;
-  return true;
+  return captureAuthScope();
 }
 
-function finishTradeMutation() {
+function finishTradeMutation(scope) {
+  if (!isCurrentAuthScope(scope)) return;
   tradesState.mutating = false;
   render();
 }
@@ -3312,12 +3447,44 @@ async function loadTradesFromServer() {
   }
 }
 
-async function putTrades(next) {
-  const scope = captureAuthScope();
-  const payload = await fetchApi("/api/trades", {
-    method: "PUT",
-    body: JSON.stringify({ schemaVersion: tradesState.schemaVersion || 2, ...next, rev: tradesState.rev }),
+function tradeIntentValue(record, key) {
+  const value = record?.[key];
+  if (key === 'date' || key === 'tradeDate' || key === 'exDate') return compactTradeDate(value);
+  return value;
+}
+
+function tradesIntentMatches(latest, next, baseline) {
+  if (JSON.stringify(next.settings) !== JSON.stringify(baseline.settings)
+    && !Object.entries(next.settings || {}).every(([key,value]) => latest.settings?.[key] === value)) return false;
+  const derived = new Set(['instrumentSource', 'instrumentReviewReason', 'fee', 'tax', 'feeRuleId', 'taxRuleId', 'feeEstimated', 'taxEstimated']);
+  for (const old of baseline.records) {
+    if (!next.records.some(record => record.id === old.id) && latest.records?.some(record => record.id === old.id)) return false;
+  }
+  return next.records.every(record => {
+    const before = baseline.records.find(old => old.id === record.id);
+    const actual = latest.records?.find(item => item.id === record.id);
+    if (JSON.stringify(record) === JSON.stringify(before)) return true;
+    if (!actual) return false;
+    return Object.keys(record).every(key => {
+      if (derived.has(key) || (key.startsWith('fee') && record.feeSource === 'estimated') || (key.startsWith('tax') && record.taxSource === 'estimated')) return true;
+      if (before && JSON.stringify(record[key]) === JSON.stringify(before[key])) return true;
+      return JSON.stringify(tradeIntentValue(actual,key)) === JSON.stringify(tradeIntentValue(record,key));
+    });
   });
+}
+
+async function putTrades(next, intentKey) {
+  next = JSON.parse(JSON.stringify(next));
+  const scope = captureAuthScope();
+  const baseline = JSON.parse(JSON.stringify({ settings: tradesState.settings, records: tradesState.records }));
+  let payload;
+  try {
+    payload = await putConfirmedResource('/api/trades', { schemaVersion: tradesState.schemaVersion || 2, ...next, rev: tradesState.rev }, tradesWrite,
+      latest => tradesIntentMatches(latest, next, baseline), intentKey);
+  } catch (error) {
+    if (isCurrentAuthScope(scope) && error.canonical) applyTradesPayload(error.canonical);
+    throw error;
+  }
   if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
   if (payload?.ok === false) throw new Error(payload.error || "儲存失敗");
   applyTradesPayload(payload);
@@ -3334,18 +3501,18 @@ async function putTrades(next) {
 
 // 蓋寫防護的重放：409（別的分頁改過）→ 先同步最新版，再把「這一次的操作」重放一次。
 // 交易紀錄的操作都是「新增一筆／刪一筆／改設定」，天然可以在新狀態上重放。
-async function putTradesWithRetry(buildNext) {
+async function putTradesWithRetry(buildNext, intentKey) {
   const scope = captureAuthScope();
   try {
-    await putTrades(buildNext());
+    await putTrades(buildNext(), intentKey);
   } catch (error) {
-    if (error?.status !== 409) throw error;
+    if (error?.status !== 409 || error.noReplay) throw error;
     if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
     const latest = await fetchApi("/api/trades");
     if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
     applyTradesPayload(latest);
     if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
-    await putTrades(buildNext()); // 仍失敗就往外拋，交給呼叫端 toast
+    await putTrades(buildNext(), intentKey); // 仍失敗就往外拋，交給呼叫端 toast
     if (!isCurrentAuthScope(scope)) throw authScopeChangedError();
     showToast("其他視窗剛更新過帳本，已自動同步並套用你這筆操作");
   }
@@ -3356,21 +3523,28 @@ async function addTradeRecord(fields) {
     showToast("記帳需要登入（更多 → 帳號管理）");
     return false;
   }
-  if (!beginTradeMutation()) return false;
-  const record = {
+  const mutationScope = beginTradeMutation();
+  if (!mutationScope) return false;
+  const fingerprint = JSON.stringify(fields);
+  const retained = pendingTradeAddition;
+  const record = retained?.fingerprint === fingerprint ? retained.record : {
     id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
     createdAt: new Date().toISOString(),
     ...fields,
   };
   try {
-    await putTradesWithRetry(() => ({ settings: tradesState.settings, records: [...tradesState.records, record] }));
+    await putTradesWithRetry(() => ({ settings: tradesState.settings, records: tradesState.records.some(item => item.id === record.id) ? tradesState.records : [...tradesState.records, record] }), `add:${fingerprint}`);
+    pendingTradeAddition = null;
     showToast(`已記一筆：${fields.side === "sell" ? "賣出" : fields.side === "dividend" ? "股利" : "買進"} ${fields.code}`);
     return true;
   } catch (error) {
+    if (!isCurrentAuthScope(mutationScope)) return false;
+    if (error.outcomeUnknown) pendingTradeAddition = retained || { fingerprint, record };
+    else pendingTradeAddition = null;
     if (!handleAuthRequired(error)) showToast(error.message); // 賣超等驗證訊息直接給使用者看
     return false;
   } finally {
-    finishTradeMutation();
+    finishTradeMutation(mutationScope);
   }
 }
 
@@ -3380,7 +3554,8 @@ async function removeTradeRecord(id) {
     showToast("找不到要刪除的交易紀錄，請重新整理後再試");
     return false;
   }
-  if (!beginTradeMutation()) return false;
+  const mutationScope = beginTradeMutation();
+  if (!mutationScope) return false;
   try {
     await putTradesWithRetry(() => {
       if (!tradesState.records.some((record) => record.id === recordId)) {
@@ -3396,7 +3571,7 @@ async function removeTradeRecord(id) {
     if (!handleAuthRequired(error)) showToast(`刪不掉：${error.message}`);
     return false;
   } finally {
-    finishTradeMutation();
+    finishTradeMutation(mutationScope);
   }
 }
 
@@ -3411,7 +3586,8 @@ async function updateTradeRecord(id, patch, {
     showToast(missingMessage);
     return false;
   }
-  if (!beginTradeMutation()) return false;
+  const mutationScope = beginTradeMutation();
+  if (!mutationScope) return false;
   try {
     await putTradesWithRetry(() => {
       const current = tradesState.records.find((record) => record.id === recordId);
@@ -3431,7 +3607,7 @@ async function updateTradeRecord(id, patch, {
     if (!handleAuthRequired(error)) showToast(`${errorPrefix}：${error.message}`);
     return false;
   } finally {
-    finishTradeMutation();
+    finishTradeMutation(mutationScope);
   }
 }
 
@@ -3546,7 +3722,8 @@ async function saveTradeSettings(feeDiscount) {
     showToast("折數要在 0.1～1 之間（例：0.6 = 6 折）");
     return;
   }
-  if (!beginTradeMutation()) return false;
+  const mutationScope = beginTradeMutation();
+  if (!mutationScope) return false;
   try {
     await putTradesWithRetry(() => ({ settings: { ...tradesState.settings, feeDiscount: value }, records: tradesState.records }));
     showToast(`手續費折數已改為 ${value}（只影響之後新增的紀錄）`);
@@ -3555,7 +3732,7 @@ async function saveTradeSettings(feeDiscount) {
     if (!handleAuthRequired(error)) showToast(error.message);
     return false;
   } finally {
-    finishTradeMutation();
+    finishTradeMutation(mutationScope);
   }
 }
 
@@ -5550,6 +5727,7 @@ const SUPPLEMENTAL_MARKET_REFRESH_MS = 5 * 60 * 1000;
 let supplementalMarketLastRequestedAt = 0;
 let supplementalMarketTradeDate = "";
 let marketDataRequestSeq = 0;
+let marketDataController = null;
 
 function refreshSupplementalMarketData({ force = false, liveUpdate = false } = {}) {
   if (document.hidden || getSelectedSource() !== "official") return false;
@@ -5593,6 +5771,9 @@ function eligibleAlertQuoteCodes(quotes) {
 
 async function loadMarketData({ notify = false, renderNow = true } = {}) {
   const requestId = ++marketDataRequestSeq;
+  marketDataController?.abort();
+  const controller = new AbortController();
+  marketDataController = controller;
   const trackedCodes = getTrackedQuoteCodes();
   const codes = trackedCodes.join(",");
   const codesKey = codes;
@@ -5603,7 +5784,7 @@ async function loadMarketData({ notify = false, renderNow = true } = {}) {
     const batches = [];
     for (let index = 0; index < trackedCodes.length; index += 100) batches.push(trackedCodes.slice(index, index + 100));
     const payloads = await Promise.all(batches.map((batch) =>
-      fetchApi(`/api/quotes?codes=${encodeURIComponent(batch.join(","))}&${getSourceQuery()}`)
+      fetchApi(`/api/quotes?codes=${encodeURIComponent(batch.join(","))}&${getSourceQuery()}`, { signal: controller.signal })
     ));
     if (requestId !== marketDataRequestSeq || source !== getSelectedSource() || codesKey !== getTrackedQuoteCodes().join(",")) return;
     const failed = payloads.find((payload) => !payload.ok || !Array.isArray(payload.quotes));
@@ -5664,6 +5845,8 @@ async function loadMarketData({ notify = false, renderNow = true } = {}) {
     if (renderNow) render();
     if (notify) showToast(`${getSelectedSourceLabel()}更新失敗`);
     return true;
+  } finally {
+    if (requestId === marketDataRequestSeq) marketDataController = null;
   }
 }
 
@@ -6501,12 +6684,15 @@ function createPlanAlerts(code, plan) {
   return { created, skipped };
 }
 
+let overnightLoadSeq = 0;
 async function loadOvernightSignals({ notify = false } = {}) {
+  const requestId = ++overnightLoadSeq;
   overnightState.loading = true;
   overnightState.error = "";
   void loadMarketBreadth();
   try {
     const payload = await fetchApi("/api/overnight?limit=20");
+    if (requestId !== overnightLoadSeq) return;
     if (!payload.ok || !payload.groups) throw new Error(payload.error || "API 回傳格式不正確");
     overnightState.loaded = true;
     overnightState.asOf = payload.asOf;
@@ -6522,17 +6708,19 @@ async function loadOvernightSignals({ notify = false } = {}) {
     } catch {
       // Keep the signal list visible if quote refresh is temporarily unavailable.
     }
+    if (requestId !== overnightLoadSeq) return;
     render();
     loadSignalVerification();
     if (notify) showToast("隔日沖清單已更新");
   } catch (error) {
+    if (requestId !== overnightLoadSeq) return;
     if (handleAuthRequired(error)) return;
     overnightState.loaded = false;
     overnightState.error = error.message;
     renderOvernightGroups();
-    showToast("隔日沖清單產生失敗");
+    showToast(error.code === "REQUEST_TIMEOUT" ? "隔日沖清單等待逾時，伺服器可能仍在處理" : "隔日沖清單產生失敗");
   } finally {
-    overnightState.loading = false;
+    if (requestId === overnightLoadSeq) overnightState.loading = false;
   }
 }
 
@@ -6572,7 +6760,7 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
     if (requestId !== strategyLoadSeq) return; // 過期的錯誤不要覆蓋目前場景的狀態
     if (handleAuthRequired(error)) return;
     strategyState.error = error.message;
-    if (notify) showToast("策略雷達計算失敗");
+    if (notify) showToast(error.code === "REQUEST_TIMEOUT" ? "策略雷達等待逾時，伺服器可能仍在處理" : "策略雷達計算失敗");
   } finally {
     if (requestId === strategyLoadSeq) {
       strategyState.loading = false;
@@ -8467,16 +8655,20 @@ async function loadTechnicalAnalysis({ notify = false } = {}) {
   // 請求序號：快速切換代號/週期時，只採用最後一次發出的請求，慢回應直接丟棄。
   const requestId = technicalState.requestId + 1;
   technicalState.requestId = requestId;
+  technicalState.controller?.abort();
+  const controller = new AbortController();
+  technicalState.controller = controller;
   technicalState.loading = true;
   technicalState.error = "";
   renderTechnicalAnalysis();
   try {
-    const payload = await fetchApi(`/api/technical-analysis?code=${encodeURIComponent(code)}&period=${encodeURIComponent(state.technicalPeriod)}`);
+    const payload = await fetchApi(`/api/technical-analysis?code=${encodeURIComponent(code)}&period=${encodeURIComponent(state.technicalPeriod)}`, { signal: controller.signal });
     if (technicalState.requestId !== requestId) return;
     if (!payload.ok) throw new Error(payload.error || "技術分析資料產生失敗");
     technicalState.data = payload;
     technicalState.error = "";
     await syncDetailQuoteForTechnical(payload);
+    if (technicalState.requestId !== requestId) return;
     state.selectedCode = payload.code;
     if (notify) showToast(`已分析 ${payload.code} ${payload.name}`);
   } catch (error) {
@@ -8486,6 +8678,7 @@ async function loadTechnicalAnalysis({ notify = false } = {}) {
     if (!handleAuthRequired(error) && notify) showToast(`技術分析失敗：${error.message}`);
   } finally {
     if (technicalState.requestId === requestId) {
+      technicalState.controller = null;
       technicalState.loading = false;
       render();
     }
@@ -11400,6 +11593,8 @@ function renderCompanyProfile() {
 }
 
 function resetSearchState() {
+  searchState.controller?.abort();
+  searchState.controller = null;
   searchState.token += 1;
   searchState.query = "";
   searchState.loading = false;
@@ -11412,10 +11607,13 @@ function resetSearchState() {
 // 用官方全市場清單（上市＋上櫃）搜尋代號或名稱。
 async function loadSymbolSearch(query, token = searchState.token) {
   if (searchState.token !== token || searchState.query !== query) return;
+  searchState.controller?.abort();
+  const controller = new AbortController();
+  searchState.controller = controller;
   searchState.loading = true;
   renderSearchResults();
   try {
-    const payload = await fetchApi(`/api/symbols?q=${encodeURIComponent(query)}`);
+    const payload = await fetchApi(`/api/symbols?q=${encodeURIComponent(query)}`, { signal: controller.signal });
     if (searchState.token !== token || searchState.query !== query) return;
     searchState.remote = payload.results || [];
     searchState.error = "";
@@ -11425,6 +11623,7 @@ async function loadSymbolSearch(query, token = searchState.token) {
     searchState.error = error.message;
   } finally {
     if (searchState.token === token && searchState.query === query) {
+      searchState.controller = null;
       searchState.loading = false;
       renderSearchResults();
     }
@@ -11435,6 +11634,8 @@ function handleSearchInput(value) {
   const text = String(value || "").trim();
   // Input starts a new query immediately, including while its debounce is pending.
   const token = ++searchState.token;
+  searchState.controller?.abort();
+  searchState.controller = null;
   searchState.query = text;
   searchState.error = "";
   searchState.remote = [];

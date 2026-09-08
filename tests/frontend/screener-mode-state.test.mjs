@@ -1,10 +1,12 @@
+// DOM 互動與作用域契約；teardown 排空已完成回應再關閉視窗。
+import { setImmediate } from 'node:timers/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAppWindow } from '../helpers/dom-harness.mjs';
 
 async function screenerFixture(t) {
   const app = await createAppWindow();
-  t.after(() => app.cleanup());
+  t.after(async () => { await setImmediate(); app.cleanup(); });
   app.evalIn(`
     stocks.splice(0);
     stocks.push(...[

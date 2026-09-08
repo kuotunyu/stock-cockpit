@@ -1,3 +1,5 @@
+// DOM 互動與作用域契約；teardown 排空已完成回應再關閉視窗。
+import { setImmediate } from 'node:timers/promises';
 // 前端生命週期：render 只更新作用中畫面、預覽不碰 5174、背景頁不輪詢，且較舊行情回應不得覆蓋較新資料。
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -9,7 +11,7 @@ beforeEach(async () => {
   app = await createAppWindow();
 });
 
-afterEach(() => app.cleanup());
+afterEach(async () => { await setImmediate(); app.cleanup(); });
 
 test("default overnight render neither rebuilds hidden screens nor starts technical lazy APIs", () => {
   const hostIds = ["screenerRows", "strategyBoard", "watchRows", "technicalSummary", "survBoard", "moreDetail"];

@@ -1,5 +1,7 @@
 # Stock1 測試套件
 
+`request-deadline` 驗 UI 分級等待上限、headers／JSON body、取消與來源切換、401、唯讀 fallback、寫入不跨候選重送，以及搜尋／分析／掃描的舊 finally 護欄。`write-outcome` 驗原 payload／rev／穩定 ID 的未確認恢復、背景 canonical 與後續草稿、watchlists／alerts 停止自動重送、復原未知與秘密不持久化；`backend/write-confirmation` 用 port 0、臨時 DATA_DIR、真實 transaction queue 驗同 rev 最多提交一次及正規資料確認。未知後 GET 尚未看見資料不是失敗證據；只有使用者再次操作才可重試原 CAS payload，不能改 rev 盲重放。
+
 `glossary-navigation` 的 DOM／Chromium 測試涵蓋七頁問號入口：首次定位當頁說明，切分類解除系統預填頁名，手動搜尋仍保留。另驗重新開啟、一般名詞表／名詞連結、分類重繪焦點及 Escape 回到問號；瀏覽器驗 375／768／1280／1440 px，截圖為 `test-results/browser/glossary-category-*`。
 
 `help-content-lifecycle` 驗說明映射、分類內查無的恢復入口、未知詞與閱讀起點；`search-query-lifecycle` 以受控 debounce／延遲回應驗舊結果、成功／失敗、ABA、清空與重開。`zoom-help-lifecycle` 驗延遲導覽取消、手動說明及同代號重開競態；`screener-mode-state`、`surveillance-filter-feedback` 與 `filter-scope-feedback` 驗實際策略高亮、複合篩選空訊息與清單篩選作用範圍。Chromium `help-state-audit` 驗四尺寸、專用說明重開與篩選抽屜 200% 文字；`search-help-races` 用真輸入／Enter 與可控時鐘驗查詢切換、關圖取消導覽、首開與獨立說明入口。產物為 `help-recovery-*`、`filter-scope-*`。
