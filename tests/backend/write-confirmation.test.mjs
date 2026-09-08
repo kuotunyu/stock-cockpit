@@ -28,7 +28,7 @@ test('同原 payload+rev 的交易/計畫請求排隊，只提交一次且 DOM �
     return {ok:response.ok,status:response.status,json:async()=>payload};
   };
   await app.win.loadTradesFromServer();
-  const fields={code:'2330',market:'unknown',instrumentType:'stock',instrumentSource:'user',side:'buy',tradeDate:compactToday(-2),date:compactToday(-2),executedAt:'',session:'regular',brokerAccountId:'default',currency:'TWD',price:100,shares:1000,dayTrade:{status:'none',matchedShares:0,pairId:''}};
+  const fields={code:'2330',market:'TWSE',instrumentType:'stock',instrumentSource:'user',side:'buy',tradeDate:compactToday(-2),date:compactToday(-2),executedAt:'',session:'regular',brokerAccountId:'default',currency:'TWD',price:100,shares:1000,dayTrade:{status:'none',matchedShares:0,pairId:''}};
   assert.equal(await app.win.addTradeRecord(fields),true,app.win.lastToast);
   assert.equal(sent.length,1);
   assert.equal(app.evalIn('tradesState.records.length'),1);
@@ -41,6 +41,29 @@ test('同原 payload+rev 的交易/計畫請求排隊，只提交一次且 DOM �
   const plan={planId:randomUUID(),code:'2330',exchange:'TWSE',strategy:'swing',status:'draft',entryPrice:null,stopPrice:null,targetPrice:null,quantity:null,reason:'原意圖'};
   await app.win.putTradePlanIntent({planId:plan.planId,isNew:true,changes:plan});
   assert.equal(app.evalIn('tradePlansState.plans.length'),1);
+
+  // 回應使用 server 真正的 tradeLinks/review 正規形狀，不假造 linkChanges。
+  const tradeId=saved.records[0].id;
+  for (const changes of [
+    {linkChanges:{remove:[],upsert:[{tradeId,allocatedShares:20}]}},
+    {review:{decision:'insufficient-data',reason:'original review'}},
+    {review:{reason:'updated review'}},
+    {review:{decision:'conditions-changed'}},
+    {linkChanges:{remove:[tradeId],upsert:[]}},
+    {review:null},
+  ]) {
+    drop=true;
+    await app.win.putTradePlanIntent({planId:plan.planId,isNew:false,changes});
+    const canonicalPlan=JSON.parse(app.evalIn('JSON.stringify(tradePlansState.plans[0])'));
+    assert.equal(Object.hasOwn(canonicalPlan,'linkChanges'),false);
+    if(changes.linkChanges?.upsert.length) {
+      assert.equal(canonicalPlan.tradeLinks[0].allocatedShares,20);
+      assert.ok(canonicalPlan.tradeLinks[0].fingerprint);
+      assert.equal(canonicalPlan.tradeLinks[0].snapshot.id,tradeId);
+    }
+    if(changes.review)assert.ok(canonicalPlan.review.reviewedAt);
+    assert.equal(app.evalIn('tradePlanWrite.pending'),null);
+  }
 
   // queue 內有受控先行工作：兩份原 rev 都先讀到同一 canonical，然後一起排隊。
   const entered=deferred(),release=deferred();

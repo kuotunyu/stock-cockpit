@@ -2787,6 +2787,23 @@ function applyTradePlanDelta(plan, changes) {
   if(linkChanges) next.tradeLinks=[...(plan.tradeLinks || []).filter(link=>!linkChanges.remove.includes(link.tradeId)&&!linkChanges.upsert.some(item=>item.tradeId===link.tradeId)),...linkChanges.upsert];
   return next;
 }
+// 確認的是原送出 delta 的結果；metadata 的 canonical 形狀含 server 衍生證據。
+function tradePlanIntentMatches(plan, changes) {
+  if (!plan) return false;
+  const links = plan.tradeLinks || [];
+  const hasLink = expected => links.some(link => link.tradeId === expected.tradeId && link.allocatedShares === expected.allocatedShares);
+  return Object.entries(changes).every(([key, value]) => {
+    if (key === 'linkChanges') {
+      return value.remove.every(id => !links.some(link => link.tradeId === id)) && value.upsert.every(hasLink);
+    }
+    if (key === 'tradeLinks') return value.length === links.length && value.every(hasLink);
+    if (key === 'review') {
+      if (value === null) return plan.review == null;
+      return plan.review && ['decision', 'reason'].every(field => !Object.hasOwn(value, field) || plan.review[field] === value[field]);
+    }
+    return JSON.stringify(plan[key]) === JSON.stringify(value);
+  });
+}
 function formatTradePlanTime(value) {
   return formatPortfolioRiskTime(String(value || '').replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3'));
 }
@@ -2972,7 +2989,7 @@ async function putTradePlanIntent(operation) {
     const found = tradePlansState.plans.find(plan=>plan.planId===operation.planId);
     if (!operation.isNew && !found) throw new Error('計畫已不存在，請保留草稿並重新確認');
     if (operation.isNew && found) {
-      const equal=Object.entries(operation.changes).every(([key,value])=>JSON.stringify(found[key])===JSON.stringify(value));
+      const equal=tradePlanIntentMatches(found, operation.changes);
       if(!equal) throw new Error('此計畫 ID 已存在不同內容，請重新確認');
       return tradePlansState.plans;
     }
@@ -2980,11 +2997,11 @@ async function putTradePlanIntent(operation) {
   };
   for(let attempt=0;attempt<2;attempt+=1) {
     try {
-      const payload=await putConfirmedResource('/api/trade-plans',{schemaVersion:1,rev:tradePlansState.rev,plans:build()},tradePlanWrite,
-        latest => {
-          const found=latest.plans?.find(plan=>plan.planId===operation.planId);
-          return found && Object.entries(operation.changes).every(([key,value])=>JSON.stringify(found[key])===JSON.stringify(value));
-        }, JSON.stringify(operation));
+      // 背景 GET 可能已載入原提交；先解決 pending，不能先用新草稿觸發同 ID 衝突。
+      const body = tradePlanWrite.pending?.body || {schemaVersion:1,rev:tradePlansState.rev,plans:build()};
+      const payload=await putConfirmedResource('/api/trade-plans',body,tradePlanWrite,
+        latest => tradePlanIntentMatches(latest.plans?.find(plan=>plan.planId===operation.planId), operation.changes),
+        JSON.stringify(operation));
       if(!isCurrentAuthScope(scope))throw authScopeChangedError();
       tradePlansState.requestSeq+=1; applyTradePlansPayload(payload); return;
     } catch(error) {
