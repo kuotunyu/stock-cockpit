@@ -115,6 +115,8 @@ function swingPayload(scenario, kind) {
     ],
     riskPolicy: "注意與處置只標示",
     warnings: kind === "partial" ? ["部分市場資料暫缺：TPEx 公司行動資料沿用 last-good"] : [],
+    // 真實 /api/swing 每條路徑都帶 publication；partial 對應來源未完整的 provisional，其餘為 formal。
+    publication: { kind: kind === "partial" ? "provisional" : "formal" },
   };
 }
 

@@ -241,6 +241,7 @@ test("評分與分類：avgVol 未知與 0 的結果必須相同（不改選股�
         strategyScore: getStrategyScore(stock),
         reason: getStockReason(stock, "screener"),
         watchActive: stockMatchesWatchFilter(stock, "active"),
+        row: rowTemplate(stock, "watchlist"),
         risk: buildIndicatorDetail(stock)["風險提醒"].metrics,
       };
     };

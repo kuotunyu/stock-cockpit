@@ -52,12 +52,30 @@ test("focus pick separates the name from a large, readable percentage", () => {
 // 2026-09-09 CUA-03（computer use 心得 F03）：手機兩欄卡把桌機的「名稱＋漲幅」兩欄 strong 擠到約 60px，
 // 「力士／同協／美好證」逐字直排。手機 query 內把 strong 改單欄（名稱在上、漲幅在下），桌機規則不動，不用 ellipsis。
 test("mobile focus pick stacks name above percentage instead of squeezing the name", () => {
-  const mobileBlock = styles.slice(styles.indexOf("@media (max-width: 760px)"));
-  assert.ok(mobileBlock.length > 0, "手機 media query 必須存在");
+  // 定位「重點卡改兩欄」那個 760px 區塊（styles.css 有多個 max-width:760px query），再以大括號深度確認
+  // 覆寫真的在同一個 media 區塊內：放到頂層或另一個 query 都算沒修（會蓋到桌機）。
+  const gridOverride = styles.search(/\.today-focus-grid\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.ok(gridOverride > 0, "手機重點卡兩欄規則必須存在");
+  const mediaStart = styles.lastIndexOf("@media (max-width: 760px)", gridOverride);
+  assert.ok(mediaStart >= 0, "兩欄規則必須在 760px media query 內");
+  let depth = 0;
+  let mediaEnd = -1;
+  for (let index = styles.indexOf("{", mediaStart); index < styles.length; index += 1) {
+    if (styles[index] === "{") depth += 1;
+    else if (styles[index] === "}") {
+      depth -= 1;
+      if (depth === 0) { mediaEnd = index; break; }
+    }
+  }
+  assert.ok(mediaEnd > gridOverride, "media 區塊必須包住兩欄規則");
+  const mobileBlock = styles.slice(mediaStart, mediaEnd);
   const override = mobileBlock.match(/\.today-focus-card:not\(\.is-watch\) strong\s*\{([^}]*)\}/);
-  assert.ok(override, "手機 query 內必須覆寫 .today-focus-card:not(.is-watch) strong");
+  assert.ok(override, "同一個 760px media 區塊內必須覆寫 .today-focus-card:not(.is-watch) strong");
   assert.match(override[1], /grid-template-columns\s*:\s*minmax\(0,\s*1fr\)\s*;/, "手機改成單欄，名稱獨占一行");
   assert.doesNotMatch(override[1], /minmax\(0,\s*1fr\)\s+auto/);
+  const topLevelOverrides = [...styles.matchAll(/\.today-focus-card:not\(\.is-watch\) strong\s*\{[^}]*grid-template-columns\s*:\s*minmax\(0,\s*1fr\)\s*;/g)]
+    .filter((match) => match.index < mediaStart || match.index > mediaEnd);
+  assert.equal(topLevelOverrides.length, 0, "單欄覆寫不得出現在 media 區塊外（會蓋掉桌機兩欄）");
   const nameRules = [...styles.matchAll(/\.focus-pick-name[^{]*\{([^}]*)\}/g)].map((match) => match[1]).join("\n");
   assert.doesNotMatch(nameRules, /text-overflow\s*:\s*ellipsis/, "股名不得用 ellipsis 縮成「鑫…」");
   assert.doesNotMatch(nameRules, /font-size\s*:\s*(1\d|20)px/, "手機不得縮小股名字級");

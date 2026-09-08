@@ -74,7 +74,7 @@ test("P3：零候選時警告仍必須顯示，空結果不得說成全市場沒
   assert.match(html, /1 項資料品質問題/);
   assert.match(html, /可用資料/, "空結果要說是「本次可用資料」找不到，不是全市場沒有");
   assert.match(html, /缺漏/);
-  assert.doesNotMatch(html, /今天沒有符合/, "有警告時不得用無警告的安心文案");
+  assert.doesNotMatch(html, /收盤的掃描沒有符合/, "有警告時不得用無警告分支的安心文案");
   assert.doesNotMatch(html, /整體偏強|沒有回檔/, "不推斷市場原因");
 });
 

@@ -8,11 +8,6 @@ import { createBrowserFixture, visibleNav } from "../helpers/browser-fixtures.mj
 
 const MOBILE_WIDTHS = [375, 390, 430];
 
-const rect = (node) => {
-  const box = node.getBoundingClientRect();
-  return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
-};
-
 test("手機重點卡：3 字內股名一行完整，漲幅另起一行不重疊；桌機仍同列兩欄；點卡與回焦不變", { timeout: 120_000 }, async () => {
   const fixture = await createBrowserFixture({ scenario: "populated" });
   try {
@@ -23,8 +18,11 @@ test("手機重點卡：3 字內股名一行完整，漲幅另起一行不重疊
     for (const width of MOBILE_WIDTHS) {
       await page.setViewportSize({ width, height: 844 });
       await page.evaluate(() => document.fonts.ready);
-      const measured = await page.evaluate((rectSource) => {
-        const toRect = new Function(`return (${rectSource})`)();
+      const measured = await page.evaluate(() => {
+        const toRect = (node) => {
+          const box = node.getBoundingClientRect();
+          return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+        };
         return {
           bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
           cards: [...document.querySelectorAll("button.today-focus-card")].map((card) => {
@@ -41,7 +39,7 @@ test("手機重點卡：3 字內股名一行完整，漲幅另起一行不重疊
             };
           }),
         };
-      }, rect.toString());
+      });
       assert.equal(measured.bodyFits, true, `${width}px body 不可橫向溢出`);
       assert.equal(measured.cards.length, 3, `${width}px populated fixture 應有三張重點卡`);
       for (const card of measured.cards) {

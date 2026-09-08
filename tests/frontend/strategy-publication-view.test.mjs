@@ -109,7 +109,11 @@ test("載入失敗：publication 清空，不留上一次成功的身份", async
 });
 
 test("切換場景：publication 立刻清空，不借上一個場景的發布身份", async () => {
+  // 點場景會真的觸發 loadStrategyBoard；harness 沒有 /api/swing 路由，先把 fetchApi 換成受控回應，
+  // 事後還原並清掉本測試留下的狀態，免得後面追加的測試踩到。
   const result = json(`(() => {
+    window.__origFetchApi = fetchApi;
+    fetchApi = async () => ({ ok: false, error: "受控：本測試不驗載入結果" });
     strategyState.publication = { kind: "formal" };
     strategyState.scenario = "midBandDefense";
     strategyState.error = "";
@@ -118,6 +122,7 @@ test("切換場景：publication 立刻清空，不借上一個場景的發布�
     return { publication: strategyState.publication, loaded: strategyState.loaded, scenario: strategyState.scenario };
   })()`);
   await app.settle();
+  app.evalIn(`fetchApi = window.__origFetchApi; Object.assign(strategyState, { scenario: "midBandDefense", error: "", loaded: false, loading: false, publication: null });`);
   assert.equal(result.scenario, "strongContinuation");
   assert.equal(result.loaded, false);
   assert.equal(result.publication, null);

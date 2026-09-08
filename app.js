@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v38";
+const APP_SHELL_VERSION = "stock1-shell-v39";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -7113,14 +7113,15 @@ const STRATEGY_PUBLICATION_VIEWS = {
   research: {
     label: "研究清單",
     kind: "estimated",
-    title: "非正式範圍（例如較小的候選池或場景）的研究清單，不進正式發布與驗證母體。非買賣建議。",
+    title: "非正式範圍（例如較小的候選池）的研究清單，不進正式發布與驗證母體。非買賣建議。",
     recompute: "研究範圍的清單不進正式發布；要重算請按右下角「重新整理」。",
   },
   provisional: {
     label: "暫定清單・資料未完整",
     kind: "estimated",
-    title: "掃描時來源尚未完整（例如上市／上櫃整批日期未對齊），這不是收盤凍結的正式清單；資料補齊後會重算。非買賣建議。",
-    recompute: "資料尚未完整，之後補齊時會再算一次；也可按右下角「重新整理」先再算。",
+    // 不承諾「會自動重算」：未持久化的暫定結果只有短快取，但已持久化的暫定快照當天可能被沿用，重算仍需重新整理。
+    title: "掃描時來源尚未完整（例如上市／上櫃整批日期未對齊），這不是收盤凍結的正式清單，也不進正式驗證；資料補齊後按右下角「重新整理」可再算一次。非買賣建議。",
+    recompute: "資料尚未完整，這份結果不算正式清單；資料補齊後按右下角「重新整理」可再算一次。",
   },
   "not-persisted": {
     label: "清單尚未確認保存",
@@ -7173,6 +7174,8 @@ function formatTaipeiDate(iso) {
 }
 
 // 策略頁與全站輪詢共用同一個盤中邊界，避免 13:31–13:35 一處顯示盤中、另一處卻顯示已收盤。
+// 2026-09-09（CUA-02）策略 meta 列改依發布身份顯示後，產品碼暫無呼叫端；保留為 market-clock 測試釘住的
+// 公開時鐘 helper，供 CUA-04 的時段口徑沿用，不另發明第二個盤中判斷。
 function isTaiwanMarketOpenNow(date = new Date()) {
   return isTaiwanMarketSession(date);
 }
