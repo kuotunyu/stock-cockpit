@@ -22,12 +22,30 @@ test('預設收合，行情正常但不可寫另提示；pending與零訊號不�
     assert.match(panel.textContent, /全部已保存版本/); assert.match(panel.textContent, /未知/);
     panel = show(app, { ...payload, persistence: { writable: false, lastFailureCode: 'ENOSPC' } });
     assert.match(panel.textContent, /保存受阻/); assert.match(panel.textContent, /磁碟空間與寫入權限/);
+    const saveNext = [...panel.querySelectorAll('.operational-rows > div')].find(row => row.querySelector('dt').textContent === '資料保存').querySelector('p').textContent;
+    assert.match(saveNext, /查詢只讀.*已知狀態/);
+    assert.match(saveNext, /後續.*實際成功保存.*清除/);
     assert.match(panel.textContent, /最近一次讀取成功/);
     panel = show(app, { ...payload, sidecars: { fundamentals: { readOnly: true, reason: 'EACCES' } } });
     assert.match(panel.textContent, /部分資料唯讀/);
     panel = show(app, { ...payload, persistence: { writable: true }, history: null });
     assert.match(panel.textContent, /等待保存筆數未知/);
     assert.match(panel.textContent, /待補數量未知/);
+  } finally { app.cleanup(); }
+});
+test('前日排程失敗留作歷史，不能稱今日受阻或承諾舊重試時間', async () => {
+  const app = await createAppWindow();
+  try {
+    const scheduler = { enabled: true, running: true, failures: 3, failureDay: '20260907', retryAt: '2026-09-07T08:00:00Z', dailyLimitReached: false };
+    let panel = show(app, { ...payload, scheduler });
+    assert.match(panel.textContent, /前日.*紀錄/);
+    assert.match(panel.textContent, /20260907/);
+    assert.doesNotMatch(panel.textContent, /最近一輪排程受阻|今日重試已達上限|最早重試/);
+    panel = show(app, { ...payload, scheduler: { ...scheduler, failureDay: '20260908', dailyLimitReached: true } });
+    assert.match(panel.textContent, /今日重試已達上限/);
+    panel = show(app, { ...payload, scheduler: { ...scheduler, failureDay: '20260908', failures: 1 } });
+    assert.match(panel.textContent, /最近一輪排程受阻/);
+    assert.match(panel.textContent, /最早重試/);
   } finally { app.cleanup(); }
 });
 test('來源暫缺、正式後補驗失敗、排程關閉和查不到各自說明，不臆測停機', async () => {

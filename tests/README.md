@@ -1,5 +1,9 @@
 # Stock1 測試套件
 
+`operational-status` 另驗台北午夜前／後同一 HTTP 投影的今日上限、失敗日與計數保留、GET 無寫入及解除 blocker 後仍須真正成功保存才清旗標。`detail-empty-state` 依實際 `loadedOnce/error` 驗初始等待、離線失敗、完成空資料與有效股票保留；PWA 真離線重開同步核對右側占位。
+
+`measurement-diagnostics` 用確定性小型工作量驗全部 renderer 探針的 `missing`／`not-called`／`measured`、巢狀 raw 樣本、安裝錯誤與 finally 復原；Chromium `measurement-probes` 只跑一輪真 renderer 核對序列化接線。`verification-measurement` 的自建空 DB 與 atomic blocker 只在局部捕獲並斷言已知 admin／unlink 訊息，缺訊息或重複訊息會失敗，未知 stderr 與例外保留。這些診斷修正不要求重跑完整 O08 分組，也不改寫歷史量測。
+
 `verification-measurement` 驗診斷樣本至少 50 筆才標描述性 p95、nearest-rank、固定種子、合法規模與合成日期／模型身份／codec；沒有 CI 毫秒門檻。手動完整採樣入口是 `node scripts/verification-diagnostics.mjs --o08`，沿用原先 `node scripts/verification-diagnostics.mjs 5` 的完整候選池 fixture。完整入口依序跑 1／5／20 日的 raw／packed／mixed，各加一日兩策略 pending 與每完成日兩份手動計畫；每組 3 次暖機、50 次保存／並發查詢／摘要，3 個新 Node 程序重啟。每組輸出自己的摘要窗口、真實 DB／各資源 bytes、記憶體、event-loop histogram 及原始樣本。`--o08-worker 5 mixed` 可單獨重現指定組；入口不接受 DB 路徑，helper 清除 ambient DATA_DIR／DB_PATH、只用自建 temp 目錄與 port 0。
 
 效能採樣前須另保存本機、seed／規模／次數、比較預算與量測定義；採樣後不能回頭調預算。預設 seed 8082026、暖樣本 50、冷樣本 3；少量冷樣本只列個別值／範圍，OS 檔案快取未清除。後端並發組實際走 `GET/PUT /api/watchlists`、`GET /api/quotes?codes=2330`，同時執行兩策略 `summarizeVerificationBenchmarks` 及兩筆真實 `commitDbMutation` cursor 保存。queue 指送交到第二筆 mutator 進入，包含前一筆保存等待及本筆 draft clone，不能稱純 queue scheduler 時間。行情是暖過的單一代號離線 fixture 路徑，並非全市場或真上游延遲；背景 workload 是摘要與 cursor 保存，未模擬完整上游採集。故障注入另在樣本外驗 503、pending／失敗不可見、rev 409、根物件 identity、後續保存及重啟 hash。

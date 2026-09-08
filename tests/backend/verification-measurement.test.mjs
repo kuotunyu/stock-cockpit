@@ -1,12 +1,12 @@
 // 合成診斷的固定種子、樣本分位與正式資料拒絕：不以機器速度決定 CI 成敗。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeSamples, seededRandom, validateMeasurementOptions } from '../../scripts/verification-measurement.mjs';
+import { describeSamples, seededRandom, validateMeasurementOptions, withExpectedFixtureDiagnostic } from '../../scripts/verification-measurement.mjs';
 import { buildSyntheticDb } from '../../scripts/verification-diagnostics.mjs';
 import { importServer } from '../helpers/test-server.mjs';
 import { prepareCompletedBenchmark, readBenchmarkEvidence } from '../../verification-evidence.mjs';
-import { rm } from 'node:fs/promises';
-import { resolve, dirname, basename } from 'node:path';
+import { rm, mkdir, rmdir, readFile } from 'node:fs/promises';
+import { resolve, dirname, basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 test('少量樣本不冒稱 p95，50 筆 nearest-rank 保留 raw 與離群值', () => {
@@ -27,7 +27,8 @@ test('相同種子可重現，不同種子不同；CLI 不接受 DB 路徑或任
 test('同種子合成 cohort 身份可重現，來源／出版／完整月份／摘要窗口有一致先後且 codec 無損', async () => {
   const srv=await importServer();
   try {
-    const m=srv.mod,first=structuredClone(await m.loadDb()),second=structuredClone(first);
+    const m=srv.mod,db=await withExpectedFixtureDiagnostic(()=>m.loadDb(),{kind:'admin'});
+    const first=structuredClone(db),second=structuredClone(first);
     await buildSyntheticDb(m,first,2,{random:seededRandom(8082026)});
     await buildSyntheticDb(m,second,2,{random:seededRandom(8082026)});
     assert.deepEqual(Object.keys(first.verificationCaptures),Object.keys(second.verificationCaptures));
@@ -45,6 +46,15 @@ test('同種子合成 cohort 身份可重現，來源／出版／完整月份／
       assert.equal(summary.window.asOf,'2026-03-01');assert.equal(summary.cohorts.length,2);
       assert.ok(summary.window.fromDate>='2026-01-01');
     }
+    const blocker=join(srv.dataDir,'stock1-db.json.tmp');
+    const before=await readFile(join(srv.dataDir,'stock1-db.json'),'utf8');
+    await mkdir(blocker);
+    try {
+      await withExpectedFixtureDiagnostic(()=>assert.rejects(m.commitDbMutation(draft=>{draft.sharedRevs.synthetic=1;}),{code:'PERSISTENCE_FAILED'}),{kind:'atomic',blocker});
+      assert.strictEqual(await m.loadDb(),db);
+      assert.equal(db.sharedRevs.synthetic,undefined);
+      assert.equal(await readFile(join(srv.dataDir,'stock1-db.json'),'utf8'),before);
+    } finally {await rmdir(blocker);}
   }finally{
     await srv.mod.shutdownServer();srv.mock.restore();
     const path=resolve(srv.dataDir);assert.equal(dirname(path),resolve(tmpdir()));assert.ok(basename(path).startsWith('stock1-test-'));await rm(path,{recursive:true,force:true});

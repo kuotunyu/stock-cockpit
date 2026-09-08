@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v34";
+const APP_SHELL_VERSION = "stock1-shell-v35";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -5451,7 +5451,7 @@ function renderOperationalStatus() {
   const saveBlocked = persistence?.writable === false;
   const saveLabel = saveBlocked ? '保存受阻' : readOnly.length ? '部分資料唯讀'
     : persistence?.writable === true ? '尚無已知保存失敗' : '狀態未知';
-  const saveNext = saveBlocked ? '請檢查磁碟空間與寫入權限；修復後重新查詢。'
+  const saveNext = saveBlocked ? '請檢查磁碟空間與寫入權限；查詢只讀本程序已知狀態，修復後須有後續實際成功保存才會清除故障。'
     : readOnly.length ? '請管理者檢查唯讀資料檔的讀取問題，保留原檔再處理。'
       : persistence ? `${Number.isInteger(persistence.pendingWrites) ? `${persistence.pendingWrites} 筆等待保存` : '等待保存筆數未知'}；等待中的工作不代表失敗。` : '請重新查詢；查不到不代表保存失敗。';
   const quote = dataState.failedSince ? '行情更新失敗' : dataState.error ? '部分行情來源受阻'
@@ -5462,8 +5462,11 @@ function renderOperationalStatus() {
     : item?.status === 'incomplete' ? '輸入尚未完整' : item?.status === 'failed' ? '採集嘗試受阻'
       : item?.status === 'not-captured' ? '已記錄未採集；原因未知' : '尚無今日正式採集證據・未知';
   const scheduler = data?.scheduler;
+  const previousFailure = scheduler?.failures && /^\d{8}$/.test(scheduler.failureDay || '')
+    && scheduler.failureDay < (data?.asOf || '').replaceAll('-', '');
   const scheduleNext = scheduler?.enabled === false ? '排程已關閉；如需自動採集，請管理者啟用收盤排程。'
     : scheduler?.dailyLimitReached ? '本程序今日重試已達上限；請檢查來源或保存問題。'
+      : previousFailure ? '前日失敗紀錄保留供核對；今日排程結果尚未由此確認。'
       : scheduler?.failures ? '最近一輪排程受阻，等待後續重試；已正式發布的清單仍保留。'
         : scheduler?.running ? '排程開啟，會在來源完整後採集；無紀錄的原因不能由此判定。'
           : scheduler?.running === false ? '排程目前未運行；請管理者確認啟動狀態。' : '排程狀態未知；請重新查詢。';
@@ -5490,7 +5493,7 @@ function renderOperationalStatus() {
       ${['overnight', 'swing'].map(strategy => { const item = data?.captures?.[strategy]; return `<p>${strategy === 'overnight' ? '隔日沖' : '波段'}最近正式清單：${escapeHtml(item?.latest?.tradeDate || '未知')}；確認可讀時間：${escapeHtml(item?.latest?.availableConfirmedAt ? formatTradePlanTime(item.latest.availableConfirmedAt) : '未知')}。${item?.today?.attemptedAt ? ` 最近嘗試：${escapeHtml(formatTradePlanTime(item.today.attemptedAt))}` : ''}</p>`; }).join('')}
       <p>保存只反映本程序已知失敗，未進行新的磁碟寫入測試。${persistence?.lastFailureCode ? `原因：${escapeHtml(persistence.lastFailureCode)}；時間：${escapeHtml(formatTradePlanTime(persistence.lastFailureAt))}。` : ''}${readOnly.map(([name, value]) => ` ${escapeHtml(names[name] || '旁路資料')}唯讀：${escapeHtml(value.reason || '原因未知')}`).join('')}</p>
       ${data?.input ? `<p>最近保存的來源不足／失敗紀錄：${data.input.status === 'incomplete' ? '兩市場收盤輸入尚未完整或未對齊今日' : '取得來源受阻'}；${escapeHtml(data.input.attemptedAt ? formatTradePlanTime(data.input.attemptedAt) : '時間未知')}。這是已保存的嘗試，不代表現在來源仍不足，也不降級已發布清單。</p>` : ''}
-      ${scheduler?.failures ? `<p>本程序失敗 ${escapeHtml(String(scheduler.failures))} 次；記錄日 ${escapeHtml(scheduler.failureDay || '未知')}；${scheduler.dailyLimitReached ? '當日重試已達上限' : `最早重試 ${escapeHtml(scheduler.retryAt ? formatTradePlanTime(scheduler.retryAt) : '未知')}`}。排程關閉或未運行時不會自動重試。</p>` : ''}
+      ${scheduler?.failures ? `<p>本程序失敗 ${escapeHtml(String(scheduler.failures))} 次；記錄日 ${escapeHtml(scheduler.failureDay || '未知')}；${previousFailure ? '前日紀錄，不代表今日仍受阻或已恢復' : scheduler.dailyLimitReached ? '當日重試已達上限' : `最早重試 ${escapeHtml(scheduler.retryAt ? formatTradePlanTime(scheduler.retryAt) : '未知')}`}。排程關閉或未運行時不會自動重試。</p>` : ''}
       <p>全部已保存版本的 metadata 統計，沒有套用成績單最近窗口：隔日快照依完整 final 保存標記計份（不表示模型可重用），波段 pending 計筆；候選池僅首次正式且有完整採集紀錄計批。三者不相加，不估缺失交易日，不代表現金結果皆完整或正在執行補驗。查詢本身不重新選股、不補造歷史。</p>
     </details>
   </details>`;
@@ -11038,10 +11041,11 @@ function renderDetail() {
   const stock = getSelectedStock();
   renderPriceAlertBox(stock);
   if (!stock) {
-    // 股票池尚未載入（啟動瞬間）：清空所有欄位顯示等待狀態，報價進來後 render() 會重畫。
+    // 無股票時依實際請求狀態顯示；失敗或終止的空資料不可持續宣稱載入中。
+    const loading = !dataState.loadedOnce && !dataState.error;
     const placeholders = {
-      detailName: "資料載入中",
-      detailTags: "正在抓官方報價",
+      detailName: dataState.error ? "行情載入失敗" : loading ? "資料載入中" : "尚無行情資料",
+      detailTags: dataState.error ? "請按右下角「重新整理」再試一次。" : loading ? "正在抓官方報價" : "沒有可顯示的標的",
       detailPrice: "--",
       detailChange: "",
     };

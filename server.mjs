@@ -14132,8 +14132,10 @@ async function handleApi(request, requestUrl, response) {
   }
   if (requestUrl.pathname === "/api/operational-status") {
     // 只投影已提交 RAM；不可走含 save、補驗 queue 或解壓證據的成績單 wrapper。
+    const now = new Date();
+    const today = toTaipeiCompactDate(now);
     jsonResponse(response, 200, {
-      ok: true, generatedAt: new Date().toISOString(),
+      ok: true, generatedAt: now.toISOString(),
       persistence: {
         basis: 'known-failures-this-process', writable: !lastPersistenceFailure,
         pendingWrites: pendingPersistenceCount(),
@@ -14143,9 +14145,9 @@ async function handleApi(request, requestUrl, response) {
       scheduler: { enabled: !schedulerDisabled, running: Boolean(closeSchedulerTimer),
         failures: schedulerFailures, failureDay: schedulerFailureDay || null,
         retryAt: schedulerRetryAt ? new Date(schedulerRetryAt).toISOString() : null,
-        dailyLimitReached: schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY,
+        dailyLimitReached: schedulerFailureDay === today && schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY,
         lastRunDay: lastScheduledRunDay || null },
-      ...summarizeOperationalStatus(dbCache),
+      ...summarizeOperationalStatus(dbCache, { today }),
     });
     return true;
   }

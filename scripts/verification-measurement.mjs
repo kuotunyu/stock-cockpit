@@ -12,6 +12,48 @@ import {surveillanceRoutes, fundamentalsRoutes, stockDayAllRow, tpexDailyCloseRo
 import {prepareCompletedBenchmark, readBenchmarkEvidence, summarizeBenchmarkCompression} from '../verification-evidence.mjs';
 
 export const MEASUREMENT = Object.freeze({seed:8082026,days:[1,5,20],formats:['raw','packed','mixed'],warmup:3,repeats:50,coldRepeats:3,browserRows:[20,260,1000],asOf:'20260301'});
+export const RENDERER_PROBES = ['renderRows','renderMarketStrip','renderStrategies','renderDetail','renderWatchManager','renderScreenerSummary'];
+export async function captureRendererProbes(workload, {names, target=globalThis, now=()=>performance.now()} = {}) {
+  const parts={}, originals=[];
+  try {
+    for(const name of names) {
+      const part=parts[name]={status:'missing',raw:[]};
+      try {
+        const fn=target[name];
+        if(typeof fn!=='function')continue;
+        const wrap=function(...args){const t=now();try{return fn.apply(this,args);}finally{part.status='measured';part.raw.push(now()-t);}};
+        if(!Reflect.set(target,name,wrap))throw new Error('function is not writable');
+        originals.push([name,fn]);
+        if(target[name]!==wrap)throw new Error('function wrapper was not installed');
+        part.status='not-called';
+      } catch(error) {throw new Error(`Renderer probe installation failed: ${name}`,{cause:error});}
+    }
+    return {value:await workload(), parts};
+  } finally { for(const [name,fn]of originals.reverse())target[name]=fn; }
+}
+export async function withExpectedFixtureDiagnostic(action, {kind,blocker,logger=console}) {
+  assert.ok(['admin','atomic'].includes(kind));
+  if(kind==='atomic') {
+    ownedDirectory(dirname(resolve(blocker)));
+    assert.equal(basename(blocker),'stock1-db.json.tmp');
+  }
+  const method=kind==='admin'?'warn':'error', original=logger[method];
+  let count=0;
+  logger[method]=function(...args) {
+    const expected=kind==='admin'
+      ? args.length===1&&args[0]==='[Stock1] Created initial admin user "admin". Set ADMIN_PASSWORD before cloud deployment.'
+      : args.length===2&&args[0]==='[Stock1] 主資料庫寫入失敗，未發布的記憶體草稿已丟棄：'
+        &&typeof args[1]==='string'&&args[1].endsWith(`, unlink '${blocker}'`);
+    if(expected)count++;
+    else original.apply(this,args);
+  };
+  try {const value=await action();assert.equal(count,1,`expected exactly 1 ${kind} fixture diagnostic`);return value;}
+  finally {logger[method]=original;}
+}
+export function summarizeRendererProbes(parts) {
+  return Object.fromEntries(Object.entries(parts).map(([name,part])=>[name,{status:part.status,
+    ...(part.status==='measured'?describeSamples(part.raw):{count:0,raw:[]})}]));
+}
 export function describeSamples(raw) {
   assert.ok(raw.length && raw.every(Number.isFinite),'樣本必須為非空有限數字');
   const sorted=[...raw].sort((a,b)=>a-b);
@@ -49,9 +91,9 @@ const hash=createHash('sha256').update(JSON.stringify(value)).digest('hex');asse
 }
 
 async function backendMeasurement(days,format,buildSyntheticDb) {
-  const srv=await bootServer({routes:[...surveillanceRoutes({reference:[stockDayAllRow({code:'2330',close:100})],tpexReference:[tpexDailyCloseRow({code:'5347',close:100})]}),...fundamentalsRoutes({}),
+  const srv=await withExpectedFixtureDiagnostic(()=>bootServer({routes:[...surveillanceRoutes({reference:[stockDayAllRow({code:'2330',close:100})],tpexReference:[tpexDailyCloseRow({code:'5347',close:100})]}),...fundamentalsRoutes({}),
     {match:/mis\.twse\.com\.tw/,reply:{msgArray:[]}},
-    {match:/query1\.finance\.yahoo\.com/,reply:{chart:{result:[]}}}],env:{UPDATE_CHECK:'off',DISABLE_CLOSE_SCHEDULER:'1'}});
+    {match:/query1\.finance\.yahoo\.com/,reply:{chart:{result:[]}}}],env:{UPDATE_CHECK:'off',DISABLE_CLOSE_SCHEDULER:'1'}}),{kind:'admin'});
   const m=srv.mod,path=ownedDirectory(srv.dataDir),db=await m.loadDb();
   try {
     await buildSyntheticDb(m,db,days+1,{random:seededRandom(MEASUREMENT.seed)});
@@ -108,7 +150,7 @@ async function backendMeasurement(days,format,buildSyntheticDb) {
     try {await inside;assert.deepEqual(await request(srv,'/api/watchlists'),before);assert.strictEqual(await m.loadDb(),db);}finally{release();}
     await assert.rejects(pendingWrite,{code:'O08_DISCARD'});
     const blocker=join(path,'stock1-db.json.tmp'),beforeHash=digest(selected(db));await mkdir(blocker);
-    try {const failed=await put('9999');assert.equal(failed.status,503);assert.equal(failed.body.code,'PERSISTENCE_FAILED');assert.equal(digest(selected(db)),beforeHash);assert.deepEqual(await request(srv,'/api/watchlists'),before);}finally{assert.equal(dirname(resolve(blocker)),path);await rm(blocker,{recursive:true,force:true});}
+    try {const failed=await withExpectedFixtureDiagnostic(()=>put('9999'),{kind:'atomic',blocker});assert.equal(failed.status,503);assert.equal(failed.body.code,'PERSISTENCE_FAILED');assert.equal(digest(selected(db)),beforeHash);assert.deepEqual(await request(srv,'/api/watchlists'),before);}finally{assert.equal(dirname(resolve(blocker)),path);await rm(blocker,{recursive:true,force:true});}
     const recovered=await put('2330');assert.equal(recovered.status,200);assert.equal(recovered.body.rev,rev+1);rev++;
     const stale=await request(srv,'/api/watchlists',{method:'PUT',body:JSON.stringify({rev:rev-1,lists:{1:['9999'],2:[],3:[]}})});assert.equal(stale.status,409);
     assert.strictEqual(await m.loadDb(),db);assert.ok(!JSON.stringify(db.watchLists).includes('9999'));
@@ -124,7 +166,7 @@ async function backendMeasurement(days,format,buildSyntheticDb) {
 
 async function browserMeasurement(rows) {
   const {createBrowserFixture}=await import('../tests/helpers/browser-fixtures.mjs');
-  const fixture=await createBrowserFixture({scenario:'populated'});ownedDirectory(fixture.server.dataDir);
+  const fixture=await withExpectedFixtureDiagnostic(()=>createBrowserFixture({scenario:'populated'}),{kind:'admin'});ownedDirectory(fixture.server.dataDir);
   const {page,context,browser}=fixture;
   try {
     // 共用 helper 開始 trace；量測前停下，以免 tracing 檔案 IO 混入。
@@ -147,14 +189,9 @@ async function browserMeasurement(rows) {
     const actualRows=await page.locator('#screenerRows .stock-row').count();
     // 使用現行 screen 容器，數量斷言防止空 renderer 成假綠。
     assert.equal(actualRows,rows);
-    const measured=await page.evaluate(async ({repeats,warmup})=>{
+    const rendererWorkload=async ({repeats,warmup})=>{
       const raw={renderLiveDataUpdateJsMs:[],renderLiveDataUpdateTwoRafMs:[],renderRowsJsMs:[],renderRowsTwoRafMs:[],sortEventToTwoRafMs:[]};
-      const parts={};const names=['renderRows','renderMarketStrip','renderStrategies','renderDetail','renderWatchManager','renderScreenerSummary'];
-      const originals=[];
-      // 只在本隔離 page 包裝現有函式；不改產品資產或增加正式全域計時入口。
-      for(const name of names){try{const fn=window[name];if(typeof fn!=='function')continue;parts[name]=[];const wrap=function(...args){const t=performance.now();try{return fn.apply(this,args);}finally{parts[name].push(performance.now()-t);}};originals.push([name,fn]);window[name]=wrap;}catch{}}
       const frames=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-      try {
         for(let i=-warmup;i<repeats;i++){
           document.activeElement?.blur();let t=performance.now();renderLiveDataUpdate();const js=performance.now()-t;await frames();const paint=performance.now()-t;
           t=performance.now();renderRows(el.screenerRows,filterStocks('screener'),'screener');const listJs=performance.now()-t;await frames();const listPaint=performance.now()-t;
@@ -162,12 +199,14 @@ async function browserMeasurement(rows) {
           const prior=state.sortDir;t=performance.now();button.focus();button.click();await frames();const sort=performance.now()-t;if(state.sortDir===prior&&state.sort==='price'&&i!==-warmup)throw new Error('sort did not toggle');
           if(i>=0)for(const [key,value]of Object.entries({renderLiveDataUpdateJsMs:js,renderLiveDataUpdateTwoRafMs:paint,renderRowsJsMs:listJs,renderRowsTwoRafMs:listPaint,sortEventToTwoRafMs:sort}))raw[key].push(value);
         }
-      }finally{for(const [name,fn]of originals)window[name]=fn;}
-      return {raw,parts,domNodes:document.getElementsByTagName('*').length,canvasCount:document.querySelectorAll('canvas').length,actualRows:document.querySelectorAll('#screenerRows .stock-row').length,heap:performance.memory?{usedJSHeapSize:performance.memory.usedJSHeapSize,totalJSHeapSize:performance.memory.totalJSHeapSize}:null,resources:performance.getEntriesByType('resource').map(r=>({name:new URL(r.name).pathname,transferSize:r.transferSize,encodedBodySize:r.encodedBodySize,decodedBodySize:r.decodedBodySize})),canvasReal:!!document.createElement('canvas').getContext('2d')};
-    },{repeats:MEASUREMENT.repeats,warmup:MEASUREMENT.warmup});
+      return {raw,domNodes:document.getElementsByTagName('*').length,canvasCount:document.querySelectorAll('canvas').length,actualRows:document.querySelectorAll('#screenerRows .stock-row').length,heap:performance.memory?{usedJSHeapSize:performance.memory.usedJSHeapSize,totalJSHeapSize:performance.memory.totalJSHeapSize}:null,resources:performance.getEntriesByType('resource').map(r=>({name:new URL(r.name).pathname,transferSize:r.transferSize,encodedBodySize:r.encodedBodySize,decodedBodySize:r.decodedBodySize})),canvasReal:!!document.createElement('canvas').getContext('2d')};
+    };
+    // 只序列化本檔固定函式／設定到隔離 page；安裝與工作量共用 finally，沒有正式全域入口。
+    const probeResult=await page.evaluate(`(${captureRendererProbes.toString()})((${rendererWorkload.toString()}).bind(null, ${JSON.stringify({repeats:MEASUREMENT.repeats,warmup:MEASUREMENT.warmup})}), {names:${JSON.stringify(RENDERER_PROBES)}})`);
+    const measured={...probeResult.value,parts:probeResult.parts};
     assert.equal(measured.actualRows,rows);assert.ok(measured.canvasReal);
     assert.ok(fixture.apiCalls.some(call=>call.includes('/api/quotes')));
-    return {kind:'browser',rows,ordinaryPolling:{inputRows:ordinaryPolling.inputRows,actualRows:ordinaryPolling.actualRows,quoteApiCalls:ordinaryPolling.quoteApiCalls,samples:Object.fromEntries(Object.entries(ordinaryPolling.raw).map(([k,v])=>[k,describeSamples(v)]))},chromium:browser.version(),viewport:page.viewportSize(),cold,samples:Object.fromEntries(Object.entries(measured.raw).map(([k,v])=>[k,describeSamples(v)])),rendererCallsIncludingWarmup:Object.fromEntries(Object.entries(measured.parts).filter(([,v])=>v.length).map(([k,v])=>[k,describeSamples(v)])),resources:{domNodes:measured.domNodes,canvasCount:measured.canvasCount,heap:measured.heap,network:measured.resources},correctness:{actualRows:measured.actualRows,realCanvas:measured.canvasReal,sortToggled:true,quoteApiCalls:fixture.apiCalls.filter(call=>call.includes('/api/quotes')).length},definitions:{cold:'3 page reloads in same headless context, not cold browser process or cleared OS cache',twoRaf:'JS through two requestAnimationFrame callbacks; rendering opportunity including style/layout, not physical display/input-to-photon',interaction:'native button focus + HTMLElement.click through existing delegated sort and two rAF; excludes OS input latency',poll:'real refreshLiveData with existing offline browser API contract; no external network latency',rendererIsolation:'existing autoRefreshInFlight guard held only in this disposable fixture after ordinary polling; avoids unrelated 10-second poll changing the fixed large pool',rendererParts:'synchronous nested function calls including warmup, attribution can overlap; do not sum as independent frame costs'}};
+    return {kind:'browser',rows,ordinaryPolling:{inputRows:ordinaryPolling.inputRows,actualRows:ordinaryPolling.actualRows,quoteApiCalls:ordinaryPolling.quoteApiCalls,samples:Object.fromEntries(Object.entries(ordinaryPolling.raw).map(([k,v])=>[k,describeSamples(v)]))},chromium:browser.version(),viewport:page.viewportSize(),cold,samples:Object.fromEntries(Object.entries(measured.raw).map(([k,v])=>[k,describeSamples(v)])),rendererCallsIncludingWarmup:summarizeRendererProbes(measured.parts),resources:{domNodes:measured.domNodes,canvasCount:measured.canvasCount,heap:measured.heap,network:measured.resources},correctness:{actualRows:measured.actualRows,realCanvas:measured.canvasReal,sortToggled:true,quoteApiCalls:fixture.apiCalls.filter(call=>call.includes('/api/quotes')).length},definitions:{cold:'3 page reloads in same headless context, not cold browser process or cleared OS cache',twoRaf:'JS through two requestAnimationFrame callbacks; rendering opportunity including style/layout, not physical display/input-to-photon',interaction:'native button focus + HTMLElement.click through existing delegated sort and two rAF; excludes OS input latency',poll:'real refreshLiveData with existing offline browser API contract; no external network latency',rendererIsolation:'existing autoRefreshInFlight guard held only in this disposable fixture after ordinary polling; avoids unrelated 10-second poll changing the fixed large pool',rendererParts:'synchronous nested function calls including warmup, attribution can overlap; do not sum as independent frame costs'}};
   }finally{await fixture.close();}
 }
 

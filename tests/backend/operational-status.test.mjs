@@ -90,6 +90,47 @@ test('已發布後補驗失敗只反映排程受阻；保存失敗與 health rea
     assert.equal(body.persistence.writable, false);
     const health = await srv.raw('/api/health'); assert.equal(health.status, 200); await health.json();
   } finally { await rmdir(blocker); }
+  const repairedBytes = await readFile(join(srv.dataDir, 'stock1-db.json'), 'utf8');
+  for (let i = 0; i < 2; i++) {
+    const known = (await (await srv.raw('/api/operational-status')).json()).persistence;
+    assert.equal(known.writable, false, '解除磁碟故障後，唯讀 GET 不試寫或清除已知失敗');
+    assert.equal(known.lastFailureAt, body.persistence.lastFailureAt);
+  }
+  assert.equal(await readFile(join(srv.dataDir, 'stock1-db.json'), 'utf8'), repairedBytes);
   await srv.mod.commitDbMutation(draft => { draft.sharedRevs.operationalTest = 2; });
   assert.equal((await (await srv.raw('/api/operational-status')).json()).persistence.writable, true);
+});
+
+test('台北午夜前今日達上限，午夜後只保留前日紀錄，GET 不重設排程或寫入', async t => {
+  const m = srv.mod;
+  m.resetCloseSchedulerStateForTest();
+  const midnight = Date.parse(`${iso}T16:00:00Z`);
+  try {
+    for (const hours of [4, 3, 2]) await assert.rejects(m.runScheduledCloseTasks({
+      now: new Date(midnight - hours * 3600000), loadDb: async () => ({}),
+      getReferenceData: async () => { throw Error('synthetic source unavailable'); },
+    }), /synthetic source unavailable/);
+    const original = m.closeSchedulerStateForTest();
+    assert.equal(original.failures, m.SCHEDULER_MAX_FAILURES_PER_DAY);
+    assert.equal(original.failureDay, today);
+    const before = await readFile(join(srv.dataDir, 'stock1-db.json'), 'utf8');
+    const calls = srv.mock.calls.length;
+    t.mock.timers.enable({ apis: ['Date'], now: midnight - 1 });
+    let result = await (await srv.raw('/api/operational-status')).json();
+    assert.equal(result.asOf, iso);
+    assert.equal(result.scheduler.dailyLimitReached, true);
+    t.mock.timers.setTime(midnight);
+    for (let i = 0; i < 2; i++) {
+      result = await (await srv.raw('/api/operational-status')).json();
+      assert.notEqual(result.asOf, iso);
+      assert.equal(result.scheduler.dailyLimitReached, false);
+      assert.equal(result.scheduler.failures, original.failures);
+      assert.equal(result.scheduler.failureDay, today);
+      assert.equal(result.scheduler.retryAt, new Date(original.retryAt).toISOString());
+      assert.equal(result.scheduler.lastRunDay, null, '不能虛構新日成功');
+      assert.deepEqual(m.closeSchedulerStateForTest(), original);
+    }
+    assert.equal(await readFile(join(srv.dataDir, 'stock1-db.json'), 'utf8'), before);
+    assert.equal(srv.mock.calls.length, calls);
+  } finally { t.mock.timers.reset(); m.resetCloseSchedulerStateForTest(); }
 });

@@ -96,6 +96,9 @@ test('離線關閉全部分頁後以 query 重開外殼，行情 API 失敗可�
     assert.equal(await offline.evaluate(() => APP_SHELL_VERSION), 'stock1-shell-test-a');
     await offline.locator('.empty-state').filter({ hasText: '行情載入失敗' }).waitFor();
     assert.equal(await offline.evaluate(() => stocks.length), 0);
+    assert.equal(await offline.locator('#detailName').textContent(), '行情載入失敗');
+    assert.doesNotMatch(await offline.locator('#detailTags').textContent(), /正在抓|載入中/);
+    assert.equal(await offline.locator('#detailPrice').textContent(), '--');
     assert.equal(await offline.evaluate(async () => fetch('/api/quotes?codes=6488').then(() => 'unexpected success', () => 'network failed')), 'network failed');
     assert.equal(await offline.evaluate(async () => fetch('/unfinished.js').then(() => 'partial shell leaked', () => 'network failed')), 'network failed');
     const asset = await offline.evaluate(async () => {
