@@ -5,6 +5,9 @@
 //   2. renderHoldingsPanel 同一個陷阱 → 市值 0、未實現＝全額虧損，還會混進投組總計。
 //   3.「載入更多」按鈕真實點擊後焦點留在 button 上，renderHoldingsPanel 為保護表單而 early-return，
 //      畫面完全不動；jsdom 的 .click() 不移動焦點，所以舊測試看不出來。
+// 2026-09-09 CUA-01 再補一個同類破口：均量比（wire 欄位 metrics.volumeRatio5，合法可為 null）
+//      在 upsertStockFromQuote 硬寫 0、在 upsertStockFromPick 用 || 壓成 0，量價摘要於是把
+//      「沒資料」畫成「均量比 0・量能狀態一般・估算可用」。修法在入口保留 null，評分門檻沿用 0 語意不變。
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createAppWindow } from "../helpers/dom-harness.mjs";
@@ -121,4 +124,127 @@ test("「載入更多」：真實點擊（焦點在按鈕上）也必須真的�
   assert.equal(result.focusedBeforeClick, true, "前提：點擊時焦點在按鈕上");
   assert.equal(result.limit, 80);
   assert.equal(result.after, 80, "焦點在按鈕上時畫面仍必須重繪出 80 筆");
+});
+
+// ---- CUA-01：均量比缺值不得被當成 0 ----
+
+const metricOf = (detail, label) => detail.metrics.find((metric) => metric.label === label);
+
+const quoteFixture = (code, over = {}) => JSON.stringify({
+  code, name: `合成${code}`, exchange: "TWSE", price: 40, previousClose: 39.5, open: 39.6, high: 40.5, low: 39.4,
+  change: 0.5, changePct: 1.27, unitLots: 10, volumeLots: 100, turnoverPct: 0.3,
+  source: "TWSE 測試", sourceKind: "realtime", asOf: "2026/09/08 13:30:00", priceStale: false, ...over,
+});
+
+const pickFixture = (code, volumeRatio5) => JSON.stringify({
+  code, name: `合成${code}`, exchange: "TWSE", market: "上市", price: 50, changePct: 2, volumeLots: 800, score: 80,
+  group: "strongContinuation", groupName: "強勢續攻", asOf: "2026-09-08", source: "fixture",
+  metrics: { volumeRatio5, closePosition: 0.8, turnover: 1.2 },
+});
+
+test("量價摘要：/api/quotes 建立的股票沒有均量比，不得顯示 0 與一般量能", () => {
+  const result = json(`(() => {
+    stocks.length = 0;
+    upsertStockFromQuote(${quoteFixture("1101")});
+    const stock = stocks.find((item) => item.code === "1101");
+    return { avgVol: stock.avgVol, detail: buildIndicatorDetail(stock)["量價摘要"] };
+  })()`);
+  assert.equal(result.avgVol, null, "報價 API 沒有均量比，入口不得補 0");
+  assert.equal(metricOf(result.detail, "均量比").value, "--");
+  assert.equal(result.detail.status, "部分資料");
+  assert.doesNotMatch(result.detail.note, /量能狀態：一般/, "缺值不得判成一般量能");
+  assert.equal(metricOf(result.detail, "總量").value, "100", "已知的總量仍要顯示");
+  assert.equal(metricOf(result.detail, "單量").value, "10");
+});
+
+test("upsertStockFromPick：volumeRatio5 缺值保留未知、有值才覆寫、合法 0 不被丟掉", () => {
+  const sequence = json(`(() => {
+    stocks.length = 0;
+    const read = () => stocks.find((item) => item.code === "1102").avgVol;
+    const out = [];
+    upsertStockFromPick(${pickFixture("1102", null)}); out.push(read());
+    upsertStockFromPick(${pickFixture("1102", 1.98)}); out.push(read());
+    upsertStockFromPick(${pickFixture("1102", null)}); out.push(read());
+    upsertStockFromPick(${pickFixture("1102", 0)}); out.push(read());
+    return out;
+  })()`);
+  assert.deepEqual(sequence, [null, 1.98, 1.98, 0]);
+});
+
+test("upsertStockFromPick：報價建立的股票再收到訊號時，同樣的缺值／覆寫／合法 0 規則", () => {
+  const sequence = json(`(() => {
+    stocks.length = 0;
+    const read = () => stocks.find((item) => item.code === "1103").avgVol;
+    const out = [];
+    upsertStockFromQuote(${quoteFixture("1103")}); out.push(read());
+    upsertStockFromPick(${pickFixture("1103", 1.98)}); out.push(read());
+    upsertStockFromPick(${pickFixture("1103", null)}); out.push(read());
+    upsertStockFromPick(${pickFixture("1103", 0)}); out.push(read());
+    return out;
+  })()`);
+  assert.deepEqual(sequence, [null, 1.98, 1.98, 0]);
+});
+
+test("量價摘要：均量比 null／0／1.49／1.5／3 的值、色調與狀態", () => {
+  const rows = json(`(() => [null, 0, 1.49, 1.5, 3].map((avgVol) => {
+    const detail = buildIndicatorDetail({ ...${JSON.stringify(STOCK_BASE)}, code: "1104", name: "合成", price: 100, spark: [100], unit: 10, total: 100, avgVol })["量價摘要"];
+    const metric = detail.metrics.find((item) => item.label === "均量比");
+    return { avgVol, value: metric.value, tone: metric.tone, status: detail.status, statusTone: detail.statusTone, note: detail.note };
+  }))()`);
+  const byAvg = Object.fromEntries(rows.map((row) => [String(row.avgVol), row]));
+  assert.equal(byAvg.null.value, "--");
+  assert.equal(byAvg.null.tone, "muted");
+  assert.equal(byAvg.null.status, "部分資料");
+  assert.equal(byAvg.null.statusTone, "pending");
+  assert.match(byAvg.null.note, /尚未取得/);
+  assert.doesNotMatch(byAvg.null.note, /量能狀態：/);
+  assert.equal(byAvg["0"].value, "0", "合法 0 不得被改成未知");
+  assert.equal(byAvg["0"].tone, "muted");
+  assert.equal(byAvg["0"].status, "估算可用");
+  assert.match(byAvg["0"].note, /量能狀態：一般/);
+  assert.equal(byAvg["1.49"].value, "1.49");
+  assert.equal(byAvg["1.49"].tone, "muted");
+  assert.equal(byAvg["1.5"].value, "1.5");
+  assert.equal(byAvg["1.5"].tone, "positive");
+  assert.match(byAvg["1.5"].note, /量能狀態：放量/);
+  assert.equal(byAvg["3"].value, "3");
+  assert.equal(byAvg["3"].tone, "warning");
+  assert.match(byAvg["3"].note, /量能狀態：爆量/);
+});
+
+test("量價摘要：單量／總量缺值顯示 --，狀態降為部分資料；已知 0 仍是 0", () => {
+  const rows = json(`(() => [
+    { unit: null, total: 100 },
+    { unit: 10, total: null },
+    { unit: 0, total: 100 },
+  ].map((over) => {
+    const detail = buildIndicatorDetail({ ...${JSON.stringify(STOCK_BASE)}, code: "1105", name: "合成", price: 100, spark: [100], avgVol: 1, ...over })["量價摘要"];
+    return { over, unit: detail.metrics.find((m) => m.label === "單量").value, total: detail.metrics.find((m) => m.label === "總量").value,
+      share: detail.metrics.find((m) => m.label === "單量占比").value, status: detail.status };
+  }))()`);
+  assert.deepEqual(rows[0], { over: { unit: null, total: 100 }, unit: "--", total: "100", share: "無法計算", status: "部分資料" });
+  assert.deepEqual(rows[1], { over: { unit: 10, total: null }, unit: "10", total: "--", share: "無法計算", status: "部分資料" });
+  assert.deepEqual(rows[2], { over: { unit: 0, total: 100 }, unit: "0", total: "100", share: "0%", status: "估算可用" });
+});
+
+test("評分與分類：avgVol 未知與 0 的結果必須相同（不改選股門檻）", () => {
+  const probes = json(`(() => {
+    const base = { ...${JSON.stringify(STOCK_BASE)}, code: "1106", name: "合成", price: 100, spark: [98, 99, 100], change: 2.4,
+      unit: 30, total: 3000, flow: 1500, turnover: 4, stage: 1, slope: 3, streak: 5, signal: "up",
+      groups: ["overnight", "watch"], strategies: ["強勢續攻"] };
+    const labels = getAllStrategyMeta().map((meta) => meta.label);
+    const probe = (avgVol) => {
+      const stock = { ...base, avgVol };
+      return {
+        intraday: stockIntradayScore(stock),
+        matches: labels.map((label) => [label, stockMatchesStrategy(stock, label)]),
+        strategyScore: getStrategyScore(stock),
+        reason: getStockReason(stock, "screener"),
+        watchActive: stockMatchesWatchFilter(stock, "active"),
+        risk: buildIndicatorDetail(stock)["風險提醒"].metrics,
+      };
+    };
+    return { unknown: probe(null), zero: probe(0) };
+  })()`);
+  assert.deepEqual(probes.unknown, probes.zero);
 });

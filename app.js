@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v35";
+const APP_SHELL_VERSION = "stock1-shell-v36";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -686,12 +686,18 @@ function getDailyClosesForStock(stock) {
 
 function buildIndicatorDetail(stock) {
   const spark = stock.spark.length ? stock.spark : [stock.price];
-  const avgVol = Number(stock.avgVol) || 0;
+  // 原值與門檻用值分開：原值 null 代表「尚未取得」，顯示用 --；門檻／量能狀態沿用舊的 0 語意，
+  // 所以評分與分類結果不變，只有量價摘要不再把缺值畫成「均量比 0・量能一般」。
+  const avgVolValue = finiteNumberOrNull(stock.avgVol);
+  const unitValue = finiteNumberOrNull(stock.unit);
+  const totalValue = finiteNumberOrNull(stock.total);
+  const avgVol = avgVolValue ?? 0;
   const turnover = Number(stock.turnover) || 0;
   const flow = Number(stock.flow) || 0;
-  const total = Number(stock.total) || 0;
-  const unit = Number(stock.unit) || 0;
-  const unitShare = total > 0 ? (unit / total) * 100 : null;
+  const total = totalValue ?? 0;
+  const unit = unitValue ?? 0;
+  const unitShare = totalValue !== null && totalValue > 0 && unitValue !== null ? (unitValue / totalValue) * 100 : null;
+  const volumePartial = avgVolValue === null || unitValue === null || totalValue === null;
   const dailyCloses = getDailyClosesForStock(stock);
   const usingDaily = Boolean(dailyCloses && dailyCloses.length >= 20);
   const maSeries = usingDaily ? dailyCloses : spark;
@@ -757,16 +763,18 @@ function buildIndicatorDetail(stock) {
   return {
     量價摘要: {
       title: "量價摘要（非分點）",
-      status: "估算可用",
-      statusTone: "estimate",
+      status: volumePartial ? "部分資料" : "估算可用",
+      statusTone: volumePartial ? "pending" : "estimate",
       summary: "用單量、總量、連量與均量比觀察量能是否集中放大；目前不是券商分點，也不是官方主力買賣超。",
       metrics: [
-        { label: "單量", value: formatNumber(unit), tone: "neutral" },
-        { label: "總量", value: formatNumber(total), tone: "neutral" },
+        { label: "單量", value: formatOptionalNumber(unitValue), tone: "neutral" },
+        { label: "總量", value: formatOptionalNumber(totalValue), tone: "neutral" },
         { label: "單量占比", value: unitShare === null ? "無法計算" : formatIndicatorPercent(unitShare), tone: unitShare >= 1 ? "positive" : "muted" },
-        { label: "均量比", value: formatNumber(avgVol), tone: avgVol >= 3 ? "warning" : avgVol >= 1.5 ? "positive" : "muted" },
+        { label: "均量比", value: formatOptionalNumber(avgVolValue), tone: avgVolValue === null ? "muted" : avgVol >= 3 ? "warning" : avgVol >= 1.5 ? "positive" : "muted" },
       ],
-      note: `目前量能狀態：${volumeState}。這一格只適合看量能有沒有放大，不能解讀成特定主力買進。`,
+      note: avgVolValue === null
+        ? "均量比需要近 5 日均量才算得出來，這檔尚未取得（目前只有隔日沖訊號會附帶）；量能狀態暫不判定，也不能解讀成特定主力買進。"
+        : `目前量能狀態：${volumeState}。這一格只適合看量能有沒有放大，不能解讀成特定主力買進。`,
     },
     法人籌碼: institutionalDetail,
     風險提醒: stock.margin
@@ -4698,7 +4706,8 @@ function upsertStockFromQuote(quote) {
       streak: finiteNumberOrNull(quote.transactions) ?? unitLots ?? 0,
       flow: volumeLots ?? 0,
       turnover: turnoverPct,
-      avgVol: 0,
+      // 報價 API 沒有 5 日均量比；寫 0 會讓量價摘要把「沒資料」畫成「均量比 0・量能一般」。
+      avgVol: null,
       groups: ["watch"],
       strategies: ["官方查詢"],
       spark: seedSpark.length >= 2 ? seedSpark : price !== null ? [price, price] : [],
@@ -6051,6 +6060,14 @@ async function loadMarginData({ notify = false, renderNow = true } = {}) {
   }
 }
 
+// 均量比（metrics.volumeRatio5）在上游歷史不足或 5 日均量為 0 時合法為 null。
+// 舊寫法 `volumeRatio5 || stock.avgVol` 把 null 與合法 0 都吞掉：null 沿用舊值沒錯，
+// 但 0 也被當成「沒資料」而丟棄。這裡只在有有限值時覆寫，null 保留既有值（可能仍是 null）。
+function mergePickVolumeRatio(stock, pick) {
+  const volumeRatio5 = finiteNumberOrNull(pick.metrics?.volumeRatio5);
+  if (volumeRatio5 !== null) stock.avgVol = volumeRatio5;
+}
+
 function upsertStockFromPick(pick) {
   let stock = stocks.find((item) => item.code === pick.code);
   if (isQuoteBackedStock(stock)) {
@@ -6061,7 +6078,7 @@ function upsertStockFromPick(pick) {
     stock.stage = pick.metrics?.volumeRatio5 || stock.stage;
     stock.slope = pick.metrics?.closePosition ? pick.metrics.closePosition * 10 : stock.slope;
     if (Number.isFinite(Number(pick.metrics?.turnover))) stock.turnover = Number(pick.metrics.turnover);
-    stock.avgVol = pick.metrics?.volumeRatio5 || stock.avgVol;
+    mergePickVolumeRatio(stock, pick);
     if (pick.surveillance) stock.surveillance = pick.surveillance;
     return stock;
   }
@@ -6080,7 +6097,7 @@ function upsertStockFromPick(pick) {
       streak: pick.score || 0,
       flow: Math.round((pick.metrics?.volumeRatio20 || 0) * 100),
       turnover: Number(pick.metrics?.turnover) || 0,
-      avgVol: pick.metrics?.volumeRatio5 || 0,
+      avgVol: finiteNumberOrNull(pick.metrics?.volumeRatio5),
       groups: ["overnight"],
       strategies: [pick.groupName],
       // 用「隱含昨收→訊號日收盤」兩點起步，之後官方報價會把真實價格接上去；
@@ -6102,7 +6119,7 @@ function upsertStockFromPick(pick) {
   stock.stage = pick.metrics?.volumeRatio5 || stock.stage;
   stock.slope = pick.metrics?.closePosition ? pick.metrics.closePosition * 10 : stock.slope;
   if (Number.isFinite(Number(pick.metrics?.turnover))) stock.turnover = Number(pick.metrics.turnover);
-  stock.avgVol = pick.metrics?.volumeRatio5 || stock.avgVol;
+  mergePickVolumeRatio(stock, pick);
   stock.surveillance = pick.surveillance || null;
   stock.official = true;
   stock.source = pick.source;
