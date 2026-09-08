@@ -7486,6 +7486,14 @@ body.is-locked .app-shell {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  /* 兩欄卡扣掉內距與 nowrap 的漲幅後只剩約 60px 給股名，桌機的「名稱＋漲幅」兩欄 strong 會把
+     「力士／同協／美好證」逐字直排（2026-09-09 computer use 心得 F03）。手機改成名稱在上、漲幅在下：
+     字級不縮、不用 ellipsis、長名稱自然換行；桌機與自選卡（.is-watch）規則不動。 */
+  .today-focus-card:not(.is-watch) strong {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
   .today-focus-card,
   .data-trust-card {
     min-height: 96px;

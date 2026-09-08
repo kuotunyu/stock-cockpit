@@ -49,6 +49,20 @@ test("focus pick separates the name from a large, readable percentage", () => {
   assert.match(percent, /font-size\s*:\s*21px/);
 });
 
+// 2026-09-09 CUA-03（computer use 心得 F03）：手機兩欄卡把桌機的「名稱＋漲幅」兩欄 strong 擠到約 60px，
+// 「力士／同協／美好證」逐字直排。手機 query 內把 strong 改單欄（名稱在上、漲幅在下），桌機規則不動，不用 ellipsis。
+test("mobile focus pick stacks name above percentage instead of squeezing the name", () => {
+  const mobileBlock = styles.slice(styles.indexOf("@media (max-width: 760px)"));
+  assert.ok(mobileBlock.length > 0, "手機 media query 必須存在");
+  const override = mobileBlock.match(/\.today-focus-card:not\(\.is-watch\) strong\s*\{([^}]*)\}/);
+  assert.ok(override, "手機 query 內必須覆寫 .today-focus-card:not(.is-watch) strong");
+  assert.match(override[1], /grid-template-columns\s*:\s*minmax\(0,\s*1fr\)\s*;/, "手機改成單欄，名稱獨占一行");
+  assert.doesNotMatch(override[1], /minmax\(0,\s*1fr\)\s+auto/);
+  const nameRules = [...styles.matchAll(/\.focus-pick-name[^{]*\{([^}]*)\}/g)].map((match) => match[1]).join("\n");
+  assert.doesNotMatch(nameRules, /text-overflow\s*:\s*ellipsis/, "股名不得用 ellipsis 縮成「鑫…」");
+  assert.doesNotMatch(nameRules, /font-size\s*:\s*(1\d|20)px/, "手機不得縮小股名字級");
+});
+
 test("overview rows preserve full names by stacking identity and quote beside the score", () => {
   const row = ruleBody(".overnight-group.is-overview .overnight-pick");
   assert.match(row, /grid-template-columns\s*:\s*70px\s+minmax\(0,\s*1fr\)/);
