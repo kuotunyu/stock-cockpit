@@ -1,5 +1,11 @@
 # Stock1 測試套件
 
+`verification-measurement` 驗診斷樣本至少 50 筆才標描述性 p95、nearest-rank、固定種子、合法規模與合成日期／模型身份／codec；沒有 CI 毫秒門檻。手動完整採樣入口是 `node scripts/verification-diagnostics.mjs --o08`，沿用原先 `node scripts/verification-diagnostics.mjs 5` 的完整候選池 fixture。完整入口依序跑 1／5／20 日的 raw／packed／mixed，各加一日兩策略 pending 與每完成日兩份手動計畫；每組 3 次暖機、50 次保存／並發查詢／摘要，3 個新 Node 程序重啟。每組輸出自己的摘要窗口、真實 DB／各資源 bytes、記憶體、event-loop histogram 及原始樣本。`--o08-worker 5 mixed` 可單獨重現指定組；入口不接受 DB 路徑，helper 清除 ambient DATA_DIR／DB_PATH、只用自建 temp 目錄與 port 0。
+
+效能採樣前須另保存本機、seed／規模／次數、比較預算與量測定義；採樣後不能回頭調預算。預設 seed 8082026、暖樣本 50、冷樣本 3；少量冷樣本只列個別值／範圍，OS 檔案快取未清除。後端並發組實際走 `GET/PUT /api/watchlists`、`GET /api/quotes?codes=2330`，同時執行兩策略 `summarizeVerificationBenchmarks` 及兩筆真實 `commitDbMutation` cursor 保存。queue 指送交到第二筆 mutator 進入，包含前一筆保存等待及本筆 draft clone，不能稱純 queue scheduler 時間。行情是暖過的單一代號離線 fixture 路徑，並非全市場或真上游延遲；背景 workload 是摘要與 cursor 保存，未模擬完整上游採集。故障注入另在樣本外驗 503、pending／失敗不可見、rev 409、根物件 identity、後續保存及重啟 hash。
+
+`--o08-browser 260` 以既有 `createBrowserFixture`、真正 headless Chromium 與 Canvas 量 20／260／1000 輸入列及實際 DOM 列，先於原 populated fixture 量普通 `refreshLiveData`，再於丟棄用 page 持有既有 in-flight guard，隔離純 `renderLiveDataUpdate`、`renderRows` 與排序事件。沒有修改產品計時入口。同步 JS、兩次 rAF frame opportunity、原生 button `.click()` 到 frame opportunity 分開；不是螢幕呈現或 OS 輸入延遲。分 renderer 採樣包含暖機且巢狀成本可能重疊；頁面 reload 不是冷啟整個瀏覽器。採樣時停 tracing、保留真 CSS／字型和 API 外網 tripwire；清理先關閉自有 browser／server，再核對並移除自建 temp。此量測不宣稱正式容量、金融有效性或效能 SLA；超預算只提出有遷移／回復前提的有界後續，不自動重構。
+
 `pwa-lifecycle` 使用獨立 port 0 HTTP origin 和允許 SW 的 Chromium context，直接提供真正外殼檔案與共用合成 API。瀏覽器及 worker 都經實際網路；沒有 page.route 回填 API，離線以 context.setOffline 驗。一般 `createBrowserFixture` 仍預設 `serviceWorkers: "block"`，保持 UI 測試隔離。
 
 PWA 案例涵蓋 A 整包安裝、B app.js HTTP 503 安裝失敗仍可讀取／重開 A、B 重試成功，以及舊分頁草稿／焦點／已載入身份保留、新分頁載入 B。關閉所有分頁後離線 query 重開、帶 query 資產、API HTTP 與離線失敗、非現役殘留 cache 不作外殼、沒有備援時保留 HTTP 錯誤都有斷言。專用 loopback proxy 拒絕轉送外網（另以真 worker 探針驗證），setup 失敗及一般完成均關閉自有 context／browser／server；不啟正式後端、不讀 `.env`／`.data`。截圖、trace 和 HTTP 請求紀錄在 `test-results/browser/pwa-*`。

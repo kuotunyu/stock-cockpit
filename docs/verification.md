@@ -1,5 +1,7 @@
 # 驗證模型、證據與保存
 
+維護者可用 `node scripts/verification-diagnostics.mjs --o08` 執行離線合成診斷：比較相同候選池的 raw／packed／mixed 與 pending、個人計畫，重複量原子保存、同時查詢、摘要、記憶體及 Chromium renderer。先登記機器、資料規模、採樣次數和比較預算；暖樣本至少 50 筆才報描述性 p95，冷啟動個別列示。命令只建立隔離 temp 資料與臨時埠，詳細量測定義及限制見 [測試指南](../tests/README.md)。這些資料不能證明目前 UI 已慢，也不能換算成正式保存年限或 SQLite 遷移理由；超出事前預算時，先提出有明確範圍、資料遷移與回復契約的下一步。
+
 API 的 `publication` 提供 captureId、版本身份、輸入指紋、request scope、來源日期精度與本機取得／發布時間；寫入失敗回 `kind: "not-persisted"` 並保留重試提示。正式身份與全部修訂保存在主 DB 的 `verificationPublications`，與訊號／驗證單同次原子提交及備份。來源只有日期時不補造時分秒；週一才取得週五清單，不代表週五已能決策。 發布先原子保存清單與 `publicationStartedAt` 下界，再一次性補存真正可讀後的 `availableConfirmedAt` 上界；`publishedAt`／`decisionAvailableAt` 採此保守上界並標 `confirmed-available-upper-bound`。補證失敗不撤銷正式清單，時間保留 null 與原因；之後讀取時用當下真實時間補證，不能回填。跨開盤的提交區間不能直接認定必定晚發布。
 
 評估 metadata 分為 `selectionVersion`、`evaluationVersion`、`costModelVersion`、`cohortPolicyVersion`、`entryModel`、`returnBasis`（schema 2），另保留 `formulaVersion` 相容。舊價格觀察算式為 `overnight-price-observation-v1`／`swing-price-observation-v1`，成本為固定扣 0.471 個百分點的 `flat-round-trip-0.471pct-v1`，母體政策為 `first-canonical-publication-v1`。這些仍是收盤基準的還原座標價格觀察，並非成交或帳戶含息實績。
