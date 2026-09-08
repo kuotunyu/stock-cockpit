@@ -151,7 +151,6 @@ const state = {
   universe: "overnight",
   overnightView: "overview",
   surveillanceTab: "aboutToDispose",
-  focus: "capital",
   strategy: "量價轉強",
   sort: "flow",
   sortDir: "desc",
@@ -5808,10 +5807,13 @@ function upsertStockFromPick(pick) {
 function renderOvernightGroups() {
   if (!el.overnightGroups) return;
   const table = document.querySelector('[data-screen-panel="overnight"] .quote-table');
+  const showFallbackTable = !overnightState.error && state.overnightView !== "performance"
+    && !(overnightState.loading && !overnightState.loaded) && (!overnightState.loaded || !overnightState.groups);
+  if (table) table.hidden = !showFallbackTable;
+  renderListFilterStatus();
   if (overnightState.error) {
     el.overnightGroups.hidden = false;
     el.overnightGroups.classList.remove("is-single-group");
-    if (table) table.hidden = true;
     el.overnightGroups.innerHTML = `
       <div class="overnight-error">
         <strong>官方隔日沖清單產生失敗</strong>
@@ -5824,7 +5826,6 @@ function renderOvernightGroups() {
   if (state.overnightView === "performance") {
     el.overnightGroups.hidden = false;
     el.overnightGroups.classList.add("is-single-group");
-    if (table) table.hidden = true;
     if (!backtestState.loaded && !backtestState.loading && !backtestState.error) {
       loadBacktestSummary();
     }
@@ -5837,14 +5838,12 @@ function renderOvernightGroups() {
   if (overnightState.loading && !overnightState.loaded) {
     el.overnightGroups.hidden = false;
     el.overnightGroups.classList.remove("is-single-group");
-    if (table) table.hidden = true;
     el.overnightGroups.innerHTML = `<div class="overnight-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span>官方隔日沖清單產生中，第一次約需 10–30 秒…</div>`;
     return;
   }
   if (!overnightState.loaded || !overnightState.groups) {
     el.overnightGroups.hidden = true;
     el.overnightGroups.classList.remove("is-single-group");
-    if (table) table.hidden = false;
     return;
   }
 
@@ -5937,7 +5936,6 @@ function renderOvernightGroups() {
 
   el.overnightGroups.hidden = false;
   el.overnightGroups.classList.toggle("is-single-group", state.overnightView !== "overview");
-  if (table) table.hidden = true;
   const warnings = (overnightState.warnings || [])
     .map((warning) => `<span class="overnight-warning">⚠ ${escapeHtml(warning)}</span>`)
     .join("");
@@ -7529,6 +7527,22 @@ function hasActiveListFilters() {
   return state.direction !== "all" || Number(state.minTurnover) > 0 || Boolean(state.watchOnly) || !state.showSurveillance;
 }
 
+function listFiltersApplyToCurrentScreen() {
+  return state.screen === "screener" || (state.screen === "overnight"
+    && document.querySelector('[data-screen-panel="overnight"] .quote-table')?.hidden === false);
+}
+
+function renderListFilterStatus() {
+  const button = document.getElementById("filterOpen");
+  if (!button) return;
+  const active = state.direction !== "all" || state.minTurnover > 0 || state.watchOnly;
+  const appliesHere = listFiltersApplyToCurrentScreen();
+  button.classList.toggle("has-active-filter", active && appliesHere);
+  button.title = active
+    ? (appliesHere ? "篩選條件套用中（清單已被過濾，點開調整）" : "清單篩選已設定（不作用於目前頁面，點開查看範圍）")
+    : "清單篩選（點開查看適用範圍）";
+}
+
 function renderRows(container, list, screen = state.screen) {
   syncQuoteTableSemantics(container);
   if (!list.length) {
@@ -7881,8 +7895,11 @@ function renderSurveillanceScreen() {
   // 這兩句話對使用者的意義完全相反，而舊文案一律講後者：2026-07-31 的 55 檔注意股
   // 全部是上櫃，切到「上市」分頁會看到「今天沒有被列為注意的股票」，而上方分頁徽章
   // 同時顯示著 55。市場／分盤／搜尋三個篩選都會踩到，只有「只看自選」有專屬文案。
+  const mineHiddenByFilters = state.survMineOnly && list.some((item) => isInAnyWatchList(item.code));
   const emptyMsg = list.length
-    ? (state.survMineOnly
+    ? (mineHiddenByFilters
+      ? `自選股在本分頁內，但被目前的市場、分盤或搜尋篩選排除（本分頁共 ${list.length} 檔）。請調整上方條件。`
+      : state.survMineOnly
       ? `你的自選股目前沒有在這個分頁（本分頁共 ${list.length} 檔）。`
       : `篩選後沒有符合的（本分頁共 ${list.length} 檔）。`)
     : (emptyHints[tab] || "目前沒有資料。");
@@ -9182,6 +9199,8 @@ function drawTechnicalChart(data, options = {}) {
 const ZOOM_MIN_BARS = 18; // 縮放時最少顯示幾根 K 棒
 const zoomChartState = {
   open: false,
+  openSeq: 0,
+  helpTimer: null,
   geometry: null,
   index: -1,
   pointerY: null,
@@ -9205,11 +9224,17 @@ function invalidateZoomReadoutLayout({ content = false } = {}) {
 }
 
 function openTechnicalZoom(event) {
+  if (technicalState.loading) {
+    showToast("目前股票與週期仍在分析中，完成後即可放大；操作說明可先從問號開啟。");
+    return;
+  }
   if (!technicalState.data?.candles?.length) {
     showToast("先分析個股，才有圖可以放大");
     return;
   }
   if (!el.technicalZoomModal) return;
+  closeZoomHelp();
+  zoomChartState.openSeq += 1;
   openDialogLayer(el.technicalZoomModal, {
     trigger: event?.currentTarget || document.activeElement,
     initialFocus: ".chart-zoom-modal",
@@ -9227,11 +9252,18 @@ async function openZoomForStock(code, trigger = document.activeElement) {
     return;
   }
   if (!el.technicalZoomModal) return;
+  closeZoomHelp();
+  const openSeq = ++zoomChartState.openSeq;
   state.technicalPeriod = "day";
   state.technicalCode = clean;
   technicalInputDirty = false;
   // 已經載好同一檔的日K → 直接開，零延遲。
   if (technicalState.data?.code === clean && technicalState.data?.period === "day" && technicalState.data?.candles?.length) {
+    // Reusing cached daily data also supersedes any pending period request.
+    technicalState.requestId += 1;
+    technicalState.loading = false;
+    technicalState.error = "";
+    renderTechnicalAnalysis();
     openDialogLayer(el.technicalZoomModal, { trigger, initialFocus: ".chart-zoom-modal" });
     zoomChartState.open = true;
     finishOpenZoom();
@@ -9245,12 +9277,11 @@ async function openZoomForStock(code, trigger = document.activeElement) {
   zoomChartState.locked = false;
   if (el.zoomChartReadout) el.zoomChartReadout.hidden = true;
   if (el.zoomChartTitle) el.zoomChartTitle.textContent = `${clean}${name} 載入中…`;
-  closeZoomHelp();
   showZoomStatus("正在抓官方歷史 K 線…");
   refreshLucideIcons();
   await loadTechnicalAnalysis({ notify: false });
   // 載入期間使用者可能已關掉放大圖；或又點了別檔。
-  if (!zoomChartState.open || state.technicalCode !== clean) return;
+  if (openSeq !== zoomChartState.openSeq || !zoomChartState.open || state.technicalCode !== clean) return;
   if (technicalState.data?.code === clean && technicalState.data?.candles?.length) {
     finishOpenZoom();
   } else {
@@ -9288,7 +9319,13 @@ function finishOpenZoom() {
   // 第一次打開放大圖，自動秀一次操作說明（看過就只能從右上角「？」再叫出來）。
   let helpSeen = true;
   try { helpSeen = !!localStorage.getItem(ZOOM_HELP_KEY); } catch {}
-  if (!helpSeen) setTimeout(openZoomHelp, 380);
+  if (!helpSeen) zoomChartState.helpTimer = setTimeout(() => {
+    zoomChartState.helpTimer = null;
+    // 延遲期間可能已關圖、手動看過說明，或有其他 dialog 接手焦點。
+    if (!zoomChartState.open || el.technicalZoomModal.hidden || topDialogLayer() !== el.technicalZoomModal) return;
+    try { helpSeen = !!localStorage.getItem(ZOOM_HELP_KEY); } catch { helpSeen = true; }
+    if (!helpSeen) openZoomHelp();
+  }, 380);
   else closeZoomHelp();
 }
 
@@ -9307,6 +9344,7 @@ function renderZoomWithRetry(tries) {
 
 function closeTechnicalZoom() {
   if (!el.technicalZoomModal) return;
+  zoomChartState.openSeq += 1;
   resetZoomPointerInteraction();
   closeZoomHelp();
   closeDialogLayer(el.technicalZoomModal);
@@ -9323,14 +9361,19 @@ function closeTechnicalZoom() {
 const ZOOM_HELP_KEY = "stock1.zoomHelpSeen.v1";
 function openZoomHelp(event) {
   if (!el.zoomChartHelp) return;
+  clearTimeout(zoomChartState.helpTimer);
+  zoomChartState.helpTimer = null;
   openDialogLayer(el.zoomChartHelp, {
     trigger: event?.currentTarget || document.activeElement,
     initialFocus: "#zoomChartHelpClose",
   });
+  el.zoomChartHelp.querySelector(".chart-zoom-help-body").scrollTop = 0;
   refreshLucideIcons();
   try { localStorage.setItem(ZOOM_HELP_KEY, "1"); } catch {}
 }
 function closeZoomHelp() {
+  clearTimeout(zoomChartState.helpTimer);
+  zoomChartState.helpTimer = null;
   if (el.zoomChartHelp) closeDialogLayer(el.zoomChartHelp);
 }
 
@@ -9357,19 +9400,26 @@ function showZoomStatus(text) {
 
 // 放大圖內切換 日/週/月：重新抓該週期官方歷史，再重繪。
 async function setZoomPeriod(period) {
-  if (!zoomChartState.open || state.technicalPeriod === period) return;
+  if (!zoomChartState.open || (state.technicalPeriod === period && !technicalState.error)) return;
+  const openSeq = zoomChartState.openSeq;
+  const code = state.technicalCode;
   state.technicalPeriod = period;
   invalidateZoomReadoutLayout({ content: true });
   updateZoomPeriodButtons();
   zoomChartState.locked = false;
   if (el.zoomChartReadout) el.zoomChartReadout.hidden = true;
   showZoomStatus(`載入${formatTechnicalPeriod(period)}資料中…`);
+  let requestId;
   try {
-    await loadTechnicalAnalysis({ notify: false });
+    const loading = loadTechnicalAnalysis({ notify: false });
+    requestId = technicalState.requestId;
+    await loading;
   } catch {
     // 結果由下方依 technicalState 判斷。
   }
-  if (!zoomChartState.open) return;
+  if (!zoomChartState.open || zoomChartState.openSeq !== openSeq
+    || state.technicalCode !== code || state.technicalPeriod !== period
+    || technicalState.requestId !== requestId) return;
   if (!technicalState.data?.candles?.length) {
     showZoomStatus(technicalState.error || "這個週期的官方歷史資料不足");
     return;
@@ -11356,47 +11406,48 @@ function resetSearchState() {
   searchState.remote = [];
   searchState.error = "";
   window.clearTimeout(searchState.timer);
+  searchState.timer = null;
 }
 
 // 用官方全市場清單（上市＋上櫃）搜尋代號或名稱。
-async function loadSymbolSearch(query) {
-  const token = ++searchState.token;
+async function loadSymbolSearch(query, token = searchState.token) {
+  if (searchState.token !== token || searchState.query !== query) return;
   searchState.loading = true;
-  renderSearchResults(query);
+  renderSearchResults();
   try {
     const payload = await fetchApi(`/api/symbols?q=${encodeURIComponent(query)}`);
     if (searchState.token !== token || searchState.query !== query) return;
     searchState.remote = payload.results || [];
     searchState.error = "";
   } catch (error) {
-    if (searchState.token !== token) return;
+    if (searchState.token !== token || searchState.query !== query) return;
     searchState.remote = [];
     searchState.error = error.message;
   } finally {
-    if (searchState.token === token) {
+    if (searchState.token === token && searchState.query === query) {
       searchState.loading = false;
-      renderSearchResults(query);
+      renderSearchResults();
     }
   }
 }
 
 function handleSearchInput(value) {
   const text = String(value || "").trim();
+  // Input starts a new query immediately, including while its debounce is pending.
+  const token = ++searchState.token;
   searchState.query = text;
   searchState.error = "";
+  searchState.remote = [];
+  searchState.loading = Boolean(text);
   window.clearTimeout(searchState.timer);
-  if (!text) {
-    searchState.remote = [];
-    searchState.loading = false;
-    searchState.token += 1;
-    renderSearchResults(text);
-    return;
-  }
-  renderSearchResults(text);
-  searchState.timer = window.setTimeout(() => loadSymbolSearch(text), 250);
+  searchState.timer = null;
+  renderSearchResults();
+  if (!text) return;
+  searchState.timer = window.setTimeout(() => loadSymbolSearch(text, token), 250);
 }
 
-function renderSearchResults(query = searchState.query) {
+function renderSearchResults() {
+  const query = searchState.query;
   const text = query.trim().toUpperCase();
   const matches = stocks
     .filter((stock) => !text || stock.code.includes(text) || String(stock.name).toUpperCase().includes(text))
@@ -11654,7 +11705,8 @@ function renderActiveScreen() {
       button.classList.toggle("is-active", button.dataset.universe === state.universe);
     });
     document.querySelectorAll(".focus-switch button").forEach((button) => {
-      button.classList.toggle("is-active", button.dataset.focus === state.focus);
+      const strategy = button.dataset.focus === "danger" ? "換手高危" : "量能熱區";
+      button.classList.toggle("is-active", state.strategy === strategy);
     });
     const screenerHead = document.querySelector('[data-screen-panel="screener"] .screen-head');
     screenerHead?.classList.toggle("is-turnover-mode", state.universe === "turnover");
@@ -11777,12 +11829,7 @@ function render({ preserveLiveDrafts = false, restoreFocus = false } = {}) {
   }
   updateActiveNav();
   if (!preserveActiveScreen) renderActiveScreen();
-  const filterButton = document.getElementById("filterOpen");
-  if (filterButton) {
-    const filterActive = state.direction !== "all" || state.minTurnover > 0 || state.watchOnly;
-    filterButton.classList.toggle("has-active-filter", filterActive);
-    filterButton.title = filterActive ? "篩選條件套用中（清單已被過濾，點開調整）" : "篩選";
-  }
+  renderListFilterStatus();
   renderMarketPill();
   renderDataStatus();
   if (!preserveDetail) renderDetail();
@@ -12171,6 +12218,7 @@ function openStrategyLegend(trigger = document.activeElement) {
   const legend = document.getElementById("strategyLegend");
   if (!legend) return;
   openDialogLayer(legend, { trigger, initialFocus: "#strategyLegendClose" });
+  legend.querySelector(".legend-modal-body").scrollTop = 0;
   document.getElementById("strategyLegendToggle")?.setAttribute("aria-expanded", "true");
 }
 
@@ -12660,7 +12708,6 @@ document.addEventListener("click", async (event) => {
 
   const focus = event.target.closest(".focus-switch button");
   if (focus) {
-    state.focus = focus.dataset.focus;
     state.strategy = focus.dataset.focus === "danger" ? "換手高危" : "量能熱區";
     state.universe = "turnover";
     state.sort = "strategy";
@@ -12801,6 +12848,8 @@ el.searchInput.addEventListener("keydown", (event) => {
 });
 
 function openFilterDrawer(trigger = document.activeElement) {
+  const scopeNote = document.getElementById("filterScopeNote");
+  if (scopeNote) scopeNote.textContent = `${listFiltersApplyToCurrentScreen() ? "這組條件會篩選目前的行情列表。" : "目前頁面不受這組條件影響。"}適用盤中選股與隔日沖行情列表，不改變隔日沖訊號、策略雷達或成績單；自選股與處置看板使用各頁的篩選。`;
   el.directionFilter.value = state.direction;
   el.turnoverFilter.value = state.minTurnover;
   el.turnoverValue.textContent = `${state.minTurnover}%`;
@@ -13060,7 +13109,7 @@ const GLOSSARY = [
   { term: "處置看板（畫面）", aliases: ["處置看板"], cat: "畫面說明", def: "官方公告的<strong>即將處置／處置中／即將出關／鉅額／注意／全額交割</strong>六類。處置期間是分盤集合競價（每 5 或 20 分鐘撮合一次），要預收款券。「新進／連 N 天」靠本機每日快照比對，比不了時會明講「判定中」而不是印 0。" },
   { term: "更多（畫面）", aliases: ["更多"], cat: "畫面說明", def: "分兩組：<strong>看盤設定</strong>（名詞解釋、資料源狀態、風險規則、訊號提醒）與<strong>帳號與維護</strong>（帳號管理、個人資料備份、富邦 API、共享備註動態、版本與更新）。" },
   // —— 看盤基礎 ——
-  { term: "漲跌幅", cat: "看盤基礎", def: "今天的收盤（或現價）相對<strong>昨天收盤</strong>漲跌的百分比。台股慣例<strong>紅漲綠跌</strong>（和歐美相反），本 App 全站都照這個顏色。" },
+  { term: "漲跌幅", aliases: ["漲幅", "跌幅"], cat: "看盤基礎", def: "今天的收盤（或現價）相對<strong>昨天收盤</strong>漲跌的百分比。台股慣例<strong>紅漲綠跌</strong>（和歐美相反），本 App 全站都照這個顏色。" },
   { term: "振幅", cat: "看盤基礎", def: "當天<strong>最高價到最低價</strong>的範圍占昨收的百分比，衡量盤中波動大小。振幅大代表上下劇烈、風險較高。" },
   { term: "收盤位置", aliases: ["位置"], cat: "看盤基礎", def: "收盤價落在「當日最高～最低」區間的位置：<strong>0%＝收在最低</strong>、<strong>100%＝收在最高</strong>。越高代表買盤把價守在高檔、收盤越強勢。" },
   { term: "量比5", aliases: ["量比", "量能"], cat: "看盤基礎", def: "今天成交量 ÷ 最近 5 日平均量。<strong>大於 1</strong>＝今天比近期熱、有放量；<strong>小於 1</strong>＝量縮。判斷「有沒有量」最快的指標。" },
@@ -13121,20 +13170,25 @@ function renderGlossary() {
   const body = document.getElementById("glossaryBody");
   const catsEl = document.getElementById("glossaryCats");
   if (!body || !catsEl) return;
+  body.scrollTop = 0;
   const chips = [{ label: "全部", value: "" }, ...GLOSSARY_CATS.map((c) => ({ label: c, value: c }))];
   catsEl.innerHTML = chips
     .map((c) => `<button type="button" class="glossary-chip${glossaryState.cat === c.value ? " is-active" : ""}" data-glossary-cat="${escapeHtml(c.value)}">${escapeHtml(c.label)}</button>`)
     .join("");
   const q = glossaryState.q.trim().toLowerCase();
   const stripTags = (s) => String(s).replace(/<[^>]+>/g, "");
-  const matched = GLOSSARY.filter((item) => {
-    if (glossaryState.cat && item.cat !== glossaryState.cat) return false;
+  const queryMatches = GLOSSARY.filter((item) => {
     if (!q) return true;
     const hay = `${item.term} ${(item.aliases || []).join(" ")} ${stripTags(item.def)}`.toLowerCase();
     return hay.includes(q);
   });
+  const matched = queryMatches.filter((item) => !glossaryState.cat || item.cat === glossaryState.cat);
   if (!matched.length) {
-    body.innerHTML = `<p class="glossary-empty">找不到「${escapeHtml(glossaryState.q)}」相關的名詞。<br />換個關鍵字試試，例如「量比」「布林」「盈虧比」。</p>`;
+    const scope = glossaryState.cat ? `「${escapeHtml(glossaryState.cat)}」分類內` : "";
+    const recovery = queryMatches.length
+      ? `其他分類有 ${queryMatches.length} 筆相關說明。<br /><button class="glossary-chip" type="button" data-glossary-cat="">改查全部分類</button>`
+      : '換個關鍵字試試，例如「量比」「布林」「盈虧比」。';
+    body.innerHTML = `<p class="glossary-empty">${scope}找不到「${escapeHtml(glossaryState.q)}」相關的名詞。<br />${recovery}</p>`;
     return;
   }
   const byCat = new Map();
@@ -13177,6 +13231,8 @@ function openGlossary(presetQuery = "", focusInput = true, trigger = document.ac
     trigger,
     initialFocus: focusInput ? "#glossarySearch" : ".glossary-modal",
   });
+  // hidden 時設 scrollTop 不會清掉瀏覽器保存的位置，必須在顯示後重設。
+  document.getElementById("glossaryBody").scrollTop = 0;
 }
 
 function closeGlossary() {
@@ -13201,12 +13257,12 @@ function findGlossaryIndex(term) {
 // 從卡片/面板的名詞點進來：開整份名詞表 → 捲到該詞、閃一下 highlight。
 // 不聚焦搜尋框（避免手機跳鍵盤，也讓目標詞保持在視窗內）。
 function openGlossaryAtTerm(term, trigger = document.activeElement) {
-  openGlossary("", false, trigger);
   const idx = findGlossaryIndex(term);
+  openGlossary(idx < 0 ? String(term || "") : "", false, trigger);
   if (idx < 0) return;
+  const node = document.querySelector(`#glossaryBody [data-term-idx="${idx}"]`);
   requestAnimationFrame(() => {
-    const node = document.querySelector(`#glossaryBody [data-term-idx="${idx}"]`);
-    if (!node) return;
+    if (!node?.isConnected || document.getElementById("glossaryModal").hidden) return;
     node.scrollIntoView({ block: "center", behavior: "smooth" });
     node.classList.add("is-flash");
     setTimeout(() => node.classList.remove("is-flash"), 1700);
@@ -13271,6 +13327,7 @@ el.survSort?.addEventListener("change", () => {
 el.survHelpOpen?.addEventListener("click", (event) => {
   if (!el.survHelp) return;
   openDialogLayer(el.survHelp, { trigger: event.currentTarget, initialFocus: "#survHelpClose" });
+  el.survHelp.querySelector(".surv-help-body").scrollTop = 0;
   refreshLucideIcons();
 });
 el.survHelpClose?.addEventListener("click", () => { if (el.survHelp) closeDialogLayer(el.survHelp); });

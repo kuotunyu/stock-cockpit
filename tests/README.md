@@ -2,6 +2,10 @@
 
 `glossary-navigation` 的 DOM／Chromium 測試涵蓋七頁問號入口：首次定位當頁說明，切分類解除系統預填頁名，手動搜尋仍保留。另驗重新開啟、一般名詞表／名詞連結、分類重繪焦點及 Escape 回到問號；瀏覽器驗 375／768／1280／1440 px，截圖為 `test-results/browser/glossary-category-*`。
 
+`help-content-lifecycle` 驗說明映射、分類內查無的恢復入口、未知詞與閱讀起點；`search-query-lifecycle` 以受控 debounce／延遲回應驗舊結果、成功／失敗、ABA、清空與重開。`zoom-help-lifecycle` 驗延遲導覽取消、手動說明及同代號重開競態；`screener-mode-state`、`surveillance-filter-feedback` 與 `filter-scope-feedback` 驗實際策略高亮、複合篩選空訊息與清單篩選作用範圍。Chromium `help-state-audit` 驗四尺寸、專用說明重開與篩選抽屜 200% 文字；`search-help-races` 用真輸入／Enter 與可控時鐘驗查詢切換、關圖取消導覽、首開與獨立說明入口。產物為 `help-recovery-*`、`filter-scope-*`。
+
+`zoom-period-lifecycle` 另驗週期請求返回前關閉／同股或異股重開、日K快取重用、週期 ABA 與失敗後同週期重試；`technical-zoom-loading` 驗分析中不可放大保留的舊圖，但獨立說明仍可用。Chromium 補真延遲週K回應與同股日K快取重開；篩選抽屜在 375×700／200% 文字實際捲動到套用按鈕，隔日沖載入失敗的局部重繪亦須同步篩選提示。
+
 持股情境風險的 `portfolio-plan-risk` 後端／前端測試涵蓋目前停損、部分計畫股數、到達／跌破、過期／多計畫衝突、缺行情與市場衝突、日期／來源有效性及集中度未知分母。共用 `portfolio-risk.js` 由 server 與 classic browser 載入同一份公式；以明確 `asOf` 驗盤中 120 秒產品容忍值與歷史官方收盤參考，不用星期推定最新交易日。可先跑 `node --test tests/backend/portfolio-plan-risk.test.mjs tests/frontend/portfolio-plan-risk.test.mjs tests/frontend/holdings-render.test.mjs`。
 
 新單部位測試驗風險預算與明確投入金額雙上限、買費四捨五入／最低額及整張／零股。`capital` 為本機偏好，`availableCash` 只存本頁 RAM、切帳號清空；未提供則顯示資金未檢查。Chromium 同名案例在 375／768／1280／1440 px 與 100%／200% 文字驗資金欄位、持股風險、原生 details、計畫連結與更新後回焦，產物為 `test-results/browser/portfolio-{size,risk}-*`。此範圍不表示全站 200% 完成；固定底部導覽已由 T11 修正並驗證，詳見下方 T11 範圍。

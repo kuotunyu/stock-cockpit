@@ -5970,6 +5970,8 @@ body.is-locked .app-shell {
   bottom: 0;
   width: min(420px, 92vw);
   padding: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .filter-drawer header {
@@ -5977,6 +5979,13 @@ body.is-locked .app-shell {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+}
+
+.filter-scope-note {
+  margin: 0 0 16px;
+  color: var(--muted-2);
+  font-size: var(--fs-body);
+  line-height: 1.6;
 }
 
 .filter-drawer h2 {

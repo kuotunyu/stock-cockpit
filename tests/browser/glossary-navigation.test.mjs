@@ -25,7 +25,7 @@ for (const width of [375, 768, 1280, 1440]) {
         await page.keyboard.press('Enter');
         await page.locator('#glossaryBody dt').filter({ hasText: `${label}（畫面）` }).waitFor();
         assert.equal(await page.locator('#glossarySearch').inputValue(), label);
-        const chip = page.locator(`[data-glossary-cat="${category}"]`);
+        const chip = page.locator(`#glossaryCats [data-glossary-cat="${category}"]`);
         await chip.focus();
         await page.keyboard.press('Enter');
         assert.equal(await page.locator('#glossarySearch').inputValue(), '', '自動頁名不可阻擋分類');
@@ -39,7 +39,7 @@ for (const width of [375, 768, 1280, 1440]) {
       }
       await page.locator('#screenHelp').click();
       await page.locator('#glossarySearch').fill('量比');
-      await page.locator('[data-glossary-cat=""]').click();
+      await page.locator('#glossaryCats [data-glossary-cat=""]').click();
       assert.equal(await page.locator('#glossarySearch').inputValue(), '量比');
       await page.locator('#glossaryBody dt').filter({ hasText: '量比5' }).waitFor();
       await page.keyboard.press('Escape');
