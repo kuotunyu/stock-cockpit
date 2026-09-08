@@ -33,14 +33,16 @@ function tileBadge(app) {
   return tile?.querySelector("em")?.textContent || "";
 }
 
-test("落後時要說出落後幾個 commit，並給出可照做的更新步驟", async () => {
+test("磁碟仍是啟動 commit 時保留落後數量，下載後依來源身份判斷重啟", async () => {
   const app = await createAppWindow();
   try {
     showVersionPanel(app, { update: { state: "behind", behindBy: 3, localAhead: 0 } });
     const text = panelText(app);
     assert.match(text, /3 個新 commit/);
     assert.match(text, /git pull/);
-    assert.match(text, /重新啟動伺服器/, "改了 server.mjs 一定要重啟，文案不能漏掉這步");
+    assert.match(text, /磁碟仍是啟動時的 commit/);
+    assert.match(text, /下載後重新檢查/);
+    assert.doesNotMatch(text, /然後重新啟動伺服器/);
     assert.equal(tileBadge(app), "落後 3");
     assert.match(text, /main@55d5bed/, "本機 commit 要看得到，才能跟朋友對版");
   } finally {
@@ -65,10 +67,22 @@ test('純文件 commit 更新不強制重啟；只有外殼不同時要求刷新
   const app = await createAppWindow();
   try {
     const identity = { runtime: { commit: 'old', fingerprint: 'a', dirty: false }, disk: { commit: 'docs', fingerprint: 'a', dirty: false }, restartRequired: false };
-    showVersionPanel(app, { identity, update: { state: 'current' } });
-    assert.match(panelText(app), /後端來源一致/); assert.doesNotMatch(panelText(app), /需要重啟/);
-    showVersionPanel(app, { identity: { ...identity, shellVersion: 'shell-new' }, update: { state: 'current' } });
+    showVersionPanel(app, { identity, update: { state: 'behind', behindBy: 1, latestCommit: 'docs' } });
+    assert.match(panelText(app), /後端來源一致/);
+    assert.match(panelText(app), /相對啟動 commit/);
+    assert.match(panelText(app), /未確認磁碟是否追上 GitHub/);
+    assert.doesNotMatch(panelText(app), /這台還沒更新|重新啟動伺服器|需要重啟|已是 GitHub 上的最新版本/);
+    assert.equal(tileBadge(app), '啟動版落後 1');
+    // 即使磁碟 B 尚落後上游 C，也不能從 A 的 compare 直接宣稱磁碟已是最新。
+    showVersionPanel(app, { identity, update: { state: 'behind', behindBy: 2, latestCommit: 'newer' } });
+    assert.match(panelText(app), /未確認磁碟是否追上 GitHub/); assert.equal(tileBadge(app), '啟動版落後 2');
+    showVersionPanel(app, { identity: { ...identity, disk: { ...identity.disk, commit: '' } }, update: { state: 'behind', behindBy: 2 } });
+    assert.match(panelText(app), /未確認磁碟是否追上 GitHub/);
+    assert.doesNotMatch(panelText(app), /磁碟 commit 已不同|已是 GitHub 上的最新版本|重新啟動伺服器/);
+    showVersionPanel(app, { identity: { ...identity, shellVersion: 'shell-new' }, update: { state: 'behind', behindBy: 1 } });
     assert.equal(tileBadge(app), '需要刷新'); assert.match(panelText(app), /Ctrl\+F5/);
+    showVersionPanel(app, { identity: { ...identity, disk: { ...identity.disk, fingerprint: 'changed' }, restartRequired: true }, update: { state: 'behind', behindBy: 1 } });
+    assert.equal(tileBadge(app), '需要重啟'); assert.match(panelText(app), /需要重新啟動伺服器/);
   } finally { app.cleanup(); }
 });
 

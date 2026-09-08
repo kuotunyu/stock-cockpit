@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v31";
+const APP_SHELL_VERSION = "stock1-shell-v32";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -5471,16 +5471,19 @@ function appVersionSummary() {
   if (identity.restartRequired !== false || !identity.shellVersion) return { badge: "身份未確認", tone: "is-warn", headline: "來源指紋或磁碟外殼宣告不足，無法確認更新狀態。", hint: "請確認專案檔案完整，再重新檢查。", stamp };
   const behindBy = Number(update?.behindBy) || 0;
   const localAhead = Number(update?.localAhead) || 0;
+  const diskMatchesRuntime = Boolean(identity.runtime?.commit && identity.runtime.commit === identity.disk?.commit);
   switch (String(update?.state || "")) {
     case "current":
       if (identity.runtime?.dirty !== false) return { badge: "來源有限", tone: "is-warn", headline: "執行來源包含未提交修改，或 Git 工作目錄狀態未知；commit 不能精確代表這份來源。", hint: "GitHub 比對只涵蓋 commit。", stamp };
       return { badge: "最新", tone: "is-good", headline: "已是 GitHub 上的最新版本。", hint: "", stamp };
     case "behind":
       return {
-        badge: `落後 ${behindBy}`,
+        badge: `${diskMatchesRuntime ? "落後" : "啟動版落後"} ${behindBy}`,
         tone: "is-warn",
-        headline: `GitHub 上有 ${behindBy} 個新 commit，這台還沒更新。`,
-        hint: "在專案資料夾執行 git pull，然後重新啟動伺服器（Node 不熱載），瀏覽器再 Ctrl+F5。",
+        headline: `相對啟動 commit，GitHub 上有 ${behindBy} 個新 commit。`,
+        hint: diskMatchesRuntime
+          ? "磁碟仍是啟動時的 commit，可在專案資料夾執行 git pull；下載後重新檢查，依新的來源身份判斷是否需要重啟或刷新。"
+          : "本次比對未確認磁碟是否追上 GitHub。後端來源一致，目前不需重啟。",
         stamp,
       };
     case "ahead":
