@@ -25,6 +25,33 @@ const screenHelpText = (screen, label) => {
   return text;
 };
 
+async function waitUntil(target, predicate, message) {
+  for (let round = 0; round < 30; round += 1) {
+    if (predicate()) return;
+    await target.settle(1);
+  }
+  assert.fail(message);
+}
+
+async function previewBackup(target, bundle) {
+  target.evalIn(`
+    activateAuthenticatedUser({ id: 'backup-help-user', username: 'tester', displayName: '測試使用者', role: 'user' });
+    authState.checked = true;
+    state.screen = 'more';
+    state.morePanel = 'backup';
+    render();
+  `);
+  target.doc.querySelector('[data-action="open-personal-restore"]').click();
+  await target.settle(4);
+  const input = target.doc.getElementById('personalBackupFile');
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    value: [new target.win.File([JSON.stringify(bundle)], `stock1-v${bundle.formatVersion}.json`, { type: 'application/json' })],
+  });
+  input.dispatchEvent(new target.win.Event('change', { bubbles: true }));
+  await target.settle(6);
+}
+
 test('分類內查無但其他分類有說明時，明講篩選範圍並提供全部分類入口', () => {
   open();
   cat('技術指標');
@@ -149,7 +176,7 @@ test('策略說明區分已結案未成熟、逐欄有效筆數與信賴區間�
   assert.doesNotMatch(help, /20 筆結案才給百分比/);
 });
 
-test('自選股說明把費稅留白與券商實際 0 元分開，並說清 v1／v2 計畫還原', () => {
+test('自選股說明把費稅留白與券商實際 0 元分開', () => {
   const actualZero = JSON.parse(app.evalIn(`JSON.stringify((() => {
     const record = { feeAmountTwd: 0, taxAmountTwd: 0, feeSource: 'broker', taxSource: 'manual' };
     return {
@@ -167,16 +194,110 @@ test('自選股說明把費稅留白與券商實際 0 元分開，並說清 v1�
   assert.match(watchlistHelp, /留白.*估算/);
   assert.match(watchlistHelp, /填入 0 元.*有效/);
   assert.match(watchlistHelp, /估算.*券商實際.*手動.*歷史/);
+});
 
-  const backupText = app.evalIn(`(() => {
-    const previousUser = authState.user;
-    authState.user = { id: 'u1', username: 'tester', displayName: '測試使用者' };
-    const host = document.createElement('div');
-    host.innerHTML = renderPersonalBackupPanel();
-    authState.user = previousUser;
-    return host.textContent.replace(/\\s+/g, ' ');
-  })()`);
-  assert.match(backupText, /v2.*交易計畫.*取代/);
-  assert.match(backupText, /v1.*缺少交易計畫.*保留目前計畫/);
-  assert.match(backupText, /先.*預覽.*才.*寫入/);
+test('v1／v2 備份 fixture 經預覽與復原 UI 後，計畫分別保留或取代且首頁說明一致', async () => {
+  const currentPlan = { planId: 'current-plan', code: '2330', exchange: 'TWSE', strategy: 'swing', status: 'draft', revisions: [] };
+  const importedPlan = { planId: 'imported-plan', code: '1101', exchange: 'TWSE', strategy: 'swing', status: 'draft', revisions: [] };
+  const fixtures = [
+    {
+      version: 1,
+      data: {},
+      preview: { beforeCount: 1, afterCount: 1, mode: 'preserve', policy: '舊版備份未含計畫，保留目前計畫' },
+      canonicalPlans: [currentPlan],
+      expectedPlanId: 'current-plan',
+      policyPattern: /舊版備份未含計畫.*保留目前計畫/,
+    },
+    {
+      version: 2,
+      data: { tradePlans: { schemaVersion: 1, rev: 3, plans: [importedPlan] } },
+      preview: { beforeCount: 1, afterCount: 1, mode: 'replace', policy: 'v2 備份計畫將取代目前計畫；歷史佐證未驗證' },
+      canonicalPlans: [importedPlan],
+      expectedPlanId: 'imported-plan',
+      policyPattern: /v2 備份計畫.*取代目前計畫.*未驗證/,
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const bundle = {
+      format: 'stock1-personal-backup',
+      formatVersion: fixture.version,
+      exportedAt: '2026-09-08T00:00:00.000Z',
+      sourceAccount: { username: 'source', displayName: '來源帳號' },
+      data: fixture.data,
+      sharedContributions: { stockNotes: [], companyProfiles: [] },
+      integrity: { algorithm: 'sha256', contentHash: 'a'.repeat(64) },
+    };
+    let previewBody = null;
+    let restoreBody = null;
+    let planGets = 0;
+    const backupApp = await createAppWindow({
+      fetchRoutes: {
+        '/api/personal-data/restore/preview': (_raw, init) => {
+          previewBody = JSON.parse(init.body);
+          return {
+            ok: true,
+            previewToken: `preview-v${fixture.version}`,
+            plan: {
+              sections: {
+                watchLists: { beforeCount: 0, afterCount: 0 },
+                alerts: { beforeCount: 0, afterCount: 0 },
+                trades: { beforeCount: 0, afterCount: 0, quarantinedCount: 0 },
+                tradePlans: fixture.preview,
+                stockNotes: { addCount: 0, duplicateCount: 0 },
+              },
+              warnings: [],
+            },
+          };
+        },
+        '/api/personal-data/restore': (_raw, init) => {
+          restoreBody = JSON.parse(init.body);
+          return { ok: true, applied: { tradePlans: fixture.preview.mode === 'replace' ? 'replaced' : 'preserved' }, warnings: [] };
+        },
+        '/api/trade-plans': () => {
+          planGets += 1;
+          return { ok: true, schemaVersion: 1, rev: fixture.version + 10, plans: fixture.canonicalPlans, linkEvidence: {} };
+        },
+      },
+    });
+    try {
+      await previewBackup(backupApp, bundle);
+      await waitUntil(backupApp, () => previewBody !== null, `v${fixture.version} 應送出預覽`);
+      assert.equal(previewBody.bundle.formatVersion, fixture.version);
+      assert.deepEqual(previewBody.bundle.data, fixture.data);
+
+      const previewText = backupApp.doc.getElementById('personalBackupPreview').textContent.replace(/\s+/g, ' ');
+      assert.match(previewText, /交易計畫/);
+      assert.match(previewText, fixture.policyPattern);
+
+      const homeText = backupApp.evalIn(`(() => {
+        const host = document.createElement('div');
+        host.innerHTML = renderPersonalBackupPanel();
+        return host.textContent.replace(/\\s+/g, ' ');
+      })()`);
+      assert.match(homeText, /v2.*交易計畫.*取代/);
+      assert.match(homeText, /v1.*缺少交易計畫.*保留目前計畫/);
+      assert.match(homeText, /先.*預覽.*才.*寫入/);
+
+      const baselinePlanGets = planGets;
+      const password = backupApp.doc.getElementById('personalBackupPassword');
+      const confirm = backupApp.doc.getElementById('personalBackupConfirm');
+      password.value = 'current-password';
+      password.dispatchEvent(new backupApp.win.Event('input', { bubbles: true }));
+      confirm.checked = true;
+      confirm.dispatchEvent(new backupApp.win.Event('change', { bubbles: true }));
+      backupApp.doc.querySelector('[data-action="restore-personal-backup"]').click();
+
+      await waitUntil(backupApp, () => restoreBody !== null, `v${fixture.version} 應送出復原`);
+      await waitUntil(backupApp, () => planGets > baselinePlanGets, `v${fixture.version} 復原後應重載交易計畫`);
+      assert.deepEqual(restoreBody, {
+        previewToken: `preview-v${fixture.version}`,
+        currentPassword: 'current-password',
+        confirmation: 'RESTORE',
+      });
+      assert.equal(backupApp.evalIn('tradePlansState.plans[0]?.planId'), fixture.expectedPlanId);
+    } finally {
+      backupApp.cleanup();
+    }
+  }
 });
