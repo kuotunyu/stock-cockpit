@@ -198,7 +198,7 @@ function surveillancePayload(kind) {
   };
 }
 
-function apiResponse(url, method, scenario) {
+export function apiResponse(url, method, scenario) {
   const path = url.pathname;
   const kind = scenario === "expired-session" ? "populated" : scenario;
   if (path === "/api/auth/me") {

@@ -1,5 +1,15 @@
 # Stock1 測試套件
 
+`pwa-lifecycle` 使用獨立 port 0 HTTP origin 和允許 SW 的 Chromium context，直接提供真正外殼檔案與共用合成 API。瀏覽器及 worker 都經實際網路；沒有 page.route 回填 API，離線以 context.setOffline 驗。一般 `createBrowserFixture` 仍預設 `serviceWorkers: "block"`，保持 UI 測試隔離。
+
+PWA 案例涵蓋 A 整包安裝、B app.js HTTP 503 安裝失敗仍可讀取／重開 A、B 重試成功，以及舊分頁草稿／焦點／已載入身份保留、新分頁載入 B。關閉所有分頁後離線 query 重開、帶 query 資產、API HTTP 與離線失敗、非現役殘留 cache 不作外殼、沒有備援時保留 HTTP 錯誤都有斷言。專用 loopback proxy 拒絕轉送外網（另以真 worker 探針驗證），setup 失敗及一般完成均關閉自有 context／browser／server；不啟正式後端、不讀 `.env`／`.data`。截圖、trace 和 HTTP 請求紀錄在 `test-results/browser/pwa-*`。
+
+```powershell
+node --test tests/browser/pwa-lifecycle.test.mjs
+```
+
+外殼仍 network-first；網路／HTTP 失敗只從現役 worker cache 備援，API 不快取。整包安裝成功才啟用不等於多檔案部署具有交易原子性；網路成功時可能取得更新中的資產，外殼身份也只是已載入 app.js 的發行宣告。此套驗 Chromium 的同 context 離線重開，不聲稱已驗瀏覽器程序重啟、OS 安裝捷徑、Safari／iOS 或任意破壞性的跨版檔案相容。
+
 `operational-status` 後端／DOM／Chromium 驗更多→資料來源的預設收合診斷：行情成功與保存受阻分離、完整零訊號正式發布、來源不足、正式後補驗失敗、排程關閉與查不到。`GET /api/operational-status` 公開白名單直接讀已提交 RAM，不寫入、不排背景工作、不解壓候選池證據；待補以全部保存版本的份／筆／批分列，沒有套用成績單最近窗口。保存旗標是本程序未恢復的已知失敗，不是新的磁碟探測。DOM 包含真 `fetchApi` body deadline 與重試，Chromium 包含四尺寸／200% 文字、原生 details 和輪詢焦點。
 
 `runtime-version` 以臨時 Git repo／worktree 與冷程序鎖住模組載入身份：首次版本查詢前後改檔、重啟、dirty、無 Git 與純文件 commit；後端指紋只涵蓋公開來源及相依宣告，不代表實際套件或環境設定。`app-version-panel` 與 Chromium `app-version` 分辨執行後端／磁碟／載入 app.js 的外殼宣告，驗舊新分頁、舊後端缺身份、重啟／刷新優先訊息，以及 375／768／1280／1440 px 和 200% 文字。外殼改動須同步 `APP_SHELL_VERSION` 與 SW `CACHE_NAME`。

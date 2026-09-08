@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v33";
+const APP_SHELL_VERSION = "stock1-shell-v34";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");

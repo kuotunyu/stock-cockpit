@@ -1,3 +1,4 @@
+// 驗外殼 cache 清理界線；真安裝、更新與離線接線另由 Chromium PWA 案例覆蓋。
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";

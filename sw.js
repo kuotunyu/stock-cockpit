@@ -1,8 +1,8 @@
 // Stock1 Service Worker：app shell network-first、/api 永遠走網路。
 // 我們的更新方式是 git pull（早期是整包複製 code）——network-first 保證重整一次就是新版，
-// 不會發生朋友被 cache-first 卡在舊版的災難。快取只在離線/伺服器沒開時當備援。
+// 不會發生朋友被 cache-first 卡在舊版的災難。快取在離線／伺服器或外殼資產失敗時當備援。
 const CACHE_PREFIX = "stock1-shell-";
-const CACHE_NAME = "stock1-shell-v33";
+const CACHE_NAME = "stock1-shell-v34";
 const SHELL = [
   "./",
   "./index.html",
@@ -36,6 +36,14 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+async function matchActiveShell(request) {
+  // 只讀本 worker 的外殼，不能把失敗安裝留下的 cache 當成完整新版。
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(request, { ignoreSearch: true });
+  if (cached) return cached;
+  if (request.mode === "navigate") return cache.match("./index.html");
+}
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   // API 一律即時：行情資料快取了只會誤導。非 GET（登入等）也不碰。
@@ -43,6 +51,10 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     fetch(event.request)
       .then(async (response) => {
+        if (!response.ok && url.origin === self.location.origin) {
+          const cached = await matchActiveShell(event.request);
+          if (cached) return cached;
+        }
         if (response.ok && url.origin === self.location.origin) {
           const copy = response.clone();
           await caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy)).catch(() => {});
@@ -51,10 +63,7 @@ self.addEventListener("fetch", (event) => {
       })
       .catch(async () => {
         // 允許離線開啟帶 query 的首頁（例如安裝捷徑／除錯旗標），資產版本 query 亦可命中 shell。
-        const cached = await caches.match(event.request, { ignoreSearch: true });
-        if (cached) return cached;
-        if (event.request.mode === "navigate") return caches.match("./index.html");
-        return Response.error();
+        return (await matchActiveShell(event.request)) || Response.error();
       })
   );
 });

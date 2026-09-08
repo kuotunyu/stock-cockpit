@@ -674,7 +674,7 @@ test("靜態檔：app shell 有安全標頭且只公開 allowlist，後端源碼
   assert.match(workerBody, /\.\/lucide\.min\.js/);
   assert.match(workerBody, /IBMPlexMono-Medium-Latin1\.woff2/);
   assert.match(workerBody, /ignoreSearch:\s*true/);
-  assert.match(workerBody, /event\.request\.mode === "navigate"/);
+  // 帶 query 導覽的外殼備援由 pwa-lifecycle 真 Chromium 驗行為，不綁定 helper 的參數名稱。
   assert.doesNotMatch(workerBody, /cache\.addAll\(SHELL\)\)\.catch/);
 
   for (const path of ["/.data/stock1-db.json", "/server.mjs", "/package.json", "/package-lock.json", "/tests/backend/api-data.test.mjs"]) {
