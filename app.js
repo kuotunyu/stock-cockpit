@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v32";
+const APP_SHELL_VERSION = "stock1-shell-v33";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -5423,6 +5423,79 @@ function renderPersonalBackupPanel() {
   `;
 }
 
+const operationalStatusState = { loaded: false, loading: false, payload: null, error: '' };
+async function loadOperationalStatus() {
+  if (operationalStatusState.loading) return;
+  operationalStatusState.loading = true;
+  try {
+    const payload = await fetchApi('/api/operational-status');
+    if (!payload?.ok || !payload.persistence) throw new Error('目前後端未提供保存狀態');
+    operationalStatusState.payload = payload;
+    operationalStatusState.error = '';
+  } catch (error) {
+    operationalStatusState.error = error?.message || '狀態查詢失敗';
+  } finally {
+    operationalStatusState.loaded = true;
+    operationalStatusState.loading = false;
+    renderLiveDataUpdate();
+  }
+}
+
+function renderOperationalStatus() {
+  const old = document.querySelector('.operational-status');
+  const { payload: previous, error, loading } = operationalStatusState;
+  // 失敗時保留上次時間供核對，但不可把上次成功當成本次查到的狀態。
+  const data = error || loading ? null : previous;
+  const persistence = data?.persistence;
+  const readOnly = Object.entries(data?.sidecars || {}).filter(([, value]) => value?.readOnly);
+  const saveBlocked = persistence?.writable === false;
+  const saveLabel = saveBlocked ? '保存受阻' : readOnly.length ? '部分資料唯讀'
+    : persistence?.writable === true ? '尚無已知保存失敗' : '狀態未知';
+  const saveNext = saveBlocked ? '請檢查磁碟空間與寫入權限；修復後重新查詢。'
+    : readOnly.length ? '請管理者檢查唯讀資料檔的讀取問題，保留原檔再處理。'
+      : persistence ? `${Number.isInteger(persistence.pendingWrites) ? `${persistence.pendingWrites} 筆等待保存` : '等待保存筆數未知'}；等待中的工作不代表失敗。` : '請重新查詢；查不到不代表保存失敗。';
+  const quote = dataState.failedSince ? '行情更新失敗' : dataState.error ? '部分行情來源受阻'
+    : dataState.lastUpdated ? '最近一次讀取成功' : '行情狀態未知';
+  const quoteNext = dataState.failedSince ? '請確認網路與伺服器連線，再重新抓目前來源。'
+    : dataState.error ? '可用行情與收盤備援仍需依個股日期核對。' : '以目前分頁行情為準，個股日期與備援標示仍需分別核對。';
+  const captureLabel = item => item?.status === 'published' ? `正式發布・${Number.isInteger(item.signalCount) ? item.signalCount : '未知'} 筆訊號`
+    : item?.status === 'incomplete' ? '輸入尚未完整' : item?.status === 'failed' ? '採集嘗試受阻'
+      : item?.status === 'not-captured' ? '已記錄未採集；原因未知' : '尚無今日正式採集證據・未知';
+  const scheduler = data?.scheduler;
+  const scheduleNext = scheduler?.enabled === false ? '排程已關閉；如需自動採集，請管理者啟用收盤排程。'
+    : scheduler?.dailyLimitReached ? '本程序今日重試已達上限；請檢查來源或保存問題。'
+      : scheduler?.failures ? '最近一輪排程受阻，等待後續重試；已正式發布的清單仍保留。'
+        : scheduler?.running ? '排程開啟，會在來源完整後採集；無紀錄的原因不能由此判定。'
+          : scheduler?.running === false ? '排程目前未運行；請管理者確認啟動狀態。' : '排程狀態未知；請重新查詢。';
+  const history = data?.history?.overnight && data?.history?.swing && data?.history?.benchmarks ? data.history : null;
+  const historyLabel = history ? `隔日 ${history.overnight.withoutFinal} 份未存完整結果・波段 ${history.swing.pending} 筆待觀察`
+    : '待補數量未知';
+  const benchmarkLabel = history ? `候選池待觀察 ${history.benchmarks.pending} 批・補驗來源受阻 ${history.benchmarks.unavailable} 批` : '';
+  const names = { fundamentals: '基本面與公司行動', risk: '風險名單', surveillance: '處置歷史' };
+  const stamp = previous?.generatedAt ? formatTradePlanTime(previous.generatedAt) : '尚未取得';
+  return `<details class="operational-status"${old?.open ? ' open' : ''}>
+    <summary id="operationalStatusToggle">保存與正式採集狀態${saveBlocked || readOnly.length ? '・需處理' : error ? '・查詢失敗' : ''}</summary>
+    <p>${loading ? '查詢中；等待結束後可再試。' : error ? '本次查詢失敗，狀態未知。' : '保存與採集分開核對；可在此重新查詢。'}${previous ? ` ${error || loading ? '上次成功查詢' : '查詢時間'}：${escapeHtml(stamp)}` : ''}</p>
+    <dl class="operational-rows">
+      <div><dt>行情讀取</dt><dd><strong>${quote}</strong><p>${quoteNext}</p></dd></div>
+      <div><dt>資料保存</dt><dd class="${saveBlocked || readOnly.length ? 'is-warn' : ''}"><strong>${saveLabel}</strong><p>${saveNext}</p></dd></div>
+      <div><dt>兩策略正式採集</dt><dd>隔日沖：${escapeHtml(captureLabel(data?.captures?.overnight?.today))}<br>波段：${escapeHtml(captureLabel(data?.captures?.swing?.today))}<p>${scheduleNext}</p></dd></div>
+      <div><dt>歷史驗證待補</dt><dd>${escapeHtml(historyLabel)}${benchmarkLabel ? `<br>${escapeHtml(benchmarkLabel)}` : ''}<p>待觀察可能尚未到期；來源受阻可待來源恢復後續補，不會撤銷正式發布。</p></dd></div>
+    </dl>
+    <button class="more-primary" data-action="refresh-operational-status" type="button"${loading ? ' disabled' : ''}>${loading ? '查詢中…' : '重新查詢狀態'}</button>
+    <details class="operational-reasons"${old?.querySelector('.operational-reasons')?.open ? ' open' : ''}>
+      <summary id="operationalReasonsToggle">原因、時間與統計範圍</summary>
+      ${error ? `<p>${escapeHtml(error)}</p>` : ''}
+      <p>採集日期：${escapeHtml(data?.asOf || '未知')}（台北今日、目前選股版本）。完整零訊號也是正式發布；未知不代表沒有訊號或服務未啟動。</p>
+      ${['overnight', 'swing'].map(strategy => { const item = data?.captures?.[strategy]; return `<p>${strategy === 'overnight' ? '隔日沖' : '波段'}最近正式清單：${escapeHtml(item?.latest?.tradeDate || '未知')}；確認可讀時間：${escapeHtml(item?.latest?.availableConfirmedAt ? formatTradePlanTime(item.latest.availableConfirmedAt) : '未知')}。${item?.today?.attemptedAt ? ` 最近嘗試：${escapeHtml(formatTradePlanTime(item.today.attemptedAt))}` : ''}</p>`; }).join('')}
+      <p>保存只反映本程序已知失敗，未進行新的磁碟寫入測試。${persistence?.lastFailureCode ? `原因：${escapeHtml(persistence.lastFailureCode)}；時間：${escapeHtml(formatTradePlanTime(persistence.lastFailureAt))}。` : ''}${readOnly.map(([name, value]) => ` ${escapeHtml(names[name] || '旁路資料')}唯讀：${escapeHtml(value.reason || '原因未知')}`).join('')}</p>
+      ${data?.input ? `<p>最近保存的來源不足／失敗紀錄：${data.input.status === 'incomplete' ? '兩市場收盤輸入尚未完整或未對齊今日' : '取得來源受阻'}；${escapeHtml(data.input.attemptedAt ? formatTradePlanTime(data.input.attemptedAt) : '時間未知')}。這是已保存的嘗試，不代表現在來源仍不足，也不降級已發布清單。</p>` : ''}
+      ${scheduler?.failures ? `<p>本程序失敗 ${escapeHtml(String(scheduler.failures))} 次；記錄日 ${escapeHtml(scheduler.failureDay || '未知')}；${scheduler.dailyLimitReached ? '當日重試已達上限' : `最早重試 ${escapeHtml(scheduler.retryAt ? formatTradePlanTime(scheduler.retryAt) : '未知')}`}。排程關閉或未運行時不會自動重試。</p>` : ''}
+      <p>全部已保存版本的 metadata 統計，沒有套用成績單最近窗口：隔日快照依完整 final 保存標記計份（不表示模型可重用），波段 pending 計筆；候選池僅首次正式且有完整採集紀錄計批。三者不相加，不估缺失交易日，不代表現金結果皆完整或正在執行補驗。查詢本身不重新選股、不補造歷史。</p>
+    </details>
+  </details>`;
+}
+
 async function loadAppVersion({ force = false } = {}) {
   if (appVersionState.loading) return;
   if (appVersionState.loaded && !force) return;
@@ -5669,7 +5742,7 @@ function renderMorePanel() {
         <span class="more-kicker">目前狀態</span>
         <h2>資料源狀態</h2>
       </header>
-      <p>這裡只顯示行情來源，不代表買賣建議。若官方資料失敗，App 不應顯示可交易清單，只保留狀態與錯誤訊息。</p>
+      <p>行情來源與保存、採集狀態分開核對。價格請依個股日期與備援標示判讀。</p>
       <dl>
         <div><dt>目前來源</dt><dd>${escapeHtml(sourceLabel)}</dd></div>
         <div><dt>更新時間</dt><dd>${escapeHtml(dataState.lastUpdated || "尚未更新")}</dd></div>
@@ -5679,6 +5752,7 @@ function renderMorePanel() {
       </dl>
       <p>${escapeHtml(sourceDetail)}</p>
       <button class="more-primary" data-action="refresh-data" type="button">重新抓目前來源</button>
+      ${renderOperationalStatus()}
     `,
     alerts: `
       <header>
@@ -12620,6 +12694,14 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (event.target.closest('#operationalStatusToggle') && !operationalStatusState.loaded) {
+    void loadOperationalStatus();
+  }
+  if (event.target.closest('[data-action="refresh-operational-status"]')) {
+    void loadOperationalStatus();
+    renderLiveDataUpdate();
+    return;
+  }
   const moreAction = event.target.closest('[data-action="refresh-data"], [data-action="refresh-app-version"], [data-action="enable-alert-notifications"], [data-action="open-filter"], [data-action="test-broker"], [data-action="delete-broker"], [data-action="reload-users"], [data-action="logout"], [data-action="toggle-surveillance"]');
   if (moreAction) {
     if (moreAction.dataset.action === "refresh-data") {

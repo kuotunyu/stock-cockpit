@@ -4338,7 +4338,8 @@ button.today-focus-card:focus-visible {
   color: var(--green);
 }
 
-.more-detail .version-identities dd {
+.more-detail .version-identities dd,
+.more-detail .operational-rows dd {
   white-space: normal;
   overflow: visible;
   text-overflow: clip;
@@ -4348,6 +4349,15 @@ button.today-focus-card:focus-visible {
 
 .version-details { margin-block-start: 18px; }
 .version-details summary { cursor: pointer; padding-block: 12px; color: var(--muted-2); }
+.operational-status { margin-block-start: 18px; border-top: 1px solid var(--line); }
+.operational-status summary { cursor: pointer; padding-block: 12px; line-height: 1.55; }
+.more-detail .operational-rows { grid-template-columns: minmax(0, 1fr); margin-block-end: 12px; }
+.more-detail .operational-rows > div { grid-template-columns: minmax(100px, 1fr) minmax(0, 3fr); gap: 12px; }
+.operational-status .operational-rows dd p { margin: 6px 0 0; color: var(--muted-2); }
+.operational-reasons { margin-block-start: 12px; }
+@media (max-width: 600px) {
+  .more-detail .operational-rows > div { grid-template-columns: minmax(0, 1fr); }
+}
 
 .more-detail dd.is-warn {
   color: var(--warn-text);

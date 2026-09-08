@@ -14097,6 +14097,7 @@ async function inspectSwingStock(rawCode) {
 }
 
 const getOnlyApiPaths = new Set([
+  "/api/operational-status",
   "/api/health",
   "/api/app-version",
   "/api/auth/me",
@@ -14129,6 +14130,25 @@ async function handleApi(request, requestUrl, response) {
     jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
     return true;
   }
+  if (requestUrl.pathname === "/api/operational-status") {
+    // 只投影已提交 RAM；不可走含 save、補驗 queue 或解壓證據的成績單 wrapper。
+    jsonResponse(response, 200, {
+      ok: true, generatedAt: new Date().toISOString(),
+      persistence: {
+        basis: 'known-failures-this-process', writable: !lastPersistenceFailure,
+        pendingWrites: pendingPersistenceCount(),
+        lastFailureAt: lastPersistenceFailure?.at || null, lastFailureCode: lastPersistenceFailure?.code || null,
+      },
+      sidecars: cloneJson(sidecarState),
+      scheduler: { enabled: !schedulerDisabled, running: Boolean(closeSchedulerTimer),
+        failures: schedulerFailures, failureDay: schedulerFailureDay || null,
+        retryAt: schedulerRetryAt ? new Date(schedulerRetryAt).toISOString() : null,
+        dailyLimitReached: schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY,
+        lastRunDay: lastScheduledRunDay || null },
+      ...summarizeOperationalStatus(dbCache),
+    });
+    return true;
+  }
   if (requestUrl.pathname === "/api/health") {
     const ready = lifecycleStatus === "ready";
     const now = Date.now();
@@ -14146,7 +14166,7 @@ async function handleApi(request, requestUrl, response) {
       generatedAt: new Date(now).toISOString(),
       persistence: {
         pendingWrites: pendingPersistenceCount(),
-        // 「現在還寫得進去嗎」是探針唯一問得出、而 UI 問不到的東西。
+        // 本程序沒有尚未恢復的已知失敗；這次 GET 不做磁碟寫入探測。
         // 刻意不改 status／HTTP 碼：磁碟滿了不是「服務沒起來」，讀行情仍然正常，
         // 而且重啟行程也修不好磁碟。這裡只如實報告，讓看的人自己判斷。
         writable: !lastPersistenceFailure,
@@ -16110,6 +16130,58 @@ let schedulerFailures = 0;
 let schedulerRetryAt = 0;
 let schedulerFailureDay = "";
 
+// 公開維護摘要僅讀小型 metadata，不複製整份 DB、不解析 observations/evidenceBlob。
+// 待補數是已保存紀錄的工作狀態，沒有推定交易日、成熟度或個人資料統計。
+function summarizeOperationalStatus(db, { today = toTaipeiCompactDate() } = {}) {
+  const asOf = compactToIsoDate(today);
+  if (!db) return { asOf, captures: null, input: null, history: null };
+  const manifests = Object.values(db.verificationCaptures || {});
+  const store = db.verificationPublications || {};
+  const timestamp = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+  const reason = item => item?.reason === 'reference-not-today' ? 'reference-not-today'
+    : item?.status === 'failed' ? 'source-unavailable' : item?.status === 'incomplete' ? 'input-incomplete' : null;
+  const formal = capture => capture?.kind === 'formal' && capture.complete === true;
+  const publication = capture => ({ status: 'published', tradeDate: compactToIsoDate(toCompactDate(capture.tradeDate)),
+    signalCount: Array.isArray(capture.signals) ? capture.signals.length : null,
+    availableConfirmedAt: timestamp(capture.availableConfirmedAt) });
+  const captures = Object.fromEntries(['overnight', 'swing'].map(strategy => {
+    const version = currentVerificationIdentity(strategy).selectionVersion;
+    const key = verificationPublicationKey(strategy, today, version);
+    const current = store.captures?.[store.current?.[key]];
+    const latest = Object.values(store.current || {}).map(id => store.captures?.[id]).filter(capture => formal(capture) && capture.strategy === strategy
+        && capture.identity?.selectionVersion === version && toCompactDate(capture.tradeDate) <= today)
+      .sort((a, b) => String(b.tradeDate).localeCompare(String(a.tradeDate)))[0];
+    const attempt = manifests.filter(item => item.strategy === strategy && item.canonical
+      && toCompactDate(item.tradeDate) === today && ['failed', 'incomplete', 'not-captured'].includes(item.status)
+      && (!item.identity?.selectionVersion || item.identity.selectionVersion === version)).sort(compareVerificationAttempts)[0];
+    return [strategy, { today: formal(current) ? publication(current) : { status: attempt?.status || 'unknown',
+      reason: reason(attempt), attemptedAt: timestamp(attempt?.lastAttemptedAt || attempt?.capturedAt) },
+      latest: latest ? publication(latest) : null }];
+  }));
+  const inputAttempt = manifests.filter(item => item.stage === 'reference' && toCompactDate(item.tradeDate) === today)
+    .sort(compareVerificationAttempts)[0];
+  const snapshots = db.signalSnapshots || [];
+  const swing = Object.values(db.swingVerification || {}).flat();
+  const benchmarkCounts = { total: 0, pending: 0, unavailable: 0, complete: 0 };
+  const currentIds = new Set(Object.values(store.current || {}));
+  for (const capture of manifests) {
+    if (!currentIds.has(capture.captureId) || !capture.fullRecord || capture.kind !== 'formal' || !capture.canonical
+      || !Array.isArray(capture.candidates)) continue;
+    const memo = db.verificationBenchmarks?.memos?.[benchmarkMemoKey(capture)];
+    benchmarkCounts.total += 1;
+    const blocked = memo?.status === 'unavailable' || memo?.reason === 'official-calendar-source-unavailable';
+    benchmarkCounts[memo?.status === 'complete' ? 'complete' : blocked ? 'unavailable' : 'pending'] += 1;
+  }
+  return { asOf, captures,
+    input: inputAttempt ? { status: ['failed', 'incomplete'].includes(inputAttempt.status) ? inputAttempt.status : 'unknown',
+      reason: reason(inputAttempt), attemptedAt: timestamp(inputAttempt.lastAttemptedAt || inputAttempt.capturedAt) } : null,
+    history: { scope: 'all-stored-versions',
+      overnight: { total: snapshots.length, withoutFinal: snapshots.filter(snapshot =>
+        ![snapshot.observed, ...(snapshot.observationRevisions || [])].some(item => item?.complete === true && item.status === 'final')).length },
+      swing: { total: swing.length, pending: swing.filter(entry => entry.status === 'pending').length },
+      benchmarks: benchmarkCounts } };
+}
+
 function closeSchedulerStateForTest() {
   return { lastRunDay: lastScheduledRunDay, failures: schedulerFailures, retryAt: schedulerRetryAt, failureDay: schedulerFailureDay };
 }
@@ -16532,6 +16604,7 @@ export {
   loadStaticAsset,
   // 收盤後排程（close-scheduler.test）
   closeTasksDue, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
+  summarizeOperationalStatus, benchmarkMemoKey, recordCaptureAttempt,
   SCHEDULER_MAX_FAILURES_PER_DAY, closeSchedulerStateForTest, resetCloseSchedulerStateForTest,
   // 事件日曆／市場位階（market-events.test）
   thirdWednesday, upcomingMarketEvents, summarizeMarketBreadth, buildMarketBreadth,

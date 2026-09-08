@@ -149,7 +149,7 @@ sequenceDiagram
 
 | 模組分類 | 主要 API 端點 | 功能說明 |
 |---|---|---|
-| **服務健康** | `GET /api/health`、`GET /api/app-version`、`GET /api/sources` | 依序為啟動就緒／待寫入狀態、版本比對、資料來源狀態 |
+| **服務健康** | `GET /api/health`、`GET /api/app-version`、`GET /api/sources`、`GET /api/operational-status` | 啟動就緒／待寫入、版本比對、行情來源，以及只讀保存／正式採集／待補摘要 |
 | **身分驗證** | `/api/auth/*`、`/api/admin/users` | 管理者帳號登入、Session 管理與權限控制 |
 | **行情與大盤** | `/api/symbols`、`/api/quotes`、`/api/markets`、`/api/market-session`、`/api/market/breadth` | 搜尋、報價、市場時段、大盤位階、漲跌家數與事件；期指日盤顯示基差，夜盤另標與現貨收盤之差 |
 | **個股資料** | `/api/institutional`、`/api/margin`、`/api/company`、`/api/fundamentals`、`/api/technical-analysis` | 法人、融資融券、公司概況、基本面與 K 線分析 |
@@ -187,6 +187,8 @@ npm install
 ```
 
 更新程式前先停止原伺服器並等待完整結束，更新完成後再啟動；Node 不會熱載。只改前端時，瀏覽器 **Ctrl+F5** 即可。到「更多 → 版本與更新」可分別看執行中後端、磁碟後端與本分頁外殼，判斷需要重啟或刷新；純文件 commit 不會要求重啟。
+
+「更多 → 資料來源 → 保存與正式採集狀態」可展開查詢行情讀取、資料保存、兩策略正式採集及歷史待補。保存旗標只反映本程序有沒有尚未恢復的已知失敗，查詢不會試寫磁碟。正式零訊號仍是成功發布；尚無採集證據的原因保持未知，背景補驗受阻不會撤銷已發布清單。待補按全部保存版本的份／筆／批分列，包含尚未到期的觀察；查詢本身不重新選股或啟動補驗。
 
 後端身份在模組載入時固定，指紋涵蓋 `server.mjs`、`portfolio-risk.js`、`verification-evidence.mjs`、`package.json`、`package-lock.json` 的來源快照，並附當時的 Git commit／dirty。它不涵蓋環境設定、實際 node_modules bytes 或 V8 bytecode，也不保證邊更新邊載入時各檔案一致；dirty、無 Git 或 Git 狀態未知時，commit 不能精確代表全部來源。GitHub 比對以啟動時 commit 為起點，不代表磁碟或本分頁已更新。
 

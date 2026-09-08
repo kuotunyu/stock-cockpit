@@ -1,5 +1,7 @@
 # Stock1 測試套件
 
+`operational-status` 後端／DOM／Chromium 驗更多→資料來源的預設收合診斷：行情成功與保存受阻分離、完整零訊號正式發布、來源不足、正式後補驗失敗、排程關閉與查不到。`GET /api/operational-status` 公開白名單直接讀已提交 RAM，不寫入、不排背景工作、不解壓候選池證據；待補以全部保存版本的份／筆／批分列，沒有套用成績單最近窗口。保存旗標是本程序未恢復的已知失敗，不是新的磁碟探測。DOM 包含真 `fetchApi` body deadline 與重試，Chromium 包含四尺寸／200% 文字、原生 details 和輪詢焦點。
+
 `runtime-version` 以臨時 Git repo／worktree 與冷程序鎖住模組載入身份：首次版本查詢前後改檔、重啟、dirty、無 Git 與純文件 commit；後端指紋只涵蓋公開來源及相依宣告，不代表實際套件或環境設定。`app-version-panel` 與 Chromium `app-version` 分辨執行後端／磁碟／載入 app.js 的外殼宣告，驗舊新分頁、舊後端缺身份、重啟／刷新優先訊息，以及 375／768／1280／1440 px 和 200% 文字。外殼改動須同步 `APP_SHELL_VERSION` 與 SW `CACHE_NAME`。
 
 `windows-launcher` 使用臨時 `.env`／DATA_DIR／port 0 或 OS 配發後保留的自訂埠、真 server child 與離線 preload，驗 Node runtime 範圍、安裝失敗／lock 改變／實際缺檔／保留既有 dev 安裝、本次 IPC＋health 身份、占用埠、初始化／安全門檻、排程啟動、Ctrl+C 處理器、ready 逾時，以及模組載入前後父程序斷線。測試不開真瀏覽器或新視窗；開頁動作以局部注入記錄 URL，npm 安裝用臨時套件替身，不連 registry。Windows IPC 斷線後以 child `exit` 判斷程序結束，不能等待可能不送出的 `close`。可先跑 `node --test tests/backend/runtime-version.test.mjs tests/backend/windows-launcher.test.mjs tests/frontend/app-version-panel.test.mjs`。
