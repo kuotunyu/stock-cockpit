@@ -167,7 +167,9 @@ test("從未登入過的訪客：/me 回 503 或斷線也不清本機自選（�
   assert.deepEqual(JSON.parse(app.evalIn(`localStorage.getItem("stock1-watch-lists-v1")`)), { 1: ["2330"], 2: [], 3: [] });
 });
 
-test("登入成功時使用者已在別的欄位打字：不搶焦點、不清草稿", async () => {
+test("登入成功時使用者已在同一頁的提醒欄打字：不搶焦點、不清草稿（庫存面板可見，只有守衛擋得住）", async () => {
+  // 第一版讓使用者切去技術分析頁打字，但換頁會把庫存面板設 hidden，聚焦目標本來就不可聚焦，守衛拿掉測試仍綠。
+  // 改成留在自選股頁：登入後提醒表單先出現，使用者在等交易帳本時開始打目標價，帳本載好後焦點不得跳去交易表單。
   const app = await guestApp();
   const result = JSON.parse(await app.evalIn(`(async () => {
     state.screen = "watchlist"; state.watchList = "hold"; render();
@@ -176,15 +178,18 @@ test("登入成功時使用者已在別的欄位打字：不搶焦點、不清�
     const now = new Date().toISOString();
     const routes = {
       "/api/auth/login": { ok: true, user: { id: "u9", username: "friend", role: "user" }, warnings: {} },
-      // 等待期間使用者切去技術分析打了代號
-      "/api/watchlists": new Promise((resolve) => setTimeout(() => {
-        state.screen = "technical"; render();
-        const input = document.getElementById("technicalCode"); input.value = "2454 打到一半"; input.focus();
-        resolve({ ok: true, rev: 1, lists: { 1: [], 2: [], 3: [] } });
-      }, 30)),
+      "/api/watchlists": { ok: true, rev: 1, lists: { 1: [], 2: [], 3: [] } },
       "/api/alerts": { ok: true, rev: 1, alerts: [] },
-      "/api/trades": { ok: true, schemaVersion: 2, rev: 1, settings: { feeDiscount: 0.6, minFee: 20 }, records: [], quarantinedRecords: [],
-        portfolio: { holdings: [], realized: [], totals: { cost: 0, marketValue: 0, unrealizedPnl: 0, realizedPnl: 0 } }, missingCorporateActions: [] },
+      // 等交易帳本的期間，使用者在同一頁的個股明細提醒欄打到一半
+      "/api/trades": new Promise((resolve) => setTimeout(() => {
+        stocks.push({ code: "2330", name: "測試2330", price: 100, change: 1, changeText: "+1%", spark: [99, 100], groups: [], strategies: [], sourceKind: "official" });
+        state.selectedCode = "2330";
+        renderPriceAlertBox(stocks[stocks.length - 1]);
+        const input = el.priceAlertBox.querySelector('[data-alert-form] input[name="price"]');
+        input.value = "123.5"; input.focus();
+        resolve({ ok: true, schemaVersion: 2, rev: 1, settings: { feeDiscount: 0.6, minFee: 20 }, records: [], quarantinedRecords: [],
+          portfolio: { holdings: [], realized: [], totals: { cost: 0, marketValue: 0, unrealizedPnl: 0, realizedPnl: 0 } }, missingCorporateActions: [] });
+      }, 30)),
       "/api/broker/settings": { configured: false }, "/api/sources": { ok: true, selected: "official", sources: {} },
       "/api/quotes": { ok: true, sourceKey: "official", source: "測試", generatedAt: now, realtimeCount: 0, fallbackCount: 0, warnings: [], quotes: [] },
       "/api/markets": { ok: true, source: "測試", generatedAt: now, warnings: [], markets: {} },
@@ -195,13 +200,21 @@ test("登入成功時使用者已在別的欄位打字：不搶焦點、不清�
     try { await loginWithCredentials("friend", "pw"); } finally { fetchApi = window.__origFetchApi; }
     await new Promise((resolve) => setTimeout(resolve, 40));
     const active = document.activeElement;
-    const out = { activeId: active ? active.id : null, value: document.getElementById("technicalCode").value, user: authState.user && authState.user.username };
-    state.screen = "watchlist"; technicalInputDirty = false; document.getElementById("technicalCode").value = ""; render();
-    return JSON.stringify(out);
+    const priceInput = el.priceAlertBox.querySelector('[data-alert-form] input[name="price"]');
+    return JSON.stringify({
+      user: authState.user && authState.user.username,
+      activeIsPrice: Boolean(active) && active === priceInput,
+      activeDesc: active ? (active.tagName + "[name=" + (active.name || "") + "]") : null,
+      value: priceInput ? priceInput.value : null,
+      holdingsVisible: !el.holdingsPanel.hidden,
+      tradeFormReady: Boolean(el.holdingsPanel.querySelector('[data-trade-form] input[name="code"]')),
+    });
   })()`));
   assert.equal(result.user, "friend");
-  assert.equal(result.activeId, "technicalCode", "使用者正在打字的欄位不得被搶焦點");
-  assert.equal(result.value, "2454 打到一半", "草稿不得被清掉");
+  assert.equal(result.holdingsVisible, true, "前提：庫存面板可見（換頁會讓目標不可聚焦，測不到守衛）");
+  assert.equal(result.tradeFormReady, true, "前提：交易表單已載好，沒有守衛就會被聚焦");
+  assert.equal(result.activeIsPrice, true, `使用者正在打字的提醒欄位不得被搶焦點：${result.activeDesc}`);
+  assert.equal(result.value, "123.5", "草稿不得被清掉");
 });
 
 test("曾登入過（旗標在）的 401：仍清掉上一個帳號的清單並開登入閘（既有到期契約不變）", async () => {
