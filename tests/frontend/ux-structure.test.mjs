@@ -254,6 +254,6 @@ test("風險列：資金未填時收成一顆（aria-expanded=false），填了�
   assert.deepEqual(expanded, { collapsed: false, expanded: "true" });
   const toggled = json(`(() => { const bar = document.querySelector(".swing-risk-bar"); const toggle = bar.querySelector("[data-risk-toggle]"); toggle.click(); const opened = !bar.classList.contains("is-collapsed"); toggle.click(); const closed = bar.classList.contains("is-collapsed"); return { opened, closed }; })()`);
   assert.deepEqual(toggled, { opened: true, closed: true });
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.today-focus-grid \{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/, "手機重點卡改兩欄（單欄 5 張 × 112px 吃掉 688px）");
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.today-focus-grid \{\s*grid-template-columns: repeat\(auto-fit, minmax\(min\(100%, max\(9em, 45%\)\), 1fr\)\)/, "手機重點卡兩欄（單欄 5 張 × 112px 吃掉 688px）；欄寬下限 9em，200% 文字時退成一欄");
   assert.match(css, /\.market-stance-events \{[^}]*display: block/, "位階行的事件另起一行");
 });

@@ -58,6 +58,53 @@ test("手機重點卡：3 字內股名一行完整，漲幅另起一行不重疊
       await fixture.captureSnapshot(`focus-card-${width}`);
     }
 
+    // 第五批④：200% 文字（瀏覽器「僅放大文字」）下的手機重點卡。名稱可以多行，但不得被裁掉、不得與漲幅重疊、body 不橫向溢出。
+    await page.setViewportSize({ width: 390, height: 844 });
+    await fixture.emulateTextZoom(2, [".focus-pick-name", ".today-focus-card strong > em"]);
+    const zoomed = await page.evaluate(() => {
+      // 「被裁掉」的定義：文字的實際範圍超出任何一個 overflow 非 visible 的祖先。scrollHeight 比 clientHeight 多幾 px
+      // 是 CJK 字形盒比行盒高的正常現象（overflow: visible 照樣看得到），不算裁切。
+      const clippedBy = (node) => {
+        const range = document.createRange(); range.selectNodeContents(node);
+        const text = range.getBoundingClientRect();
+        for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+          const box = ancestor.getBoundingClientRect();
+          if (text.left < box.left - 1 || text.right > box.right + 1 || text.top < box.top - 1 || text.bottom > box.bottom + 1) return ancestor.tagName + "." + String(ancestor.className).split(" ")[0];
+        }
+        return "";
+      };
+      return {
+        bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        cards: [...document.querySelectorAll("button.today-focus-card")].map((card) => {
+          const name = card.querySelector(".focus-pick-name");
+          const pct = card.querySelector("strong > em");
+          const n = name.getBoundingClientRect();
+          const p = pct.getBoundingClientRect();
+          return {
+            text: name.textContent.trim(),
+            fontSize: parseFloat(getComputedStyle(name).fontSize),
+            clippedBy: clippedBy(name),
+            overlap: !(n.right <= p.left + 1 || p.right <= n.left + 1 || n.bottom <= p.top + 1 || p.bottom <= n.top + 1),
+            pctVisible: p.width > 0 && p.height > 0,
+            cardFits: card.scrollWidth <= card.clientWidth + 1,
+          };
+        }),
+      };
+    });
+    assert.equal(zoomed.bodyFits, true, "200%：body 不可橫向溢出");
+    assert.equal(zoomed.cards.length, 3);
+    for (const card of zoomed.cards) {
+      assert.ok(card.fontSize >= 42, `200%：「${card.text}」字級應為 2 倍：${card.fontSize}`);
+      assert.equal(card.clippedBy, "", `200%：「${card.text}」名稱不得被裁掉（被 ${card.clippedBy} 裁到）`);
+      assert.equal(card.overlap, false, `200%：「${card.text}」名稱與漲幅不得重疊`);
+      assert.equal(card.pctVisible, true, `200%：「${card.text}」漲幅要看得到`);
+      assert.equal(card.cardFits, true, `200%：「${card.text}」卡片內容不得橫向溢出卡片`);
+    }
+    await fixture.captureSnapshot("focus-card-390-200");
+    await fixture.emulateTextZoom(1, [".focus-pick-name"]);
+
     await page.setViewportSize({ width: 1280, height: 1000 });
     await page.evaluate(() => document.fonts.ready);
     const desktop = await page.evaluate(() => {

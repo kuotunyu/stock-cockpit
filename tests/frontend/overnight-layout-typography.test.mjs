@@ -54,8 +54,9 @@ test("focus pick separates the name from a large, readable percentage", () => {
 test("mobile focus pick stacks name above percentage instead of squeezing the name", () => {
   // 定位「重點卡改兩欄」那個 760px 區塊（styles.css 有多個 max-width:760px query），再以大括號深度確認
   // 覆寫真的在同一個 media 區塊內：放到頂層或另一個 query 都算沒修（會蓋到桌機）。
-  const gridOverride = styles.search(/\.today-focus-grid\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
-  assert.ok(gridOverride > 0, "手機重點卡兩欄規則必須存在");
+  // 第五批④：手機兩欄改成 em 下限的 auto-fit（一般字級兩欄、200% 文字退成一欄），錨點跟著換。
+  const gridOverride = styles.search(/\.today-focus-grid\s*\{\s*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(100%,\s*max\(9em,\s*45%\)\),\s*1fr\)\)/);
+  assert.ok(gridOverride > 0, "手機重點卡兩欄（em 下限）規則必須存在");
   const mediaStart = styles.lastIndexOf("@media (max-width: 760px)", gridOverride);
   assert.ok(mediaStart >= 0, "兩欄規則必須在 760px media query 內");
   let depth = 0;

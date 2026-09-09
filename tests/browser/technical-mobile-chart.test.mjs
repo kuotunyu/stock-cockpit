@@ -60,6 +60,52 @@ test("390px：分析後 canvas 進首屏且至少一半可見、在摘要卡之�
     assert.doesNotMatch(await page.locator("#technicalOhlc p").textContent(), /載入中|尚未布局/);
     await fixture.captureSnapshot("technical-mobile-chart-390");
 
+    // 第五批④：200% 文字下的手機技術頁。標題、副標與圖例籤可以變高或換行，但不得被裁掉、body 不橫向溢出、圖仍在摘要卡之前且有尺寸。
+    await fixture.emulateTextZoom(2, ["#technicalTitle", "#technicalSubtitle", "#technicalChartMarkers .technical-chart-marker strong"]);
+    const zoomed = await page.evaluate(() => {
+      // 「被裁掉」＝文字實際範圍超出任何 overflow 非 visible 的祖先（含自己）；CJK 字形盒比行盒高幾 px 不算。
+      const clipped = (node) => {
+        const range = document.createRange(); range.selectNodeContents(node);
+        const text = range.getBoundingClientRect();
+        for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+          const box = ancestor.getBoundingClientRect();
+          if (text.left < box.left - 1 || text.right > box.right + 1 || text.top < box.top - 1 || text.bottom > box.bottom + 1) return true;
+        }
+        return false;
+      };
+      const canvas = document.querySelector("#technicalChart").getBoundingClientRect();
+      const summary = document.querySelector("#technicalSummary").getBoundingClientRect();
+      const header = document.querySelector(".technical-chart-card > header");
+      return {
+        bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        canvasWidth: canvas.width, canvasHeight: canvas.height, chartBeforeSummary: canvas.top < summary.top,
+        headerFits: header.scrollWidth <= header.clientWidth + 1,
+        titleClipped: clipped(document.querySelector("#technicalTitle")),
+        subtitleClipped: clipped(document.querySelector("#technicalSubtitle")),
+        chips: [...document.querySelectorAll("#technicalChartMarkers .technical-chart-marker")].map((chip) => ({
+          text: chip.textContent.trim(), clipped: clipped(chip), fontSize: parseFloat(getComputedStyle(chip.querySelector("strong")).fontSize),
+        })),
+        zoomButton: (() => { const b = document.querySelector("#technicalZoomOpen").getBoundingClientRect(); return { w: b.width, h: b.height, name: document.querySelector("#technicalZoomOpen").getAttribute("aria-label") }; })(),
+      };
+    });
+    assert.equal(zoomed.bodyFits, true, "200%：body 不可橫向溢出");
+    assert.ok(zoomed.canvasWidth > 0 && zoomed.canvasHeight > 0, "200%：canvas 仍有尺寸");
+    assert.equal(zoomed.chartBeforeSummary, true, "200%：圖仍在摘要卡之前");
+    assert.equal(zoomed.headerFits, true, "200%：標題列內容不得橫向溢出");
+    assert.equal(zoomed.titleClipped, false, "200%：標題不得被裁掉");
+    assert.equal(zoomed.subtitleClipped, false, "200%：副標不得被裁掉");
+    assert.equal(zoomed.chips.length, 5);
+    for (const chip of zoomed.chips) {
+      assert.ok(chip.fontSize >= 26, `200%：圖例籤「${chip.text}」字級應為 2 倍：${chip.fontSize}`);
+      assert.equal(chip.clipped, false, `200%：圖例籤「${chip.text}」不得被裁掉`);
+    }
+    assert.equal(zoomed.zoomButton.name, "放大 K 線圖", "放大鈕名稱仍在");
+    assert.ok(zoomed.zoomButton.w > 0 && zoomed.zoomButton.h > 0, "放大鈕仍可見");
+    await fixture.captureSnapshot("technical-mobile-chart-390-200");
+    await fixture.emulateTextZoom(1, ["#technicalTitle"]);
+
     await page.setViewportSize({ width: 1280, height: 1000 });
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const desktop = await page.evaluate(() => {

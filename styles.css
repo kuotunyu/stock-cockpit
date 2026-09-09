@@ -7531,8 +7531,10 @@ details[data-overnight-warnings-fold] > .overnight-warning {
   }
 
   /* 單欄 5 張 × 112px 吃掉 688px、清單第一檔在 1.7 個螢幕外：改兩欄，資料可信度卡與自選卡整列 */
+  /* 手機兩欄；第五批④（2026-09-09）：欄寬下限用 em，瀏覽器「僅放大文字」200% 時每張卡至少 9em（≈288px）放不下兩欄，
+     自動退成一欄，漲幅（mono、nowrap、42px 約 152px）才不會撐出 163px 寬的卡。45% 下限保證一般字級最多兩欄（不會在 600–760px 變四欄）。 */
   .today-focus-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, max(9em, 45%)), 1fr));
   }
 
   /* 兩欄卡扣掉內距與 nowrap 的漲幅後只剩約 60px 給股名，桌機的「名稱＋漲幅」兩欄 strong 會把
