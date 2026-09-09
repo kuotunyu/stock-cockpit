@@ -170,3 +170,133 @@ test('重疊隔日掃描：舊 finally 不結束新掃描的 loading',async(t)=>
   assert.equal(app.evalIn('overnightState.loading'),false);
   assert.equal(app.evalIn('overnightState.error'),'新失敗');
 });
+
+// ===== 2026-09-09 CUA-05（computer use 心得 F05）：長查詢等待要讓人知道經過多久、現在能做什麼 =====
+// 舊文案「第一次約需 10–30 秒」「數十秒」「十幾秒」是硬承諾，實測隔日沖 1 分 41 秒、策略 2 分多；
+// 逾時後也沒有重試入口。這裡只加純顯示的 startedAt／經過秒數與重試按鈕，不新增 server progress、不改 600 秒 deadline。
+
+test('scanWaitText：30 秒前說可先做別的事、不寫秒數；超過 30 秒改說等待較久並附經過秒數',async(t)=>{
+  const app=await fixture(t);
+  const at=(seconds)=>app.evalIn(`scanWaitText(1000000, 1000000 + ${seconds} * 1000)`);
+  assert.match(at(0),/可先搜尋股票或使用其他頁面/);
+  assert.doesNotMatch(at(0),/秒/);
+  assert.match(at(29),/可先搜尋股票或使用其他頁面/);
+  assert.doesNotMatch(at(29),/等待較久|已等/);
+  assert.match(at(31),/等待較久/);
+  assert.match(at(31),/已等 31 秒/);
+  assert.match(at(31),/其他頁面/);
+  for(const text of [at(0),at(31)]){ assert.doesNotMatch(text,/10–30 秒|數十秒|十幾秒|直接用快取/,'不得再有硬承諾'); }
+});
+
+test('隔日沖／策略／回測的載入畫面不再寫硬承諾，並帶單一經過時間節點',async(t)=>{
+  const app=await fixture(t);
+  app.evalIn('loadMarketBreadth=async()=>{};showToast=()=>{};loadSwingVerify=()=>{};renderSwingVerifyPanel=()=>{};');
+  const parsed=JSON.parse(app.evalIn(`JSON.stringify((() => {
+    Object.assign(overnightState,{loading:true,loaded:false,error:'',startedAt:Date.now()-5000});
+    state.overnightView='overview'; state.screen='overnight';
+    renderOvernightGroups();
+    Object.assign(strategyState,{loading:true,loaded:false,error:'',startedAt:Date.now()-5000});
+    renderStrategyBoard();
+    Object.assign(backtestState,{loading:true,loaded:false,error:''});
+    return { overnight: el.overnightGroups.innerHTML, strategy: el.strategyBoard.innerHTML, backtest: renderBacktestPerformance() };
+  })())`));
+  for(const [key,fragment] of Object.entries(parsed)){
+    assert.doesNotMatch(fragment,/10–30 秒|數十秒|十幾秒|當天會直接用快取|之後有快取/,`${key} 不得再有硬承諾`);
+  }
+  assert.match(parsed.overnight,/data-scan-wait="overnight"/);
+  assert.match(parsed.overnight,/可先搜尋股票或使用其他頁面/);
+  assert.match(parsed.strategy,/data-scan-wait="strategy"/);
+  assert.match(parsed.strategy,/中軌攻防|上軌續攻/);
+  app.evalIn('stopScanWaitTimer("overnight");stopScanWaitTimer("strategy");Object.assign(overnightState,{loading:false,startedAt:0});Object.assign(strategyState,{loading:false,startedAt:0});Object.assign(backtestState,{loading:false});');
+});
+
+test('經過時間只改單一節點的文字：健檢輸入框的值與焦點不受每秒更新影響',async(t)=>{
+  const app=await fixture(t);
+  app.evalIn('loadSwingVerify=()=>{};renderSwingVerifyPanel=()=>{};');
+  const result=JSON.parse(app.evalIn(`JSON.stringify((() => {
+    Object.assign(strategyState,{loading:true,loaded:false,error:'',startedAt:Date.now()-40000});
+    state.screen='strategy';
+    renderStrategyBoard();
+    const input=document.getElementById('strategyInspectInput');
+    input.value='2330 草稿'; input.focus();
+    const before=el.strategyBoard.querySelector('[data-scan-wait="strategy"]').textContent;
+    const boardNode=el.strategyBoard.firstElementChild;
+    scanWaitTick('strategy', strategyState.startedAt + 65000);
+    const after=el.strategyBoard.querySelector('[data-scan-wait="strategy"]').textContent;
+    const out={before,after,sameNode:el.strategyBoard.firstElementChild===boardNode,value:input.value,focused:document.activeElement===input};
+    stopScanWaitTimer('strategy');Object.assign(strategyState,{loading:false,startedAt:0});
+    return out;
+  })())`));
+  assert.match(result.before,/已等 40 秒/);
+  assert.match(result.after,/已等 65 秒/);
+  assert.equal(result.sameNode,true,'每秒更新不得重建整個看板');
+  assert.equal(result.value,'2330 草稿');
+  assert.equal(result.focused,true);
+});
+
+test('startedAt 只由最新請求設定；遲到的舊 finally 不清新請求的 startedAt，完成後才歸零',async(t)=>{
+  const app=await fixture(t);
+  app.evalIn('render=()=>{};renderOvernightGroups=()=>{};loadMarketBreadth=async()=>{};showToast=()=>{};');
+  const old=app.win.loadOvernightSignals();
+  const startedOld=app.evalIn('overnightState.startedAt');
+  assert.ok(startedOld>0,'開始請求要記 startedAt');
+  await setImmediate();
+  const fresh=app.win.loadOvernightSignals();
+  const startedFresh=app.evalIn('overnightState.startedAt');
+  assert.ok(startedFresh>=startedOld);
+  app.requests[0].resolve(response(async()=>({ok:false,error:'舊失敗'})));
+  await old;
+  assert.equal(app.evalIn('overnightState.startedAt'),startedFresh,'舊 finally 不得清掉新請求的 startedAt');
+  app.requests[1].resolve(response(async()=>({ok:false,error:'新失敗'})));
+  await fresh;
+  assert.equal(app.evalIn('overnightState.startedAt'),0,'完成後歸零');
+  assert.equal(app.evalIn('scanWaitTimers.has("overnight")'),false,'完成後計時器要清掉');
+});
+
+test('逾時：畫面說伺服器可能仍在處理並提供重試按鈕；重試是使用者操作，不自動循環',async(t)=>{
+  const app=await fixture(t);
+  app.evalIn('render=()=>{};loadMarketBreadth=async()=>{};showToast=()=>{};loadSwingVerify=()=>{};renderSwingVerifyPanel=()=>{};state.overnightView="overview";state.screen="overnight";');
+  const pending=app.win.loadOvernightSignals();
+  app.requests[0].reject(Object.assign(new Error('等待回應逾時，可再試一次；伺服器可能仍在處理'),{code:'REQUEST_TIMEOUT'}));
+  await pending;
+  const view=JSON.parse(app.evalIn(`JSON.stringify({ html: el.overnightGroups.innerHTML, code: overnightState.errorCode, requests: ${app.requests.length} })`));
+  assert.equal(view.code,'REQUEST_TIMEOUT');
+  assert.match(view.html,/等待逾時/);
+  assert.match(view.html,/伺服器可能仍在處理/);
+  assert.match(view.html,/data-overnight-retry/);
+  assert.doesNotMatch(view.html,/npm start/,'逾時不是啟動失敗，不要叫人去檢查 npm start');
+  const requestsBefore=app.requests.length;
+  await setImmediate();
+  assert.equal(app.requests.length,requestsBefore,'逾時後不得零秒自動重送');
+  app.evalIn(`el.overnightGroups.querySelector('[data-overnight-retry]').click()`);
+  await setImmediate();
+  assert.equal(app.requests.length,requestsBefore+1,'按重試才再送一次');
+  assert.equal(app.evalIn('overnightState.loading'),true);
+  app.requests.at(-1).resolve(response(async()=>({ok:false,error:'重試仍失敗'})));
+  await setImmediate();await setImmediate();
+  const strategy=app.win.loadStrategyBoard();
+  app.requests.at(-1).reject(Object.assign(new Error('等待回應逾時'),{code:'REQUEST_TIMEOUT'}));
+  await strategy;
+  const strategyHtml=app.evalIn('el.strategyBoard.innerHTML');
+  assert.match(strategyHtml,/等待逾時/);
+  assert.match(strategyHtml,/data-strategy-retry/);
+  const n=app.requests.length;
+  app.evalIn(`el.strategyBoard.querySelector('[data-strategy-retry]').click()`);
+  await setImmediate();
+  assert.equal(app.requests.length,n+1,'策略重試也是使用者操作才送');
+  app.requests.at(-1).resolve(response(async()=>({ok:false,error:'x'})));
+  await setImmediate();await setImmediate();
+});
+
+test('更多→重新整理資料：隔日沖掃描進行中不重複啟動第二次掃描',async(t)=>{
+  const app=await fixture(t);
+  app.evalIn('render=()=>{};renderOvernightGroups=()=>{};loadMarketBreadth=async()=>{};loadMarketSummary=async()=>{};loadMarketData=async()=>{};window.toasts=[];showToast=(text)=>window.toasts.push(text);');
+  const pending=app.win.loadOvernightSignals();
+  const before=app.requests.length;
+  app.evalIn(`document.body.insertAdjacentHTML('beforeend','<button id="tmpRefresh" data-action="refresh-data" type="button">重新抓目前來源</button>'); document.getElementById('tmpRefresh').click(); document.getElementById('tmpRefresh').remove();`);
+  await setImmediate();
+  assert.equal(app.requests.length,before,'進行中不得再送隔日沖請求');
+  assert.ok(app.evalIn('window.toasts.some(t=>/仍在產生|進行中/.test(t))'),'要告訴使用者掃描仍在進行');
+  app.requests[0].resolve(response(async()=>({ok:false,error:'結束'})));
+  await pending;
+});

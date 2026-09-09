@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v40";
+const APP_SHELL_VERSION = "stock1-shell-v41";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -407,6 +407,9 @@ const overnightState = {
   loaded: false,
   loading: false,
   error: "",
+  errorCode: "",
+  // 本次掃描請求的開始時間（只由最新請求設定／清除），純顯示用：等待畫面的經過秒數。
+  startedAt: 0,
   asOf: "",
   source: "",
   groups: null,
@@ -428,6 +431,8 @@ const strategyState = {
   loaded: false,
   loading: false,
   error: "",
+  errorCode: "",
+  startedAt: 0,
   asOf: "",
   source: "",
   scenario: "midBandDefense",
@@ -6232,6 +6237,47 @@ function upsertStockFromPick(pick) {
   return stock;
 }
 
+// ===== 長查詢等待（2026-09-09 CUA-05，computer use 心得 F05）=====
+// 舊文案「第一次約需 10–30 秒」「數十秒」是硬承諾，實測隔日沖 1 分 41 秒、策略 2 分多；提示也沒說可以先做別的事。
+// 這裡只做純顯示：記本次請求 startedAt，每秒只改一個 [data-scan-wait] 節點的文字，不重畫整頁、不掛 aria-live、
+// 不新增 server progress 或假百分比，也不動 fetchApi 的 600 秒 deadline。30 秒是說明切換門檻，不是承諾完成時間。
+const SCAN_WAIT_SLOW_AFTER_MS = 30 * 1000;
+const scanWaitTimers = new Map();
+
+function scanWaitText(startedAt, now = Date.now()) {
+  const elapsedSeconds = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0;
+  if (elapsedSeconds * 1000 < SCAN_WAIT_SLOW_AFTER_MS) return "正在讀取官方資料與計算，可先搜尋股票或使用其他頁面，完成後會自動顯示。";
+  return `這次等待較久，來源可能較慢；仍在等待（已等 ${elapsedSeconds} 秒），可先使用其他頁面，完成後會自動顯示。`;
+}
+
+function scanWaitHtml(key, startedAt) {
+  return `<span data-scan-wait="${escapeHtml(key)}">${escapeHtml(scanWaitText(startedAt))}</span>`;
+}
+
+function scanWaitTick(key, now = Date.now()) {
+  const entry = scanWaitTimers.get(key);
+  if (!entry) return;
+  document.querySelectorAll(`[data-scan-wait="${key}"]`).forEach((node) => {
+    const text = scanWaitText(entry.startedAt, now);
+    if (node.textContent !== text) node.textContent = text;
+  });
+}
+
+function ensureScanWaitTimer(key, startedAt) {
+  if (!startedAt) return;
+  const existing = scanWaitTimers.get(key);
+  if (existing && existing.startedAt === startedAt) return;
+  if (existing) window.clearInterval(existing.timer);
+  scanWaitTimers.set(key, { startedAt, timer: window.setInterval(() => scanWaitTick(key), 1000) });
+}
+
+function stopScanWaitTimer(key) {
+  const existing = scanWaitTimers.get(key);
+  if (!existing) return;
+  window.clearInterval(existing.timer);
+  scanWaitTimers.delete(key);
+}
+
 function renderOvernightGroups() {
   if (!el.overnightGroups) return;
   const table = document.querySelector('[data-screen-panel="overnight"] .quote-table');
@@ -6240,13 +6286,17 @@ function renderOvernightGroups() {
   if (table) table.hidden = !showFallbackTable;
   renderListFilterStatus();
   if (overnightState.error) {
+    stopScanWaitTimer("overnight");
     el.overnightGroups.hidden = false;
     el.overnightGroups.classList.remove("is-single-group");
+    // 逾時只是本頁等候上限到了，不代表 server 採集失敗；給重試按鈕，重試是使用者操作、不零秒自動循環。
+    const timedOut = overnightState.errorCode === "REQUEST_TIMEOUT";
     el.overnightGroups.innerHTML = `
       <div class="overnight-error">
-        <strong>官方隔日沖清單產生失敗</strong>
+        <strong>${timedOut ? "隔日沖清單等待逾時" : "官方隔日沖清單產生失敗"}</strong>
         <span>${escapeHtml(overnightState.error)}</span>
-        <small>請確認已用 npm start 啟動，並使用 http://127.0.0.1:5174/ 開啟。</small>
+        <small>${timedOut ? "伺服器可能仍在處理，這不代表採集失敗；可稍後按「重試」，或先使用其他頁面。" : "請確認已用 npm start 啟動，並使用 http://127.0.0.1:5174/ 開啟。"}</small>
+        <button class="more-primary" data-overnight-retry type="button">重試</button>
       </div>
     `;
     return;
@@ -6266,7 +6316,8 @@ function renderOvernightGroups() {
   if (overnightState.loading && !overnightState.loaded) {
     el.overnightGroups.hidden = false;
     el.overnightGroups.classList.remove("is-single-group");
-    el.overnightGroups.innerHTML = `<div class="overnight-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span>官方隔日沖清單產生中，第一次約需 10–30 秒…</div>`;
+    ensureScanWaitTimer("overnight", overnightState.startedAt);
+    el.overnightGroups.innerHTML = `<div class="overnight-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span><strong>官方隔日沖清單產生中…</strong>${scanWaitHtml("overnight", overnightState.startedAt)}</div>`;
     return;
   }
   if (!overnightState.loaded || !overnightState.groups) {
@@ -6739,7 +6790,7 @@ function renderVerifyHistory() {
 
 function renderBacktestPerformance() {
   if (backtestState.loading) {
-    return `<div class="overnight-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span>回測計算中，第一次大約需要十幾秒（之後有快取）…</div>`;
+    return `<div class="overnight-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span>回測計算中，可先看其他分頁，完成後會自動顯示…</div>`;
   }
   if (backtestState.error) {
     return `<div class="overnight-error"><strong>回測讀取失敗</strong><span>${escapeHtml(backtestState.error)}</span></div>`;
@@ -6934,6 +6985,8 @@ async function loadOvernightSignals({ notify = false } = {}) {
   const requestId = ++overnightLoadSeq;
   overnightState.loading = true;
   overnightState.error = "";
+  overnightState.errorCode = "";
+  overnightState.startedAt = Date.now();
   void loadMarketBreadth();
   try {
     const payload = await fetchApi("/api/overnight?limit=20");
@@ -6962,10 +7015,16 @@ async function loadOvernightSignals({ notify = false } = {}) {
     if (handleAuthRequired(error)) return;
     overnightState.loaded = false;
     overnightState.error = error.message;
+    overnightState.errorCode = error.code || "";
     renderOvernightGroups();
     showToast(error.code === "REQUEST_TIMEOUT" ? "隔日沖清單等待逾時，伺服器可能仍在處理" : "隔日沖清單產生失敗");
   } finally {
-    if (requestId === overnightLoadSeq) overnightState.loading = false;
+    // 只有最新請求才結束 loading／清 startedAt；遲到的舊 finally 不能清掉新請求的計時。
+    if (requestId === overnightLoadSeq) {
+      overnightState.loading = false;
+      overnightState.startedAt = 0;
+      stopScanWaitTimer("overnight");
+    }
   }
 }
 
@@ -6982,6 +7041,8 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
   const requestedScenario = strategyState.scenario;
   strategyState.loading = true;
   strategyState.error = "";
+  strategyState.errorCode = "";
+  strategyState.startedAt = Date.now();
   renderStrategyBoard();
   try {
     const refreshParam = refresh ? "&refresh=1" : "";
@@ -7005,11 +7066,14 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
     if (requestId !== strategyLoadSeq) return; // 過期的錯誤不要覆蓋目前場景的狀態
     if (handleAuthRequired(error)) return;
     strategyState.error = error.message;
+    strategyState.errorCode = error.code || "";
     strategyState.publication = null; // 失敗的這次沒有發布身份；不留上一次成功的
     if (notify) showToast(error.code === "REQUEST_TIMEOUT" ? "策略雷達等待逾時，伺服器可能仍在處理" : "策略雷達計算失敗");
   } finally {
     if (requestId === strategyLoadSeq) {
       strategyState.loading = false;
+      strategyState.startedAt = 0;
+      stopScanWaitTimer("strategy");
       renderStrategyBoard();
     }
   }
@@ -7515,11 +7579,14 @@ function renderStrategyBoard() {
   }
   if (!el.strategyBoard) return;
   if (strategyState.loading) {
-    el.strategyBoard.innerHTML = `<div class="strategy-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span><strong>正在掃描全市場計算「${info.name}」型態…</strong><small>第一次計算需要數十秒，之後當天會直接用快取。</small></div>`;
+    ensureScanWaitTimer("strategy", strategyState.startedAt);
+    el.strategyBoard.innerHTML = `<div class="strategy-empty is-loading"><span class="mini-spinner" aria-hidden="true"></span><strong>正在掃描全市場計算「${info.name}」型態…</strong><small>${scanWaitHtml("strategy", strategyState.startedAt)}</small></div>`;
     return;
   }
   if (strategyState.error) {
-    el.strategyBoard.innerHTML = `<div class="strategy-empty is-error">策略雷達計算失敗<small>${escapeHtml(strategyState.error)}</small></div>`;
+    stopScanWaitTimer("strategy");
+    const timedOut = strategyState.errorCode === "REQUEST_TIMEOUT";
+    el.strategyBoard.innerHTML = `<div class="strategy-empty is-error">${timedOut ? "策略雷達等待逾時" : "策略雷達計算失敗"}<small>${escapeHtml(strategyState.error)}${timedOut ? "；伺服器可能仍在處理，這不代表計算失敗。可稍後重試或先使用其他頁面。" : ""}</small><button class="more-primary" data-strategy-retry type="button">重試</button></div>`;
     return;
   }
   if (!strategyState.loaded) {
@@ -12903,7 +12970,9 @@ document.addEventListener("click", async (event) => {
     if (moreAction.dataset.action === "refresh-data") {
       loadMarketSummary({ notify: true });
       loadMarketData({ notify: true });
-      loadOvernightSignals({ notify: true });
+      // 掃描進行中不重複啟動第二次（序號守門只會丟棄舊回應，server 仍會多跑一輪）。
+      if (overnightState.loading) showToast("隔日沖清單仍在產生中，完成後會自動更新，不重複啟動");
+      else loadOvernightSignals({ notify: true });
     }
     if (moreAction.dataset.action === "enable-alert-notifications") {
       moreAction.blur();
@@ -13096,6 +13165,24 @@ document.addEventListener("click", async (event) => {
   // 關閉「看懂每個數字」浮層：點 ✕ 按鈕、或點半透明背景（點 modal 內容不會觸發）。
   if (event.target.closest("#strategyLegendClose") || event.target.id === "strategyLegend") {
     closeStrategyLegend();
+    return;
+  }
+
+  // 逾時／失敗後的重試按鈕：使用者操作才重送，進行中不重複啟動。
+  const overnightRetry = event.target.closest("[data-overnight-retry]");
+  if (overnightRetry) {
+    overnightRetry.blur();
+    if (!overnightState.loading) loadOvernightSignals({ notify: true });
+    return;
+  }
+  const strategyRetry = event.target.closest("[data-strategy-retry]");
+  if (strategyRetry) {
+    strategyRetry.blur();
+    if (!strategyState.loading) {
+      strategyState.error = "";
+      strategyState.errorCode = "";
+      loadStrategyBoard({ notify: true });
+    }
     return;
   }
 
