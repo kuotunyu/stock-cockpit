@@ -29,16 +29,30 @@ test("390px：分析後 canvas 進首屏且至少一半可見、在摘要卡之�
       const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
       const canvas = rect("#technicalChart");
       const summary = rect("#technicalSummary");
+      const header = rect(".technical-chart-card > header");
+      const markers = rect("#technicalChartMarkers");
+      const title = rect("#technicalTitle");
+      const subtitle = rect("#technicalSubtitle");
       const vh = window.innerHeight;
+      const legendChips = [...document.querySelectorAll("#technicalChartMarkers .technical-chart-marker.is-legend")];
       return { scrollY: window.scrollY, width: canvas.width, height: canvas.height, top: canvas.top, summaryTop: summary.top, innerHeight: vh,
-        visible: Math.max(0, Math.min(canvas.bottom, vh) - Math.max(canvas.top, 0)) };
+        visible: Math.max(0, Math.min(canvas.bottom, vh) - Math.max(canvas.top, 0)),
+        headerHeight: header.height, markersHeight: markers.height, legendChips: legendChips.length,
+        titleLines: Math.round(title.height / parseFloat(getComputedStyle(document.querySelector("#technicalTitle")).lineHeight)),
+        subtitleLines: Math.round(subtitle.height / parseFloat(getComputedStyle(document.querySelector("#technicalSubtitle")).lineHeight)),
+        bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth };
     });
     assert.equal(mobile.scrollY, 0);
     assert.ok(mobile.width > 0 && mobile.height > 0, "canvas 要有實際尺寸");
-    // 實測 390px：工具列 192px＋卡片標題 142px＋標記列 109px 之後 canvas 頂約 607px；換 order 前在 1300px 以外。
-    // 驗「圖進首屏且至少一半可見」；卡片標題與標記列的手機高度屬後續收斂，不在本項。
-    assert.ok(mobile.top < mobile.innerHeight - 120, `canvas 上緣要在首屏：${JSON.stringify(mobile)}`);
-    assert.ok(mobile.visible >= 0.5 * mobile.height, `canvas 至少一半在首屏：${JSON.stringify(mobile)}`);
+    assert.equal(mobile.bodyFits, true, "390px body 不可橫向溢出");
+    // CUA-07 實測 390px：工具列 192px＋卡片標題 142px＋標記列 109px 之後 canvas 頂約 607px（56% 可見）。
+    // 第五批③收斂卡片標題（標題與動作同列、副標獨占一列）與標記列（圖例籤自然寬度），canvas 頂要壓到 560px 內、至少六成可見。
+    assert.ok(mobile.headerHeight <= 100, `卡片標題列不得超過 100px：${JSON.stringify(mobile)}`);
+    assert.ok(mobile.titleLines <= 1 && mobile.subtitleLines <= 1, `標題與副標各一行：${JSON.stringify(mobile)}`);
+    assert.equal(mobile.legendChips, 5, "五個圖例籤都在");
+    assert.ok(mobile.markersHeight <= 80, `只有圖例時標記列不得超過 80px：${JSON.stringify(mobile)}`);
+    assert.ok(mobile.top <= 560, `canvas 上緣要在 560px 內：${JSON.stringify(mobile)}`);
+    assert.ok(mobile.visible >= 0.6 * mobile.height, `canvas 至少六成在首屏：${JSON.stringify(mobile)}`);
     assert.ok(mobile.top < mobile.summaryTop, "手機：圖表在摘要卡之前");
     // 圖真的畫出來了：有尺寸的 canvas 會把可見 K 線寫進 OHLC 表；只驗幾何會讓渲染例外也過關（複審 N8）。
     const ohlcRows = await page.locator("#technicalOhlc tbody tr").count();

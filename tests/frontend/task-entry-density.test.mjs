@@ -178,3 +178,21 @@ test("技術頁手機：圖表卡 order 排在摘要卡之前（只在 760px 區
   const chartIndex = html.indexOf('class="technical-chart-card"');
   assert.ok(summaryIndex > 0 && chartIndex > summaryIndex, "DOM 順序不變：摘要仍在圖表卡之前（只換 CSS order）");
 });
+
+test("技術頁手機：圖表卡標題列與標記列的收斂規則只在 760px 區塊內（第五批③）；放大鈕保留無障礙名稱", () => {
+  const blocks = mediaBlocks(styles, "@media (max-width: 760px)");
+  const mobile = blocks.map((block) => block.text).join("\n");
+  const outside = blocks.reduce((css, block) => css.replace(block.text, ""), styles);
+  const rules = [
+    [/\.technical-chart-card > header > div:first-child\s*\{[^}]*display:\s*contents;/, "標題區 div 以 display: contents 讓標題、副標直接進格線"],
+    [/\.technical-chart-card > header > div:first-child > span\s*\{[^}]*grid-column:\s*1 \/ -1;/, "副標獨占第二列（跨兩欄）"],
+    [/\.technical-chart-card header \.technical-zoom-open span\s*\{[^}]*display:\s*none;/, "放大鈕手機只留圖示（特異性要壓過基底的 header span block）"],
+    [/\.technical-chart-marker\.is-legend\s*\{[^}]*flex:\s*0 1 auto;/, "圖例籤回到自然寬度"],
+  ];
+  for (const [pattern, why] of rules) {
+    assert.match(mobile, pattern, `手機區塊內要有：${why}`);
+    assert.doesNotMatch(outside, pattern, `不得出現在手機區塊外：${why}`);
+  }
+  assert.match(styles, /\.technical-chart-marker\s*\{[^}]*flex:\s*1 1 calc\(50% - 8px\);/, "關鍵價位籤在手機仍是半寬（只放寬圖例籤）");
+  assert.match(html, /id="technicalZoomOpen"[^>]*aria-label="放大 K 線圖"/, "放大鈕文字在手機藏起來後，名稱由 aria-label 提供");
+});

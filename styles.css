@@ -7657,6 +7657,51 @@ details[data-overnight-warnings-fold] > .overnight-warning {
     min-width: 132px;
   }
 
+  /* 第五批③（2026-09-09）：手機圖表卡標題列與標記列收斂。實測 390px 標題列 142px（動作區 205px 把標題擠到 121px，
+     標題折兩行、副標折三行）、標記列 109px（五個圖例籤各占半寬、排三列），canvas 頂在 607px 只露 56%。
+     標題列改「標題｜動作」同列、副標獨占第二列（外層 div 以 display: contents 讓子元素直接進格線）；
+     放大鈕手機只留圖示（aria-label 保留名稱）、徽章不再撐 82px；圖例籤回到自然寬度（關鍵價位籤仍半寬）。 */
+  .technical-chart-card > header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 4px;
+  }
+
+  .technical-chart-card > header > div:first-child {
+    display: contents;
+  }
+
+  .technical-chart-card > header > div:first-child > strong {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: center;
+    font-size: 20px;
+  }
+
+  .technical-chart-card > header > div:first-child > span {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin-top: 0;
+  }
+
+  .technical-chart-card > header > .technical-head-actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  /* 基底 .technical-chart-card header span 是 (0,1,2) 的 display: block，這裡要更高特異性才藏得住文字。 */
+  .technical-chart-card header .technical-zoom-open span {
+    display: none;
+  }
+
+  .technical-chart-card header em {
+    min-width: 0;
+  }
+
+  .technical-chart-marker.is-legend {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
   .watch-manage-bar,
   .watch-manage-actions {
     align-items: stretch;
