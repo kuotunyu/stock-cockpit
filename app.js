@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v39";
+const APP_SHELL_VERSION = "stock1-shell-v40";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -498,6 +498,9 @@ const searchState = {
   query: "",
   loading: false,
   remote: [],
+  // /api/symbols 信封的 generatedAt／dataQuality／warnings：遠端列的漲跌來自官方整批 reference（最近收盤），
+  // 不是 MIS 即時；以前整個信封只留 results，使用者看到 +2.07% 卻不知道那是哪一天的。
+  remoteMeta: null,
   error: "",
   timer: 0,
 };
@@ -1291,17 +1294,17 @@ function formatForeignDealerReconcile(institutional) {
 
 function renderDataTrustCompact() {
   const tone = getDataTrustTone();
+  // mixed 有兩種來源：真有收盤備援檔，或只是後端回了警告／降級。標題「部分備援」配「收盤備援 0 檔」自相矛盾，
+  // 只有 fallbackCount > 0 才叫部分備援，其餘叫資料降級（tone 本身不變，CSS 與既有測試沿用）。
   const toneText = {
     good: "資料正常",
-    mixed: "部分備援",
+    mixed: (dataState.fallbackCount || 0) > 0 ? "部分備援" : "資料降級",
     warn: "需要確認",
   }[tone];
   const sourceLabel = getSelectedSourceLabel();
   const updated = dataState.lastUpdated || marketState.lastUpdated || "尚未更新";
-  const realtime = dataState.realtimeCount || 0;
-  const fallback = dataState.fallbackCount || 0;
   const detail = getSelectedSource() === "official"
-    ? `即時 ${realtime} 檔 / 收盤備援 ${fallback} 檔`
+    ? describeQuoteBatch().trustDetail
     : isBrokerSourceReady()
       ? "券商行情已設定"
       : "券商未設定，會回官方資料";
@@ -4516,6 +4519,83 @@ function isTaiwanMarketSession(date = new Date()) {
   return clock.minutes >= 9 * 60 && clock.minutes <= 13 * 60 + 35;
 }
 
+// 報價批次目前處在哪個時段。純函式：只讀時鐘與 marketSessionState，測試可傳固定 now 或整個覆寫。
+// 日曆優先（今天且 tradingDay 為布林）、無日曆時週末啟發、「開盤」直接委派 isTaiwanMarketSession（不重寫第二套邊界），
+// 其餘依 09:00 分成開盤前與收盤後。這是顯示口徑，不改任何價格合併、提醒觸發或輪詢規則。
+function getQuoteSessionPhase(now = new Date()) {
+  const clock = getTaiwanClockParts(now);
+  const session = marketSessionState.stock;
+  const calendarApplies = session?.date === clock.isoDate && typeof session.tradingDay === "boolean";
+  if (calendarApplies && !session.tradingDay) return "holiday";
+  if (!calendarApplies && (clock.weekday === 0 || clock.weekday === 6)) return "weekend";
+  if (isTaiwanMarketSession(now)) return "open";
+  return clock.minutes < 9 * 60 ? "pre-open" : "after-close";
+}
+
+// 一份口徑、四個出口（狀態列、來源 pill、資料可信度卡、更多→資料源明細）。
+// 盤中字串與舊版一字不差；收盤後改稱「今日收盤」；開盤前／週末／休市改稱「最近行情 MM/DD」並用「取得」而非「更新」。
+// realtimeCount 是 MIS 回了非 stale 價的檔數——收盤後它仍是「今天的最後成交」，不是「現在的即時」。
+function describeQuoteBatch(phase = getQuoteSessionPhase()) {
+  const realtime = dataState.realtimeCount || 0;
+  const fallback = dataState.fallbackCount || 0;
+  const latestIso = getCurrentTradeDate();
+  const todayIso = getTaiwanClockParts().isoDate;
+  // 收盤後但畫面上多數行情日不是今天（整批尚未更新）：按最近行情標日期，不冒稱今日收盤。
+  const effective = phase === "after-close" && latestIso && latestIso !== todayIso ? "stale-close" : phase;
+  if (effective === "open") {
+    return {
+      phase, noun: "即時", count: realtime, fallback, fallbackNoun: "收盤價", verb: "更新", dateLabel: "",
+      statusCount: `即時 ${realtime} 檔${fallback ? `（${fallback} 檔為收盤價）` : ""}`,
+      sourceMeta: `即時 ${realtime}${fallback ? ` / 備援 ${fallback}` : ""}`,
+      trustDetail: `即時 ${realtime} 檔 / 收盤備援 ${fallback} 檔`,
+      moreDetail: `${realtime} 檔即時 / ${fallback} 檔收盤備援`,
+    };
+  }
+  if (effective === "after-close") {
+    return {
+      phase, noun: "今日收盤", count: realtime, fallback, fallbackNoun: "收盤備援", verb: "取得", dateLabel: compactDateLabel(todayIso),
+      statusCount: `今日收盤 ${realtime} 檔${fallback ? `（${fallback} 檔為收盤備援）` : ""}`,
+      sourceMeta: `今日收盤 ${realtime}${fallback ? ` / 備援 ${fallback}` : ""}`,
+      trustDetail: `今日收盤 ${realtime} 檔 / 收盤備援 ${fallback} 檔`,
+      moreDetail: `${realtime} 檔今日收盤 / ${fallback} 檔收盤備援`,
+    };
+  }
+  const dateLabel = latestIso ? compactDateLabel(latestIso) : "";
+  const noun = dateLabel ? `最近行情 ${dateLabel}` : "最近行情";
+  const count = dataState.quoteCount || realtime + fallback;
+  return {
+    phase, noun, count, fallback: 0, fallbackNoun: "", verb: "取得", dateLabel,
+    statusCount: `${noun} ・ ${count} 檔`,
+    sourceMeta: `${noun} ${count}`,
+    trustDetail: `${noun} ・ ${count} 檔`,
+    moreDetail: `${count} 檔最近行情${dateLabel ? `（${dateLabel}）` : ""}`,
+  };
+}
+
+// 到價提醒等說明裡「用哪種價判斷」的名詞：盤中才是即時價。
+function quotePriceNoun(phase = getQuoteSessionPhase()) {
+  if (phase === "open") return "最新即時價";
+  if (phase === "after-close") return "今日收盤價";
+  return "最近收盤價";
+}
+
+// 更多→資料源：/api/market-session 回的開休市警告以前只存在 marketSessionState.warnings，沒人渲染。
+function renderMarketSessionWarnings() {
+  const warnings = (marketSessionState.warnings || []).filter(Boolean);
+  if (!warnings.length) return "";
+  return `<p class="more-session-warning" title="${escapeHtml(warnings.join("\n"))}">開休市狀態：${escapeHtml(warnings.slice(0, 2).join("；"))}${warnings.length > 2 ? `（另有 ${warnings.length - 2} 則）` : ""}</p>`;
+}
+
+// 盤中選股頁首的 scope note：非盤中不能再寫「即時・秒級更新」。
+function renderScreenerScopeNote() {
+  const lead = document.querySelector("[data-screener-scope-lead]");
+  const cadence = document.querySelector("[data-screener-scope-cadence]");
+  if (!lead || !cadence) return;
+  const open = getQuoteSessionPhase() === "open";
+  lead.textContent = open ? "即時" : "最近行情";
+  cadence.textContent = open ? "動能・觀察用：秒級更新、本機粗估" : "動能・觀察用：非盤中不更新、本機粗估";
+}
+
 async function ensureMarketSessionStatus({ force = false } = {}) {
   const today = getTaiwanClockParts().isoDate;
   const current = marketSessionState.stock;
@@ -4748,9 +4828,7 @@ function renderSourceSwitch() {
     return;
   }
   if (dataState.lastUpdated) {
-    const realtimeText = dataState.realtimeCount ? `即時 ${dataState.realtimeCount}` : "即時 0";
-    const fallbackText = dataState.fallbackCount ? ` / 備援 ${dataState.fallbackCount}` : "";
-    meta.textContent = `官方 / ${realtimeText}${fallbackText} / ${dataState.lastUpdated}`;
+    meta.textContent = `官方 / ${describeQuoteBatch().sourceMeta} / ${dataState.lastUpdated}`;
   } else {
     meta.textContent = "官方 / 等待更新";
   }
@@ -4789,19 +4867,34 @@ function renderDataStatus() {
       const closedLabel = closedToday
         ? `今日休市${marketSessionState.stock.holidayName ? `（${marketSessionState.stock.holidayName}）` : ""}`
         : "";
-      const fallbackText = dataState.fallbackCount ? `（${dataState.fallbackCount} 檔為收盤價）` : "";
+      // 2026-09-09（CUA-04）：時段口徑。舊版不分盤中／盤後一律「即時 N 檔 ・ HH:MM:SS 更新」，
+      // 凌晨看到「即時 44」得自己去對明細的「最後成交 09/08」。盤中字串維持不變（既有測試釘住）。
+      const phase = closedToday ? "holiday" : getQuoteSessionPhase();
+      const batch = describeQuoteBatch(phase);
+      const calendarKnown = marketSessionState.stock?.date === today && typeof marketSessionState.stock?.tradingDay === "boolean";
+      const calendarNote = calendarKnown ? "" : "（開休市日曆尚未確認）";
+      const sourceName = dataState.source || "官方資料";
       // 資料到了、但部分即時源失敗（realtimeError）也要有出口：以前這句話只存在於 payload 裡，
       // 狀態列從頭到尾不提，使用者只會看到「即時 N 檔」比平常少。
       const partialText = dataState.error ? " ・ 部分即時源失敗" : "";
       refreshStatus.textContent = closedToday
         ? `${closedLabel} ・ 最近行情 ${dataState.lastUpdated || "載入中"}`
         : dataState.lastUpdated
-          ? `官方行情 ・ 即時 ${dataState.realtimeCount || 0} 檔${fallbackText}${partialText} ・ ${dataState.lastUpdated} 更新`
+          ? `官方行情 ・ ${batch.statusCount}${partialText} ・ ${dataState.lastUpdated} ${batch.verb}`
           : "官方行情 ・ 載入中…";
+      const dateText = batch.dateLabel ? `（${batch.dateLabel}）` : "";
+      const phaseTitle = batch.phase === "open"
+        ? `來源：${sourceName}。盤中每 10 秒自動更新；策略與選股欄位為本機推估，價格以官方行情為準。`
+        : batch.phase === "after-close" && batch.noun === "今日收盤"
+          ? `來源：${sourceName}。今日已收盤${calendarNote}；這些是今天的最後成交／收盤價，不再每 10 秒變動。下一交易日 09:00 起恢復盤中更新。`
+          : batch.phase === "after-close"
+            ? `來源：${sourceName}。今日已收盤${calendarNote}；畫面上多數行情日期是${dateText}，不是今天，請依個股日期判讀。`
+            : batch.phase === "pre-open"
+              ? `來源：${sourceName}。尚未開盤${calendarNote}；畫面是前一交易日${dateText}的最後成交／收盤價。09:00 開盤後每 10 秒更新。`
+              : `來源：${sourceName}。非交易日${calendarNote}；畫面是最近交易日${dateText}的收盤價。`;
       refreshStatus.title = closedToday
         ? `${closedLabel}；個股不做 10 秒輪詢，畫面顯示最近交易日行情。期貨夜盤另依期交所行情判定。`
-        : `來源：${dataState.source || "官方資料"}。盤中每 10 秒自動更新；策略與選股欄位為本機推估，價格以官方行情為準。`
-          + (dataState.error ? `\n${dataState.error}（其餘檔位仍是這一輪取得的）` : "");
+        : phaseTitle + (dataState.error ? `\n${dataState.error}（其餘檔位仍是這一輪取得的）` : "");
     } else if (getSelectedSource() === "broker") {
       refreshStatus.textContent = `券商行情 ・ ${dataState.error || (dataState.lastUpdated ? `${dataState.lastUpdated} 更新` : "等待更新")}`;
       refreshStatus.title = "個股報價來自富邦行情；指數與歷史資料仍使用官方來源。";
@@ -4818,6 +4911,7 @@ function renderDataStatus() {
     sourceStateEl.textContent = getSelectedSourceLabel();
   }
   renderSourceSwitch();
+  renderScreenerScopeNote();
 }
 
 function formatMarketMove(value) {
@@ -5631,7 +5725,7 @@ function renderMorePanel() {
   const sourceLabel = getSelectedSourceLabel();
   const sourceTone = currentSource === "official" && !dataState.error ? "is-good" : "is-warn";
   const sourceMeta = currentSource === "official"
-    ? `${dataState.realtimeCount || 0} 檔即時 / ${dataState.fallbackCount || 0} 檔收盤備援`
+    ? describeQuoteBatch().moreDetail
     : brokerInfo?.message || dataState.error || "券商 API 未設定";
   const sourceDetail = currentSource === "official"
     ? dataState.source || officialInfo?.description || "TWSE MIS + official daily close fallback"
@@ -5766,6 +5860,7 @@ function renderMorePanel() {
         <div><dt>券商</dt><dd>${escapeHtml(brokerInfo?.message || "券商 API 未設定")}</dd></div>
       </dl>
       <p>${escapeHtml(sourceDetail)}</p>
+      ${renderMarketSessionWarnings()}
       <button class="more-primary" data-action="refresh-data" type="button">重新抓目前來源</button>
       ${renderOperationalStatus()}
     `,
@@ -11055,8 +11150,13 @@ function renderPriceAlertBox(stock) {
     .join("");
   const price = Number(stock.price);
   const placeholder = Number.isFinite(price) ? String(price) : "目標價";
+  // 「僅在頁面顯示於前景時」這句是背景分頁不監控的誠實聲明，各時段都保留（既有測試釘住）；
+  // 只有「用哪種價判斷」跟著時段換名詞，非盤中另註明現在沒有新成交。
+  const phase = getQuoteSessionPhase();
   const runtimeHint = getSelectedSource() === "official"
-    ? "僅在頁面顯示於前景時，每 10 秒用最新即時價判斷"
+    ? phase === "open"
+      ? "僅在頁面顯示於前景時，每 10 秒用最新即時價判斷"
+      : `僅在頁面顯示於前景時，每 10 秒用最新行情判斷（目前非盤中，只有${quotePriceNoun(phase)}，不會有新成交）`
     : "券商模式不自動輪詢；按「重新整理」取得新報價後才判斷";
   box.innerHTML = `
     <div class="alert-head">
@@ -11808,6 +11908,7 @@ function resetSearchState() {
   searchState.query = "";
   searchState.loading = false;
   searchState.remote = [];
+  searchState.remoteMeta = null;
   searchState.error = "";
   window.clearTimeout(searchState.timer);
   searchState.timer = null;
@@ -11825,10 +11926,16 @@ async function loadSymbolSearch(query, token = searchState.token) {
     const payload = await fetchApi(`/api/symbols?q=${encodeURIComponent(query)}`, { signal: controller.signal });
     if (searchState.token !== token || searchState.query !== query) return;
     searchState.remote = payload.results || [];
+    searchState.remoteMeta = {
+      generatedAt: payload.generatedAt || "",
+      degraded: payload.dataQuality?.degraded === true,
+      warnings: Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean).map(String) : [],
+    };
     searchState.error = "";
   } catch (error) {
     if (searchState.token !== token || searchState.query !== query) return;
     searchState.remote = [];
+    searchState.remoteMeta = null;
     searchState.error = error.message;
   } finally {
     if (searchState.token === token && searchState.query === query) {
@@ -11848,6 +11955,7 @@ function handleSearchInput(value) {
   searchState.query = text;
   searchState.error = "";
   searchState.remote = [];
+  searchState.remoteMeta = null;
   searchState.loading = Boolean(text);
   window.clearTimeout(searchState.timer);
   searchState.timer = null;
@@ -11893,6 +12001,12 @@ function renderSearchResults() {
     )
     .join("");
 
+  // 遠端列的漲跌是官方整批 reference 的最近收盤，不是 MIS 即時；把信封的取得時間與降級狀態放在遠端列上方。
+  const meta = searchState.remoteMeta;
+  const remoteHeadHtml = remoteRows.length && meta?.generatedAt
+    ? `<div class="search-status search-asof" title="${escapeHtml(meta.warnings.join("\n"))}">官方清單 ・ ${escapeHtml(formatLocalTime(meta.generatedAt))} 取得 ・ 漲跌為最近收盤${meta.degraded ? " ・ 資料降級" : ""}</div>`
+    : "";
+
   const total = matches.length + remoteRows.length;
   const statusHtml = searchState.loading && !total
     ? `<div class="search-status">正在搜尋官方清單...</div>`
@@ -11902,7 +12016,7 @@ function renderSearchResults() {
         ? `<div class="search-status">${text ? `找不到「${escapeHtml(query.trim())}」，試試其他關鍵字。` : "輸入股票代號或名稱（例如 2330 或 台積電）。ETF 也可以加入自選股。"}</div>`
         : "";
 
-  el.searchResults.innerHTML = `${localHtml}${remoteHtml}${statusHtml}`;
+  el.searchResults.innerHTML = `${localHtml}${remoteHeadHtml}${remoteHtml}${statusHtml}`;
 }
 
 function showToast(message, duration, replaceKey) {

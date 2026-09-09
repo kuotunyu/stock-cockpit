@@ -5812,6 +5812,21 @@ body.is-locked .app-shell {
   color: var(--error-text);
 }
 
+/* 官方清單的取得時間與資料降級：遠端結果上方一行，字級守 --fs-note 下限 */
+.search-status.search-asof {
+  padding: 8px 14px;
+  color: var(--muted-2);
+  font-size: var(--fs-note);
+}
+
+/* 更多→資料源：開休市狀態警告 */
+.more-session-warning {
+  color: var(--warn-text);
+  font-size: var(--fs-note);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 /* 名詞 / 觀念解釋 modal：沿用 .modal-backdrop，內容較高、可滾動、分類 chips + 搜尋 */
 .glossary-modal {
   display: flex;

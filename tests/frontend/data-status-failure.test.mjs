@@ -20,6 +20,9 @@ import { createAppWindow } from "../helpers/dom-harness.mjs";
 let app;
 before(async () => {
   app = await createAppWindow();
+  // 2026-09-09（CUA-04）：狀態列文案依時段分流，盤中字串維持本檔釘住的舊版。jsdom 沒有時鐘注入，
+  // 把時段釘成 open，這檔才不會在 14:30 或 02:00 執行時變成時間炸彈（npm run test:dates 會掃）。
+  app.evalIn(`window.__origQuotePhase = getQuoteSessionPhase; getQuoteSessionPhase = () => "open";`);
 });
 after(() => app.cleanup());
 
