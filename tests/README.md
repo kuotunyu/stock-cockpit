@@ -137,7 +137,17 @@ tests/
 │             modal-manager / render-lifecycle（輪詢合併、焦點與表單草稿）/
 │             trade-v2-form / trade-edit-conflict /
 │             trade-product-directory / account-backup（下載、預覽、確認、帳號切換競態）/
-│             service-worker（自有 cache namespace 與離線策略）
+│             service-worker（自有 cache namespace 與離線策略）/
+│             fabricated-zero-guards（捏造零防線：現價／均量比／單量缺值不當 0）/
+│             data-status-session（行情時段口徑：盤中／收盤／盤前／週末／休市用語）/
+│             guest-entry-copy（訪客到帳本的登入銜接、焦點與本機自選保留）/
+│             technical-context-transition（切週期／切股票不外漏舊資料）/
+│             task-entry-density（任務入口不被說明推出首屏；760px 區塊規則釘住）/
+│             price-alerts／watchlist-state（另含背景同步完成後的受保護重繪）
+├─ browser/   真實 Chromium（npm run test:browser，序列執行）：layout／interaction smoke、PWA 生命週期、
+│             app-version、trade-plans、portfolio-plan-risk、glossary、operational-status、
+│             focus-card-readability（手機重點卡股名與 200% 文字）、technical-mobile-chart（手機 K 線首屏與 200%）、
+│             guest-login-entry、task-entry-density、strategy-empty-quality、search-help-races
 └─ live/      upstream-shape（opt-in 上游契約；網路失敗會 skip，不算已驗證）
 ```
 
