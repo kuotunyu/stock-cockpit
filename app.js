@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v47";
+const APP_SHELL_VERSION = "stock1-shell-v48";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -4819,7 +4819,13 @@ async function ensureStockForDetailCode(code) {
     if (pick) stock = upsertStockFromPick(pick);
   }
   // 盤後沒有自動刷新：新加入的股票補抓一次法人與融資券（伺服器端有快取，成本很低）。
-  if (stock && !stock.institutional) loadInstitutionalData();
+  // 這兩個是不等待的背景載入：法人資料到了之後不做裸 render()（使用者可能已切到別頁、焦點停在某張卡上），
+  // 改走受保護重繪，與 refreshSupplementalMarketData({ liveUpdate: true }) 同一做法。
+  if (stock && !stock.institutional) {
+    void loadInstitutionalData({ renderNow: false }).then((applied) => {
+      if (applied && !document.hidden) renderLiveDataUpdate();
+    });
+  }
   if (stock && !stock.margin) loadMarginData();
   return stock || null;
 }
@@ -13470,7 +13476,8 @@ document.addEventListener("click", async (event) => {
       render();
       showToast(`已加入自選股清單 ${state.watchList}`);
       // 名稱搜尋來的股票可能還沒有報價：補抓一次，列表才會立刻出現。
-      ensureStockForDetailCode(code).then(() => render());
+      // 補抓完成是背景回呼，使用者可能已切到別頁或正在打字：走受保護重繪，不裸 render()。
+      ensureStockForDetailCode(code).then(() => renderLiveDataUpdate());
       return;
     }
     closeSearchModal({ restoreFocus: false });

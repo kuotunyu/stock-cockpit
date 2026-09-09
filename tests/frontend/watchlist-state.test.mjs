@@ -187,3 +187,57 @@ test("syncWatchListsToServer 完成後的重繪是背景重繪：不得把使用
   assert.equal(result.stillInList, true, "前提：伺服器回的清單套回本機");
   assert.equal(result.activeIsCard, true, `同步完成的重繪後焦點要還在同一檔處置卡，實際 ${result.activeDesc}`);
 });
+
+test("搜尋加入自選後補抓報價完成的重繪是背景重繪：不得把使用者已移到的處置卡換掉", async () => {
+  // 加入自選的點擊處理器先同步 render()，再 ensureStockForDetailCode(code).then(() => render()) 補抓報價；
+  // 那個 .then 是背景回呼，使用者這時可能已切到別頁、焦點停在某張卡片上。
+  const heldQuotes = [];
+  const app = await createAppWindow({ fetchRoutes: {
+    "/api/symbols": { ok: true, results: [{ code: "6488", name: "環球晶", exchange: "TPEx" }] },
+    "/api/quotes": (raw) => (raw.includes("6488")
+      ? new Promise((resolve) => heldQuotes.push(resolve))
+      : { ok: false, error: "dom-harness offline" }),
+    "/api/watchlists": (raw, init) => (init?.method === "PUT"
+      ? { ok: true, rev: 2, lists: JSON.parse(init.body).lists }
+      : { ok: true, rev: 1, lists: { 1: [], 2: [], 3: [] } }),
+  } });
+  apps.push(app);
+  await app.settle();
+  app.evalIn(`state.screen = "watchlist"; state.watchList = "1"; render();`);
+  app.doc.getElementById("watchAdd").click();
+  const input = app.doc.getElementById("searchInput");
+  input.value = "環球";
+  input.dispatchEvent(new app.win.Event("input", { bubbles: true }));
+  for (let round = 0; round < 40 && !app.doc.querySelector('.search-result[data-code="6488"]'); round += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const result = app.doc.querySelector('.search-result[data-code="6488"]');
+  assert.ok(result, "前提：搜尋結果要出現 6488");
+  result.click();
+  await app.settle(8);
+  assert.equal(app.evalIn(`watchLists[1].has("6488")`), true, "前提：已加入清單 1");
+  assert.equal(heldQuotes.length, 1, "前提：補抓報價的請求已發出且被扣住");
+
+  // 使用者在補抓期間切到處置看板、焦點停在 6488 卡上。
+  const focused = JSON.parse(app.evalIn(`(() => {
+    surveillanceBoardState.data = { ok: true, queryDate: "2026-09-07", counts: { inDisposition: 1 }, warnings: [],
+      inDisposition: [{ code: "6488", name: "環球晶", exchange: "TPEx", interval: "5", startSlash: "2026/09/01", endSlash: "2026/09/12", daysToRelease: 5 }] };
+    surveillanceBoardState.loaded = true;
+    state.screen = "surveillance"; state.surveillanceTab = "inDisposition"; render();
+    const card = document.querySelector('.surv-card[data-code="6488"]'); card.focus();
+    return JSON.stringify({ ok: document.activeElement === card });
+  })()`));
+  assert.equal(focused.ok, true, "前提：卡片已聚焦");
+
+  const now = new Date().toISOString();
+  heldQuotes[0]({ ok: true, sourceKey: "official", source: "測試", generatedAt: now, realtimeCount: 1, fallbackCount: 0, warnings: [], dataQuality: { degraded: false },
+    quotes: [{ code: "6488", name: "環球晶", exchange: "TPEx", price: 100, previousClose: 99, open: 99.5, high: 101, low: 98.5, change: 1, changePct: 1.01, unitLots: 1, volumeLots: 1000, turnoverPct: 1, source: "測試", sourceKind: "realtime", asOf: now, priceStale: false }] });
+  await app.settle(4);
+  const after = JSON.parse(app.evalIn(`JSON.stringify({
+    stockLoaded: stocks.some((s) => s.code === "6488"),
+    activeIsCard: Boolean(document.activeElement) && document.activeElement.matches('.surv-card[data-code="6488"]'),
+    activeDesc: document.activeElement ? document.activeElement.tagName + (document.activeElement.dataset.code ? "[" + document.activeElement.dataset.code + "]" : "") : null,
+  })`));
+  assert.equal(after.stockLoaded, true, "前提：報價補抓完成、6488 進入 stocks（背景回呼確實跑了）");
+  assert.equal(after.activeIsCard, true, `補抓完成的重繪後焦點要還在同一檔處置卡，實際 ${after.activeDesc}`);
+});
