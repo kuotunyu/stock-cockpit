@@ -707,7 +707,6 @@
       <section class="trade-plan-modal" role="dialog" aria-modal="true" aria-labelledby="tradePlanTitle" tabindex="-1">
         <header><h2 id="tradePlanTitle">我的交易計畫</h2><button type="button" class="watch-secondary-action" data-trade-plan-close aria-label="關閉交易計畫">關閉</button></header>
         <p>停損是你明確保存的意圖。草稿與首次啟用基準分開保存，修改保留歷史；不會自動下單或依到價提醒猜測計畫。</p>
-        <p>計畫與完整歷史容量 120 KiB，並同時受每人 1000 計畫／每計畫 100 次修改上限約束。匯出保留全部內容，不會自動騰出容量。</p>
         <div class="trade-plan-actions"><button type="button" class="watch-secondary-action" data-trade-plan-new>新增手動計畫</button><button type="button" class="watch-secondary-action" data-action="download-personal-backup">匯出個人資料</button></div>
         <details class="trade-plan-existing"><summary>已保存的計畫</summary><div id="tradePlanList"></div></details>
         <div id="tradePlanEvidence"></div>
@@ -748,6 +747,7 @@
           </details>
           <button type="submit" class="more-primary">保存計畫</button>
         </form>
+        <details class="trade-plan-limits"><summary>保存限制與匯出</summary><p>計畫與完整歷史容量 120 KiB，並同時受每人 1000 計畫／每計畫 100 次修改上限約束。超限時會在保存處直接提示；匯出保留全部內容，不會自動騰出容量。</p></details>
       </section>
     </div>
 

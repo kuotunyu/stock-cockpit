@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v42";
+const APP_SHELL_VERSION = "stock1-shell-v43";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -1733,7 +1733,7 @@ document.addEventListener("focusin", (event) => {
   if (entry && !entry.root.contains(event.target)) focusDialogEntry(entry);
 });
 
-function setLoginGateVisible(visible, message = "", { intent = null, trigger = undefined, openerResolver = null, restoreFocus = true } = {}) {
+function setLoginGateVisible(visible, message = "", { intent = null, trigger = undefined, openerResolver = null } = {}) {
   if (el.loginMessage) el.loginMessage.textContent = message;
   if (!el.loginGate) return;
   if (visible) {
@@ -1745,14 +1745,14 @@ function setLoginGateVisible(visible, message = "", { intent = null, trigger = u
     });
   } else {
     authState.loginIntent = null;
-    closeDialogLayer(el.loginGate, { restoreFocus });
+    closeDialogLayer(el.loginGate);
   }
 }
 
 // 2026-09-09（CUA-06，computer use 心得 F06）：庫存空態與到價提醒框的原地登入入口。
-// opener 是會被行情輪詢重繪的 panel 內按鈕，關閉時用 resolver 找回同身分的新節點；
-// 登入成功後 loginWithCredentials 依 intent 把焦點放到重繪後的穩定目標，而不是還給即將消失的登入按鈕
-// （renderHoldingsPanel 在 activeElement 落在 panel 內時會 early-return，畫面會卡在「需要登入」）。
+// 取消時 opener 是會被行情輪詢重繪的 panel 內按鈕，關閉時用 resolver 找回同身分的新節點。
+// 登入成功時 activateAuthenticatedUser → clearUserScopedState 會先清空 panel，舊按鈕已不在、不會被回焦；
+// 若不另行處理，焦點會留在已隱藏的登入閘裡等於落空，所以 loginWithCredentials 在載入完成後依 intent 聚焦原處的穩定目標。
 function openLoginGateFor(intent, trigger, message) {
   const openerResolver = intent === "holdings"
     ? () => el.holdingsPanel?.querySelector("[data-login-holdings]") || null
@@ -2352,12 +2352,12 @@ async function loginWithCredentials(username, password) {
       method: "POST",
       body: JSON.stringify({ username, password }),
     });
-    // 從庫存／提醒框開的登入：關閘時不把焦點還給即將被重繪移除的登入按鈕，載入完成後再放到原處的穩定目標。
+    // 從庫存／提醒框開的登入：先記下來源，載入完成後把焦點放到原處的穩定目標（見 openLoginGateFor 說明）。
     const intent = authState.loginIntent;
     activateAuthenticatedUser(payload.user);
     authState.error = "";
     authState.warnings = payload.warnings || {};
-    setLoginGateVisible(false, "", { restoreFocus: !intent });
+    setLoginGateVisible(false);
     await loadWatchListsFromServer();
     await loadAlertsFromServer();
     await loadTradesFromServer();
@@ -4176,6 +4176,9 @@ function renderHoldingsPanel() {
   const top3Share = totalValue > 0 && holdingValues.length > 1
     ? Math.round(([...holdingValues].sort((a, b) => b - a).slice(0, 3).reduce((sum, v) => sum + v, 0) / totalValue) * 100)
     : null;
+  // 零持股時風險區收成一句＋原生 details 放在表單之後（2026-09-09 CUA-07）：以前空庫存也先渲染整個風險區
+  // （自身表單、兩個 details）才到「記第一筆」。展開狀態跨行情重繪保留，做法同 verificationFoldAttributes。
+  const previousRiskFoldOpen = Boolean(panel.querySelector("[data-holdings-risk-fold]")?.open);
   panel.innerHTML = `
     <div class="hold-summary">
       <div><span>總市值</span><strong>${unpriced ? '--' : formatMoney(totalValue)}</strong>${unpriced ? `<small>已報價市值 ${formatMoney(totalValue)}</small>` : ''}</div>
@@ -4190,7 +4193,7 @@ function renderHoldingsPanel() {
         <div data-dividend-summary="receivable"><span>待入帳</span><strong>${formatMoney(dividendReceivableGross)}</strong></div>
         <div data-dividend-summary="received"><span>已入帳淨額</span><strong>${formatMoney(dividendReceivedNet)}</strong></div>
       </div>` : ""}
-    ${renderPortfolioPlanRisk(buildHoldingsPlanRisk())}
+    ${holdings.length ? renderPortfolioPlanRisk(buildHoldingsPlanRisk()) : ""}
     ${renderMissingCorporateActions()}
     ${unpriced ? `<p class="hold-hint">${unpriced} 檔暫無報價，未計入市值與未實現損益，報酬率分母也只算已報價部位（開盤後會自動補上）；「總成本」仍為全部持股。</p>` : ""}
     ${closedPositionDividendHtml}
@@ -4255,6 +4258,8 @@ function renderHoldingsPanel() {
         <p>只有券商對帳單可確認當沖資格與實際費稅；部分當沖請填真正配對的股數。</p>
       </details>
     </form>
+    ${holdings.length ? "" : `<p class="hold-hint" data-holdings-risk-empty>目前沒有庫存，沒有需要估算的持股計畫風險；記第一筆後這裡會顯示情境減值、計畫覆蓋與集中度。</p>
+    <details class="hold-plan-risk-fold" data-holdings-risk-fold${previousRiskFoldOpen ? " open" : ""}><summary>持股計畫風險設定（警示值、管理計畫）</summary>${renderPortfolioPlanRisk(buildHoldingsPlanRisk())}</details>`}
     <p class="hold-hint">費稅留白時，依成交日、商品與目前的預設券商方案估算：0.1425% × <label class="hold-discount">折數 <input data-trade-discount type="number" step="0.05" min="0.1" max="1" value="${settings.feeDiscount}" aria-label="預設手續費折數" ${tradesState.mutating ? "disabled" : ""} /></label>、每筆最低 ${settings.minFee} 元。這只是估算方案，不是所有券商的法定費率；填入對帳單金額後以實際值為準。成本採加權平均法，未實現損益尚未預扣未來賣出成本。</p>
     <div class="trade-list">
       <div class="trade-list-head"><strong>交易紀錄</strong><small>${tradesState.records.length} 筆${tradesState.records.length > tradesHistoryLimit ? `（目前顯示最近 ${tradesHistoryLimit} 筆）` : ""}・賣出列的損益為該筆已實現</small>${tradesState.records.length > tradesHistoryLimit ? `<button type="button" data-trade-load-more>再顯示 ${Math.min(40, tradesState.records.length - tradesHistoryLimit)} 筆</button>` : ""}</div>
@@ -6456,9 +6461,19 @@ function renderOvernightGroups() {
 
   el.overnightGroups.hidden = false;
   el.overnightGroups.classList.toggle("is-single-group", state.overnightView !== "overview");
-  const warnings = (overnightState.warnings || [])
-    .map((warning) => `<span class="overnight-warning">⚠ ${escapeHtml(warning)}</span>`)
-    .join("");
+  // 2026-09-09（CUA-07，computer use 心得 F07）：警告一則一整行、不限則數，手機首屏被四則說明占滿還沒看到股票。
+  // 沿 renderDataTrustCompact 的「前 2 則＋（另有 N 則）」範本，但全文放原生 details（手機沒有 hover，不能只存 title）；
+  // 展開狀態依同一個 data 鍵跨行情重繪保留（同 verificationFoldAttributes 的做法），⚠ 按鈕 toast 與摘要條單一 wrap 流不變。
+  const warningList = (overnightState.warnings || []).filter(Boolean);
+  const warningSpan = (warning) => `<span class="overnight-warning">⚠ ${escapeHtml(warning)}</span>`;
+  let warnings = "";
+  if (warningList.length > 2) {
+    const previousFold = el.overnightGroups.querySelector("details[data-overnight-warnings-fold]");
+    warnings = warningList.slice(0, 2).map(warningSpan).join("")
+      + `<details data-overnight-warnings-fold${previousFold?.open ? " open" : ""}><summary>另有 ${warningList.length - 2} 則資料警告，展開看全部 ${warningList.length} 則</summary>${warningList.map(warningSpan).join("")}</details>`;
+  } else {
+    warnings = warningList.map(warningSpan).join("");
+  }
   el.overnightGroups.innerHTML = `
     <div class="overnight-summary">
       <div class="overnight-summary-primary">

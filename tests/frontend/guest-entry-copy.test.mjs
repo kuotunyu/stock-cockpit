@@ -1,7 +1,7 @@
 // 訪客到帳本的登入銜接（computer use 心得 F06／CUA-06）：
 // 庫存空態與到價提醒框只叫人「到更多 → 帳號管理」，沒有原地入口；登入頁說「登入後才有自選股」但訪客本來就能加自選；
-// 更嚴重的是訪客的本機自選在每次重載都被 /me 401 路徑清掉（N1），以及登入成功後焦點被還給 panel 內即將消失的按鈕，
-// renderHoldingsPanel 因 activeElement 在 panel 內 early-return，畫面卡在「需要登入」（N5）。
+// 更嚴重的是訪客的本機自選在每次重載都被 /me 401 路徑清掉（N1）。登入成功後焦點也要有明確落點：
+// activateAuthenticatedUser 會先清空 panel，舊登入按鈕不在，若不另行聚焦，焦點會留在已隱藏的登入閘裡落空（N5 修正後的實際結論）。
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { createAppWindow } from "../helpers/dom-harness.mjs";
@@ -71,7 +71,7 @@ test("取消登入：登入閘開著時行情輪詢重繪了庫存區，關閉�
     window.__loginButton = el.holdingsPanel.querySelector("[data-login-holdings]");
     window.__loginButton.focus(); window.__loginButton.click();
   `);
-  await app.settle(2); // 登入閘的初始焦點在 requestAnimationFrame 內才移到帳號欄
+  await app.settle(8); // 登入閘的初始焦點在 requestAnimationFrame 內才移到帳號欄（jsdom 約 16ms 一幀）
   const rerendered = json(app, `(() => {
     // 模擬 10 秒輪詢：登入閘開著、焦點在帳號欄，panel 不在 activeElement 內所以會真的重繪，舊按鈕節點被換掉。
     const focusInGate = document.getElementById("loginGate").contains(document.activeElement);
@@ -101,7 +101,9 @@ test("登入成功：庫存直接顯示帳本表單，焦點落在表單代號�
     const now = new Date().toISOString();
     const routes = {
       "/api/auth/login": { ok: true, user: { id: "u9", username: "friend", displayName: "朋友", role: "user" }, warnings: {} },
-      "/api/watchlists": { ok: true, rev: 1, lists: { 1: [], 2: [], 3: [] } },
+      // 第一個載入慢一點回來，讓關閘的回焦 rAF 在任何回應之前先觸發，時序與真瀏覽器一致。
+      // 實測：activateAuthenticatedUser 已先清空 panel，舊按鈕不在，回焦不會發生；沒有明確聚焦的話焦點會留在隱藏的登入閘裡落空。
+      "/api/watchlists": new Promise((resolve) => setTimeout(() => resolve({ ok: true, rev: 1, lists: { 1: [], 2: [], 3: [] } }), 60)),
       "/api/alerts": { ok: true, rev: 1, alerts: [] },
       "/api/trades": { ok: true, schemaVersion: 2, rev: 1, settings: { feeDiscount: 0.6, minFee: 20 }, records: [], quarantinedRecords: [],
         portfolio: { holdings: [], realized: [], totals: { cost: 0, marketValue: 0, unrealizedPnl: 0, realizedPnl: 0 } }, missingCorporateActions: [] },

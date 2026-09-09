@@ -7605,6 +7605,16 @@ body.is-locked .app-shell {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* 手機：K 線圖排在四張摘要卡之前（2026-09-09 CUA-07）。桌機摘要是一列、圖本來就在首屏；手機摘要疊成四張
+     會把圖推到約 830px 以下。只換 order 不動 DOM：摘要卡沒有可聚焦元素，Tab 順序完全不變。 */
+  .technical-chart-card {
+    order: 4;
+  }
+
+  .technical-summary {
+    order: 5;
+  }
+
   .technical-price-canvas {
     height: 420px;
   }
