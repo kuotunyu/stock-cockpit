@@ -95,8 +95,23 @@ test("② 日 K → 週 K：載入期間 OHLC 表清空並標明新週期載入�
   assert.match(during.ohlcHead, /2330 週K/, "表頭要標新週期");
   assert.match(during.ohlcHead, /載入中/);
   assert.doesNotMatch(during.ohlcHead, /日K/);
+  // 複審 S2：載入中若 canvas 有尺寸而 resize／rAF 觸發 drawTechnicalChart(null)，不能把表頭洗成預設日K。
+  const afterRedraw = app.evalIn(`(() => {
+    const orig = prepareCanvas;
+    prepareCanvas = () => ({ context: document.createElement("canvas").getContext("2d"), width: 300, height: 200 });
+    try { drawTechnicalChart(null); } finally { prepareCanvas = orig; }
+    return (document.querySelector("#technicalOhlc p") || {}).textContent || "";
+  })()`);
+  assert.match(afterRedraw, /2330 週K/);
+  assert.match(afterRedraw, /載入中/);
+  assert.doesNotMatch(afterRedraw, /日K/);
   await app.reply(0, payload("2330", "week"));
-  assert.equal(app.snapshot().dataPeriod, "week");
+  const done = app.snapshot();
+  assert.equal(done.dataPeriod, "week");
+  // 複審 N4：資料到了但 canvas 沒尺寸（隱藏分頁、jsdom）時，表頭不能停在「載入中」，要明說等布局後重繪。
+  assert.match(done.ohlcHead, /2330 週K/);
+  assert.doesNotMatch(done.ohlcHead, /載入中/);
+  assert.match(done.ohlcHead, /尚未布局/);
 });
 
 test("③ 載入期間的 rAF 重繪不得把舊週期 K 線畫回（scheduleCanvasRedraw 要看 loading）", async (t) => {

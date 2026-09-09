@@ -2,13 +2,18 @@
 // 00:01 的頂部寫「官方／即時 44」、明細寫「最後成交 09/08 13:30」，使用者得自己跨區比對才知道凌晨沒有台股成交。
 // 一份時段口徑 getQuoteSessionPhase → describeQuoteBatch 供四個出口共用；盤中字串一字不改（既有 data-status-failure 釘住），
 // 非盤中改稱「今日收盤／最近行情 MM/DD」與「取得」。jsdom 沒有時鐘注入：純函式吃 now，渲染測試覆寫頂層 function。
-import test, { before, after } from "node:test";
+import test, { before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createAppWindow } from "../helpers/dom-harness.mjs";
 
 let app;
 before(async () => { app = await createAppWindow(); });
 after(() => app.cleanup());
+// 每個案例結束都還原時段覆寫與登入狀態，失敗的斷言不得把釘住的 phase 漏給後面的案例。
+afterEach(() => app.evalIn(`if (window.__origPhase) getQuoteSessionPhase = window.__origPhase; authState.user = null; stocks.length = 0;`));
+
+// 用台北今天的日期造行情，讓「今日收盤」的判定真的走到 latestIso === todayIso。
+const todayStocks = (count = 2) => `Array.from({ length: ${count} }, (_, i) => ({ code: String(2330 + i), name: "今日股" + i, price: 100, asOf: getTaiwanClockParts().isoDate.replaceAll("-", "/") + " 13:30:00", spark: [], groups: [], strategies: [] }))`;
 
 const json = (expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 const phaseAt = (isoUtc, calendar = null) => app.evalIn(`(() => {
@@ -66,8 +71,25 @@ test("S4 open：四個出口的盤中字串與舊版完全相同", () => {
   restorePhase();
 });
 
-test("S2 after-close：改稱今日收盤與取得，不再說即時、不再宣稱每 10 秒更新", () => {
-  const view = renderWithPhase("after-close");
+test("S2 after-close（多數行情日是今天）：改稱今日收盤與取得，不再說即時、不再宣稱每 10 秒更新", () => {
+  app.evalIn(`stocks.length = 0; ${todayStocks(2)}.forEach((s) => stocks.push(s));`);
+  app.evalIn(`window.__seedToday = true;`);
+  const view = (() => {
+    app.evalIn(`
+      window.__origPhase = window.__origPhase || getQuoteSessionPhase;
+      getQuoteSessionPhase = () => "after-close";
+      Object.assign(dataState, { mode: "official", source: "TWSE + TPEx", lastUpdated: "10:12:33", quoteCount: 120, realtimeCount: 118, fallbackCount: 2, warnings: [], degraded: false, error: "", failedSince: "", loadedOnce: true });
+      marketSessionState.stock = { date: "1970-01-01", tradingDay: true };
+      renderDataStatus();
+    `);
+    return {
+      status: app.evalIn(`document.getElementById("refreshStatus").textContent`),
+      title: app.evalIn(`document.getElementById("refreshStatus").title`),
+      sourceMeta: app.evalIn(`document.getElementById("sourceMeta").textContent`),
+      trust: app.evalIn(`renderDataTrustCompact()`),
+      more: app.evalIn(`describeQuoteBatch(getQuoteSessionPhase()).moreDetail`),
+    };
+  })();
   assert.match(view.status, /今日收盤 118 檔（2 檔為收盤備援）/);
   assert.match(view.status, /10:12:33 取得/);
   assert.doesNotMatch(view.status, /即時 118 檔/);
@@ -77,6 +99,28 @@ test("S2 after-close：改稱今日收盤與取得，不再說即時、不再宣
   assert.equal(view.sourceMeta, "官方 / 今日收盤 118 / 備援 2 / 10:12:33");
   assert.match(view.trust, /今日收盤 118 檔 \/ 收盤備援 2 檔/);
   assert.equal(view.more, "118 檔今日收盤 / 2 檔收盤備援");
+  restorePhase();
+});
+
+test("S2b after-close 但整批未更新（多數行情日是三天前）：按最近行情標日期，不冒稱今日收盤", () => {
+  const seed = [
+    { code: "2330", name: "台積電", price: 2470, asOf: "2026/07/08 13:30:00", spark: [], groups: [], strategies: [] },
+    { code: "0050", name: "元大台灣50", price: 109.65, asOf: "2026/07/08 13:30:00", spark: [], groups: [], strategies: [] },
+  ];
+  const view = renderWithPhase("after-close", {}, seed);
+  assert.match(view.status, /最近行情 07\/08 ・ 120 檔/);
+  assert.doesNotMatch(view.status, /今日收盤/);
+  assert.match(view.title, /不是今天/);
+  assert.equal(view.sourceMeta, "官方 / 最近行情 07/08 120 / 10:12:33");
+  assert.match(view.more, /120 檔最近行情（07\/08）/);
+  restorePhase();
+});
+
+test("S2c after-close 但沒有可核對的行情日：只說最近行情，不標日期、不冒稱今日", () => {
+  const view = renderWithPhase("after-close", {}, []);
+  assert.match(view.status, /最近行情 ・ 120 檔/);
+  assert.doesNotMatch(view.status, /今日收盤|07\/|09\//);
+  assert.match(view.title, /無法確認為今天/);
   restorePhase();
 });
 
@@ -144,9 +188,13 @@ test("到價提醒說明：盤中說即時價，收盤後說今日收盤價，�
   const hints = json(`(() => {
     window.__origPhase = window.__origPhase || getQuoteSessionPhase;
     authState.user = { id: "u1", username: "admin", role: "admin" };
-    const stock = { code: "2330", name: "台積電", price: 2470, spark: [], groups: [], strategies: [] };
+    stocks.length = 0; ${todayStocks(2)}.forEach((s) => stocks.push(s));
+    const stock = stocks[0];
     const read = (phase) => { getQuoteSessionPhase = () => phase; renderPriceAlertBox(stock); return el.priceAlertBox.textContent.replace(/\\s+/g, " "); };
     const out = { open: read("open"), afterClose: read("after-close"), weekend: read("weekend") };
+    // 整批未更新：多數行情日不是今天 → 與狀態列一致用最近收盤價
+    stocks.forEach((s) => { s.asOf = "2026/07/08 13:30:00"; });
+    out.staleClose = read("after-close");
     getQuoteSessionPhase = window.__origPhase;
     return out;
   })()`);
@@ -154,6 +202,29 @@ test("到價提醒說明：盤中說即時價，收盤後說今日收盤價，�
   assert.match(hints.afterClose, /今日收盤價/);
   assert.doesNotMatch(hints.afterClose, /最新即時價/);
   assert.match(hints.weekend, /最近收盤價/);
+  assert.match(hints.staleClose, /最近收盤價/, "整批未更新時不說今日收盤價（與狀態列一致）");
+});
+
+test("時段切換時 10 秒 tick 只重畫狀態列：syncQuotePhaseCopy 在 phase 改變時回 true 並更新文字", () => {
+  const result = json(`(() => {
+    window.__origPhase = window.__origPhase || getQuoteSessionPhase;
+    Object.assign(dataState, { mode: "official", source: "TWSE + TPEx", lastUpdated: "13:30:05", quoteCount: 120, realtimeCount: 118, fallbackCount: 2, warnings: [], degraded: false, error: "", failedSince: "", loadedOnce: true });
+    marketSessionState.stock = { date: "1970-01-01", tradingDay: true };
+    stocks.length = 0; ${todayStocks(2)}.forEach((s) => stocks.push(s));
+    getQuoteSessionPhase = () => "open"; lastQuotePhase = null;
+    const first = syncQuotePhaseCopy();
+    const openText = document.getElementById("refreshStatus").textContent;
+    const same = syncQuotePhaseCopy();
+    getQuoteSessionPhase = () => "after-close";
+    const changed = syncQuotePhaseCopy();
+    const closedText = document.getElementById("refreshStatus").textContent;
+    return { first, same, changed, openText, closedText };
+  })()`);
+  assert.equal(result.first, true);
+  assert.equal(result.same, false, "時段沒變就不重畫");
+  assert.equal(result.changed, true);
+  assert.match(result.openText, /即時 118 檔/);
+  assert.match(result.closedText, /今日收盤 118 檔/);
 });
 
 test("盤中選股 scope note：非盤中不再寫「即時・秒級更新」", () => {

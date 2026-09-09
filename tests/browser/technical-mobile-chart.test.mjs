@@ -40,6 +40,10 @@ test("390px：分析後 canvas 進首屏且至少一半可見、在摘要卡之�
     assert.ok(mobile.top < mobile.innerHeight - 120, `canvas 上緣要在首屏：${JSON.stringify(mobile)}`);
     assert.ok(mobile.visible >= 0.5 * mobile.height, `canvas 至少一半在首屏：${JSON.stringify(mobile)}`);
     assert.ok(mobile.top < mobile.summaryTop, "手機：圖表在摘要卡之前");
+    // 圖真的畫出來了：有尺寸的 canvas 會把可見 K 線寫進 OHLC 表；只驗幾何會讓渲染例外也過關（複審 N8）。
+    const ohlcRows = await page.locator("#technicalOhlc tbody tr").count();
+    assert.ok(ohlcRows > 0, `OHLC 表要有可見 K 線列：${ohlcRows}`);
+    assert.doesNotMatch(await page.locator("#technicalOhlc p").textContent(), /載入中|尚未布局/);
     await fixture.captureSnapshot("technical-mobile-chart-390");
 
     await page.setViewportSize({ width: 1280, height: 1000 });

@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v44";
+const APP_SHELL_VERSION = "stock1-shell-v45";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -1761,6 +1761,11 @@ function openLoginGateFor(intent, trigger, message) {
 }
 
 function focusLoginIntentTarget(intent) {
+  // 使用者在等待期間已經到別的欄位打字（登入閘以外的可編輯控制項）就不搶焦點。
+  const active = document.activeElement;
+  const typingElsewhere = Boolean(active) && active !== document.body && !el.loginGate?.contains(active)
+    && (["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName) || active.isContentEditable === true);
+  if (typingElsewhere) return;
   const target = intent === "holdings"
     ? el.holdingsPanel?.querySelector('[data-trade-form] input[name="code"]') || el.holdingsPanel?.querySelector("button, input, select")
     : intent === "alerts"
@@ -2328,8 +2333,9 @@ async function loadCurrentUser({ showLogin = false } = {}) {
     // 從沒登入過的訪客拿到 401 是常態（朋友第一次開頁）：沒有任何帳號資料可清，本機自選必須留著
     // （2026-09-09 CUA-06 N1：以前每次重載都在這裡把訪客的 localStorage 清單清掉）。
     // 曾登入過（旗標在）或目前仍有帳號的 401 才是到期／失效，照舊清空並開閘。
-    const quietGuest = error.status === 401 && !authState.user && !hadSessionBefore();
-    if (!quietGuest) clearUserScopedState({ renderNow: false });
+    // 不論 401、5xx、斷線或逾時：沒有帳號、也沒登入過，就沒有東西可清。
+    const nothingToClear = !authState.user && !hadSessionBefore();
+    if (!nothingToClear) clearUserScopedState({ renderNow: false });
     authState.error = error.message;
     if (error.status === 401 && hadSessionBefore()) {
       // 兩週後再開 PWA：以前畫面靜靜變成未登入模式，庫存變「需要登入」、提醒不再同步，沒有任何地方說「到期」。
@@ -2361,6 +2367,9 @@ async function loginWithCredentials(username, password) {
     await loadWatchListsFromServer();
     await loadAlertsFromServer();
     await loadTradesFromServer();
+    // 帳本載入（該 loader 已 render）後立刻把焦點放到原處；不等後面可能長達一兩分鐘的隔日沖掃描，
+    // 也不在 await 之後另做整頁 render()（會清掉使用者在別頁打到一半的草稿）。
+    if (intent) focusLoginIntentTarget(intent);
     await loadBrokerSettings();
     await loadSourceStatus();
     if (state.morePanel === "system" && authState.user?.role === "admin") {
@@ -2372,10 +2381,6 @@ async function loginWithCredentials(username, password) {
     await Promise.all([loadMarketSummary(), loadMarketData(), loadOvernightSignals()]);
     if (state.screen === "technical" && !technicalState.loading) loadTechnicalAnalysis();
     showToast(`已登入：${authState.user?.displayName || authState.user?.username || ""}`);
-    if (intent) {
-      render();
-      focusLoginIntentTarget(intent);
-    }
   } catch (error) {
     authState.error = error.message;
     setLoginGateVisible(true, error.message);
@@ -4591,8 +4596,8 @@ function describeQuoteBatch(phase = getQuoteSessionPhase()) {
   const fallback = dataState.fallbackCount || 0;
   const latestIso = getCurrentTradeDate();
   const todayIso = getTaiwanClockParts().isoDate;
-  // 收盤後但畫面上多數行情日不是今天（整批尚未更新）：按最近行情標日期，不冒稱今日收盤。
-  const effective = phase === "after-close" && latestIso && latestIso !== todayIso ? "stale-close" : phase;
+  // 收盤後但畫面上多數行情日不是今天（整批尚未更新），或根本沒有可核對的行情日：按最近行情標示，不冒稱今日收盤。
+  const effective = phase === "after-close" && latestIso !== todayIso ? "stale-close" : phase;
   if (effective === "open") {
     return {
       phase, noun: "即時", count: realtime, fallback, fallbackNoun: "收盤價", verb: "更新", dateLabel: "",
@@ -4626,8 +4631,20 @@ function describeQuoteBatch(phase = getQuoteSessionPhase()) {
 // 到價提醒等說明裡「用哪種價判斷」的名詞：盤中才是即時價。
 function quotePriceNoun(phase = getQuoteSessionPhase()) {
   if (phase === "open") return "最新即時價";
-  if (phase === "after-close") return "今日收盤價";
+  // 收盤後只有多數行情日確實是今天才叫今日收盤價；整批未更新或沒有可核對日期時與狀態列一致用「最近收盤價」。
+  if (phase === "after-close" && getCurrentTradeDate() === getTaiwanClockParts().isoDate) return "今日收盤價";
   return "最近收盤價";
+}
+
+// 時段切換（例如 13:35 收盤）時 refreshLiveData 不再重繪，狀態列會停在「即時…更新」直到下次操作；
+// 10 秒 tick 順便比對時段，只在變化時重畫狀態列（含來源 pill、scope note），不動其他畫面。
+let lastQuotePhase = null;
+function syncQuotePhaseCopy() {
+  const phase = getQuoteSessionPhase();
+  if (phase === lastQuotePhase) return false;
+  lastQuotePhase = phase;
+  renderDataStatus();
+  return true;
 }
 
 // 更多→資料源：/api/market-session 回的開休市警告以前只存在 marketSessionState.warnings，沒人渲染。
@@ -4939,7 +4956,7 @@ function renderDataStatus() {
         : batch.phase === "after-close" && batch.noun === "今日收盤"
           ? `來源：${sourceName}。今日已收盤${calendarNote}；這些是今天的最後成交／收盤價，不再每 10 秒變動。下一交易日 09:00 起恢復盤中更新。`
           : batch.phase === "after-close"
-            ? `來源：${sourceName}。今日已收盤${calendarNote}；畫面上多數行情日期是${dateText}，不是今天，請依個股日期判讀。`
+            ? `來源：${sourceName}。今日已收盤${calendarNote}；${batch.dateLabel ? `畫面上多數行情日期是 ${batch.dateLabel}，不是今天` : "畫面上的行情日期無法確認為今天"}，請依個股日期判讀。`
             : batch.phase === "pre-open"
               ? `來源：${sourceName}。尚未開盤${calendarNote}；畫面是前一交易日${dateText}的最後成交／收盤價。09:00 開盤後每 10 秒更新。`
               : `來源：${sourceName}。非交易日${calendarNote}；畫面是最近交易日${dateText}的收盤價。`;
@@ -7043,6 +7060,8 @@ async function loadOvernightSignals({ notify = false } = {}) {
   overnightState.error = "";
   overnightState.errorCode = "";
   overnightState.startedAt = Date.now();
+  // 第一次載入或逾時後重試：立刻畫出等待狀態（含經過時間），不讓逾時卡與重試按鈕在請求期間原地不動。
+  if (!overnightState.loaded) renderOvernightGroups();
   void loadMarketBreadth();
   try {
     const payload = await fetchApi("/api/overnight?limit=20");
@@ -9240,8 +9259,15 @@ function renderTechnicalAnalysis() {
   `;
   el.technicalDetailGrid.innerHTML = renderTechnicalDetails(data);
   renderTechnicalChartMarkers(data);
+  const drawToken = technicalState.requestId;
   requestAnimationFrame(() => {
-    drawTechnicalChart(data);
+    // 2026-09-09（CUA-08 第四處外漏）：這個閉包抓的是排程當下的 payload。切週期時 click 先 render()（舊資料）
+    // 再啟動載入，下一幀這裡會把舊週期 K 線畫回剛清空的圖——正是「週K 分析中」配舊指標的現場。
+    if (technicalState.loading || technicalState.requestId !== drawToken || technicalState.data !== data) return;
+    // canvas 尚無尺寸（隱藏分頁、尚未布局）時 drawTechnicalChart 回 null、不會更新 OHLC 表；
+    // 不能讓表頭停在上一步的「載入中」，明說等圖表布局後再重繪（複審 N4）。
+    const drawn = drawTechnicalChart(data);
+    if (drawn === null) renderChartOhlc(el.technicalChart, data, [], { note: "圖表尚未布局，重繪後更新" });
     drawTechnicalMacdChart(data);
   });
 }
@@ -9503,7 +9529,9 @@ function drawTechnicalChart(data, options = {}) {
   context.fillRect(0, 0, width, height);
 
   if (!data?.candles?.length) {
-    renderChartOhlc(canvas,null,[]);
+    // 載入中由 resize／rAF 觸發的重繪不能把「代號 週期（載入中）」表頭洗成預設的日K（CUA-08 複審 S2）。
+    if (canvas === el.technicalChart && technicalState.loading) renderChartOhlc(canvas, { code: state.technicalCode, period: state.technicalPeriod }, [], { note: "載入中" });
+    else renderChartOhlc(canvas,null,[]);
     context.fillStyle = "#b8cadc";
     context.font = "700 18px Microsoft JhengHei, sans-serif";
     context.textAlign = "center";
@@ -13686,6 +13714,7 @@ async function refreshLiveData() {
 window.setInterval(() => {
   void refreshLiveData();
   void refreshBackgroundPriceAlerts();
+  syncQuotePhaseCopy();
 }, 10 * 1000);
 
 document.addEventListener("visibilitychange", () => {

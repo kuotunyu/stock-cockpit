@@ -5819,12 +5819,37 @@ body.is-locked .app-shell {
   font-size: var(--fs-note);
 }
 
-/* 訪客的原地登入入口（庫存空態、到價提醒框）：觸控目標 44px、內文字級 */
+/* 訪客的原地登入入口（庫存空態、到價提醒框）與逾時重試：觸控目標 44px、內文字級 */
 [data-login-holdings],
-[data-login-alerts] {
+[data-login-alerts],
+[data-overnight-retry],
+[data-strategy-retry] {
   min-height: 44px;
   margin-top: 8px;
   padding: 0 16px;
+  font-size: var(--fs-body);
+}
+
+/* 隔日沖警告折疊：展開後每則獨占一行（外層 grid 只作用於直接子元素），summary 是 44px 觸控目標 */
+details[data-overnight-warnings-fold] > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-size: var(--fs-body);
+  color: var(--warn-text);
+}
+
+details[data-overnight-warnings-fold] > .overnight-warning {
+  display: block;
+  margin-top: 5px;
+}
+
+/* 零持股時的持股計畫風險折疊：summary 與同區其他 details 一樣是 44px 觸控目標 */
+.hold-plan-risk-fold > summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding-block: 10px;
   font-size: var(--fs-body);
 }
 

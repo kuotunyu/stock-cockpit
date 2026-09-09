@@ -272,6 +272,9 @@ test('逾時：畫面說伺服器可能仍在處理並提供重試按鈕；重�
   await setImmediate();
   assert.equal(app.requests.length,requestsBefore+1,'按重試才再送一次');
   assert.equal(app.evalIn('overnightState.loading'),true);
+  const retrying=app.evalIn('el.overnightGroups.innerHTML');
+  assert.match(retrying,/is-loading/,'按重試後要立刻看到等待狀態');
+  assert.doesNotMatch(retrying,/data-overnight-retry/,'逾時卡與重試按鈕不得在請求期間原地不動');
   app.requests.at(-1).resolve(response(async()=>({ok:false,error:'重試仍失敗'})));
   await setImmediate();await setImmediate();
   const strategy=app.win.loadStrategyBoard();

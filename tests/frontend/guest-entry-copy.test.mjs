@@ -154,6 +154,56 @@ test("從未登入過的訪客：/me 401 不清本機自選，重新整理後清
   assert.equal(app.evalIn(`document.getElementById("loginGate").hidden`), true, "從沒登入過的 401 維持安靜");
 });
 
+test("從未登入過的訪客：/me 回 503 或斷線也不清本機自選（沒有東西可清，不看狀態碼）", async () => {
+  const app = await guestApp({
+    fetchRoutes: { "/api/auth/me": { __status: 503, error: "暫時無法確認登入狀態" } },
+    beforeApp: (win) => {
+      win.localStorage.removeItem("stock1.hadSession.v1");
+      win.localStorage.setItem("stock1-watch-lists-v1", JSON.stringify({ 1: ["2330"], 2: [], 3: [] }));
+    },
+  });
+  assert.equal(app.evalIn(`authState.user`), null);
+  assert.equal(app.evalIn(`watchLists[1].has("2330")`), true, "5xx 也不得清訪客的本機自選");
+  assert.deepEqual(JSON.parse(app.evalIn(`localStorage.getItem("stock1-watch-lists-v1")`)), { 1: ["2330"], 2: [], 3: [] });
+});
+
+test("登入成功時使用者已在別的欄位打字：不搶焦點、不清草稿", async () => {
+  const app = await guestApp();
+  const result = JSON.parse(await app.evalIn(`(async () => {
+    state.screen = "watchlist"; state.watchList = "hold"; render();
+    const button = el.holdingsPanel.querySelector("[data-login-holdings]");
+    button.focus(); button.click();
+    const now = new Date().toISOString();
+    const routes = {
+      "/api/auth/login": { ok: true, user: { id: "u9", username: "friend", role: "user" }, warnings: {} },
+      // 等待期間使用者切去技術分析打了代號
+      "/api/watchlists": new Promise((resolve) => setTimeout(() => {
+        state.screen = "technical"; render();
+        const input = document.getElementById("technicalCode"); input.value = "2454 打到一半"; input.focus();
+        resolve({ ok: true, rev: 1, lists: { 1: [], 2: [], 3: [] } });
+      }, 30)),
+      "/api/alerts": { ok: true, rev: 1, alerts: [] },
+      "/api/trades": { ok: true, schemaVersion: 2, rev: 1, settings: { feeDiscount: 0.6, minFee: 20 }, records: [], quarantinedRecords: [],
+        portfolio: { holdings: [], realized: [], totals: { cost: 0, marketValue: 0, unrealizedPnl: 0, realizedPnl: 0 } }, missingCorporateActions: [] },
+      "/api/broker/settings": { configured: false }, "/api/sources": { ok: true, selected: "official", sources: {} },
+      "/api/quotes": { ok: true, sourceKey: "official", source: "測試", generatedAt: now, realtimeCount: 0, fallbackCount: 0, warnings: [], quotes: [] },
+      "/api/markets": { ok: true, source: "測試", generatedAt: now, warnings: [], markets: {} },
+      "/api/overnight": { ok: true, asOf: "2026-09-08", source: "測試", surveillanceCount: 0, warnings: [], groups: { strongContinuation: [], volumeDanger: [], pullbackReversal: [] } },
+    };
+    window.__origFetchApi = fetchApi;
+    fetchApi = async (path) => { const key = Object.keys(routes).find((prefix) => String(path).startsWith(prefix)); if (key) return routes[key]; throw Object.assign(new Error("unrouted " + path), { status: 404 }); };
+    try { await loginWithCredentials("friend", "pw"); } finally { fetchApi = window.__origFetchApi; }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const active = document.activeElement;
+    const out = { activeId: active ? active.id : null, value: document.getElementById("technicalCode").value, user: authState.user && authState.user.username };
+    state.screen = "watchlist"; technicalInputDirty = false; document.getElementById("technicalCode").value = ""; render();
+    return JSON.stringify(out);
+  })()`));
+  assert.equal(result.user, "friend");
+  assert.equal(result.activeId, "technicalCode", "使用者正在打字的欄位不得被搶焦點");
+  assert.equal(result.value, "2454 打到一半", "草稿不得被清掉");
+});
+
 test("曾登入過（旗標在）的 401：仍清掉上一個帳號的清單並開登入閘（既有到期契約不變）", async () => {
   const app = await guestApp({
     beforeApp: (win) => {
