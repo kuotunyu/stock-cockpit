@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v46";
+const APP_SHELL_VERSION = "stock1-shell-v47";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -2477,7 +2477,8 @@ async function syncWatchListsToServer() {
     if (mutationVersion === watchListMutationVersion) {
       applyWatchListsPayload(payload?.lists);
       saveWatchLists({ sync: false });
-      render();
+      // 與 syncAlertsToServer 同理：防抖後的背景回呼不得整頁裸 render()，否則使用者已切到別頁時焦點掉到 body、草稿被清。
+      renderLiveDataUpdate();
     } else {
       watchListSyncPending = true;
     }

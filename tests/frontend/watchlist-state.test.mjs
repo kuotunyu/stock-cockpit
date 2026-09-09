@@ -153,3 +153,37 @@ test("syncWatchListsToServer：延遲舊回應不得覆蓋期間內的較新本�
   assert.deepEqual(JSON.parse(app.evalIn(`JSON.stringify([...watchLists[1]])`)), ["1111", "2222"]);
   assert.equal(app.evalIn(`watchListsRev`), 3);
 });
+
+test("syncWatchListsToServer 完成後的重繪是背景重繪：不得把使用者正聚焦的處置卡換掉（與到價提醒同步同一類）", async () => {
+  // 與 price-alerts 的同型案例：加入自選後 350ms 防抖才 PUT /api/watchlists，回應可能落在使用者已切到別頁、
+  // 焦點停在某張卡片之後；成功路徑若用裸 render()，整頁重繪把卡換掉、焦點掉到 body。
+  const app = await createAppWindow();
+  apps.push(app);
+  const result = JSON.parse(await app.evalIn(`(async () => {
+    const orig = { put: putConfirmedResource };
+    authState.user = { id: "u1", username: "admin", role: "admin" };
+    watchLists[1].add("6488");
+    surveillanceBoardState.data = { ok: true, queryDate: "2026-09-07", counts: { inDisposition: 1 }, warnings: [],
+      inDisposition: [{ code: "6488", name: "環球晶", exchange: "TPEx", interval: "5", startSlash: "2026/09/01", endSlash: "2026/09/12", daysToRelease: 5 }] };
+    surveillanceBoardState.loaded = true;
+    state.screen = "surveillance"; state.surveillanceTab = "inDisposition";
+    render();
+    const card = document.querySelector('.surv-card[data-code="6488"]');
+    card.focus();
+    const before = document.activeElement === card;
+    putConfirmedResource = async (path, body) => ({ ok: true, rev: 2, lists: body.lists });
+    try {
+      await syncWatchListsToServer();
+    } finally {
+      putConfirmedResource = orig.put;
+    }
+    const active = document.activeElement;
+    return JSON.stringify({ before, rev: watchListsRev, stillInList: watchLists[1].has("6488"),
+      activeIsCard: Boolean(active) && active.matches('.surv-card[data-code="6488"]'),
+      activeDesc: active ? active.tagName + (active.dataset.code ? "[" + active.dataset.code + "]" : "") : null });
+  })()`));
+  assert.equal(result.before, true, "前提：卡片已聚焦");
+  assert.equal(result.rev, 2, "前提：同步成功並套用伺服器 rev");
+  assert.equal(result.stillInList, true, "前提：伺服器回的清單套回本機");
+  assert.equal(result.activeIsCard, true, `同步完成的重繪後焦點要還在同一檔處置卡，實際 ${result.activeDesc}`);
+});
