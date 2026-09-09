@@ -5819,6 +5819,15 @@ body.is-locked .app-shell {
   font-size: var(--fs-note);
 }
 
+/* 訪客的原地登入入口（庫存空態、到價提醒框）：觸控目標 44px、內文字級 */
+[data-login-holdings],
+[data-login-alerts] {
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 0 16px;
+  font-size: var(--fs-body);
+}
+
 /* 更多→資料源：開休市狀態警告 */
 .more-session-warning {
   color: var(--warn-text);

@@ -106,12 +106,16 @@ test("交易 409 retry：A 的延遲 GET 在切換 B 後不可重送或污染 B 
   );
 });
 
-test("冷啟動 auth/me=401：清除未驗證的 legacy localStorage 自選股", async (t) => {
+// 2026-09-09（CUA-06 N1）契約調整：這條原本釘「任何 401 都清 localStorage 自選」，但從沒登入過的訪客也被清掉，
+// 訪客每次重載自選都消失。現在只有「曾登入過（本機旗標在）或仍有帳號」的 401 才清——那才是上一個帳號的快取，
+// 不能滲入下一個帳號；從沒登入過的訪客保留本機清單（見 guest-entry-copy.test.mjs）。登入時仍以伺服器清單取代。
+test("冷啟動 auth/me=401 且曾登入過：清除上一個帳號的 legacy localStorage 自選股", async (t) => {
   const app = await createAppWindow({
     fetchRoutes: {
       "/api/auth/me": { ok: false, code: "AUTH_REQUIRED", error: "登入已逾期", __status: 401 },
     },
     beforeApp(win) {
+      win.localStorage.setItem("stock1.hadSession.v1", "1");
       win.localStorage.setItem("stock1-watch-lists-v1", JSON.stringify({ 1: ["9292"], 2: [], 3: [] }));
     },
   });
@@ -121,6 +125,7 @@ test("冷啟動 auth/me=401：清除未驗證的 legacy localStorage 自選股",
   assert.deepEqual(JSON.parse(app.evalIn("JSON.stringify([...watchLists[1]])")), []);
   assert.equal(app.evalIn("getTrackedQuoteCodes().includes('9292')"), false);
   assert.equal(app.evalIn("localStorage.getItem(WATCH_LIST_STORAGE_KEY)"), null);
+  app.evalIn(`closeDialogLayer(document.getElementById("loginGate"), { restoreFocus: false });`);
 });
 
 test("同帳號延遲 GET：不可蓋掉 watch／alerts／trades 較新的 PUT canonical", async (t) => {

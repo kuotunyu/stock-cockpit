@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v41";
+const APP_SHELL_VERSION = "stock1-shell-v42";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -299,6 +299,8 @@ const authState = {
   user: null,
   error: "",
   warnings: {},
+  // 登入閘從哪裡打開（"holdings"／"alerts"）：登入成功後回到原處續作，取消則回原 opener。
+  loginIntent: null,
 };
 let authScopeGeneration = 0;
 
@@ -1731,11 +1733,40 @@ document.addEventListener("focusin", (event) => {
   if (entry && !entry.root.contains(event.target)) focusDialogEntry(entry);
 });
 
-function setLoginGateVisible(visible, message = "") {
+function setLoginGateVisible(visible, message = "", { intent = null, trigger = undefined, openerResolver = null, restoreFocus = true } = {}) {
   if (el.loginMessage) el.loginMessage.textContent = message;
   if (!el.loginGate) return;
-  if (visible) openDialogLayer(el.loginGate, { initialFocus: "#loginUsername" });
-  else closeDialogLayer(el.loginGate);
+  if (visible) {
+    if (intent) authState.loginIntent = intent;
+    openDialogLayer(el.loginGate, {
+      initialFocus: "#loginUsername",
+      ...(trigger !== undefined ? { trigger } : {}),
+      openerResolver,
+    });
+  } else {
+    authState.loginIntent = null;
+    closeDialogLayer(el.loginGate, { restoreFocus });
+  }
+}
+
+// 2026-09-09（CUA-06，computer use 心得 F06）：庫存空態與到價提醒框的原地登入入口。
+// opener 是會被行情輪詢重繪的 panel 內按鈕，關閉時用 resolver 找回同身分的新節點；
+// 登入成功後 loginWithCredentials 依 intent 把焦點放到重繪後的穩定目標，而不是還給即將消失的登入按鈕
+// （renderHoldingsPanel 在 activeElement 落在 panel 內時會 early-return，畫面會卡在「需要登入」）。
+function openLoginGateFor(intent, trigger, message) {
+  const openerResolver = intent === "holdings"
+    ? () => el.holdingsPanel?.querySelector("[data-login-holdings]") || null
+    : () => el.priceAlertBox?.querySelector("[data-login-alerts]") || null;
+  setLoginGateVisible(true, message, { intent, trigger, openerResolver });
+}
+
+function focusLoginIntentTarget(intent) {
+  const target = intent === "holdings"
+    ? el.holdingsPanel?.querySelector('[data-trade-form] input[name="code"]') || el.holdingsPanel?.querySelector("button, input, select")
+    : intent === "alerts"
+      ? el.priceAlertBox?.querySelector('[data-alert-form] input[name="price"]') || el.priceAlertBox?.querySelector("button, input, select")
+      : null;
+  if (target?.isConnected && !target.closest("[inert], [hidden]")) target.focus({ preventScroll: true });
 }
 
 function captureAuthScope() {
@@ -2294,7 +2325,11 @@ async function loadCurrentUser({ showLogin = false } = {}) {
     return Boolean(authState.user);
   } catch (error) {
     authState.checked = true;
-    clearUserScopedState({ renderNow: false });
+    // 從沒登入過的訪客拿到 401 是常態（朋友第一次開頁）：沒有任何帳號資料可清，本機自選必須留著
+    // （2026-09-09 CUA-06 N1：以前每次重載都在這裡把訪客的 localStorage 清單清掉）。
+    // 曾登入過（旗標在）或目前仍有帳號的 401 才是到期／失效，照舊清空並開閘。
+    const quietGuest = error.status === 401 && !authState.user && !hadSessionBefore();
+    if (!quietGuest) clearUserScopedState({ renderNow: false });
     authState.error = error.message;
     if (error.status === 401 && hadSessionBefore()) {
       // 兩週後再開 PWA：以前畫面靜靜變成未登入模式，庫存變「需要登入」、提醒不再同步，沒有任何地方說「到期」。
@@ -2317,10 +2352,12 @@ async function loginWithCredentials(username, password) {
       method: "POST",
       body: JSON.stringify({ username, password }),
     });
+    // 從庫存／提醒框開的登入：關閘時不把焦點還給即將被重繪移除的登入按鈕，載入完成後再放到原處的穩定目標。
+    const intent = authState.loginIntent;
     activateAuthenticatedUser(payload.user);
     authState.error = "";
     authState.warnings = payload.warnings || {};
-    setLoginGateVisible(false);
+    setLoginGateVisible(false, "", { restoreFocus: !intent });
     await loadWatchListsFromServer();
     await loadAlertsFromServer();
     await loadTradesFromServer();
@@ -2335,6 +2372,10 @@ async function loginWithCredentials(username, password) {
     await Promise.all([loadMarketSummary(), loadMarketData(), loadOvernightSignals()]);
     if (state.screen === "technical" && !technicalState.loading) loadTechnicalAnalysis();
     showToast(`已登入：${authState.user?.displayName || authState.user?.username || ""}`);
+    if (intent) {
+      render();
+      focusLoginIntentTarget(intent);
+    }
   } catch (error) {
     authState.error = error.message;
     setLoginGateVisible(true, error.message);
@@ -3898,7 +3939,7 @@ function renderHoldingsPanel() {
   if (!active) return;
   if (panel.contains(document.activeElement)) return; // 表單輸入中不重繪
   if (!authState.user) {
-    panel.innerHTML = `<div class="hold-empty"><strong>庫存損益需要登入</strong><small>每個帳號的交易紀錄各自獨立，只有自己看得到。到「更多 → 帳號管理」登入。</small></div>`;
+    panel.innerHTML = `<div class="hold-empty"><strong>庫存損益需要登入</strong><small>每個帳號的交易紀錄各自獨立，只有自己看得到；登入後直接在這裡記第一筆。</small><button class="more-primary" data-login-holdings type="button">登入以使用交易帳本</button></div>`;
     return;
   }
   const settings = tradesState.settings;
@@ -5786,9 +5827,9 @@ function renderMorePanel() {
     {
       key: "system",
       icon: "users",
-      title: "帳號管理",
-      desc: "建立朋友帳號與登出",
-      status: authState.user?.role === "admin" ? "管理者" : "個人",
+      title: authState.user ? "帳號管理" : "登入帳號",
+      desc: authState.user ? "建立朋友帳號與登出" : "登入後使用同步自選、到價提醒與交易帳本",
+      status: authState.user ? (authState.user.role === "admin" ? "管理者" : "個人") : "未登入",
     },
     {
       key: "risk",
@@ -11219,16 +11260,19 @@ function renderPriceAlertBox(stock) {
   const placeholder = Number.isFinite(price) ? String(price) : "目標價";
   // 「僅在頁面顯示於前景時」這句是背景分頁不監控的誠實聲明，各時段都保留（既有測試釘住）；
   // 只有「用哪種價判斷」跟著時段換名詞，非盤中另註明現在沒有新成交。
+  // 與「更多 → 訊號提醒」同一份事實（tests/frontend/background-price-alerts 釘住的兩條路）：
+  // 前景每 10 秒；分頁切到背景改走背景監看（只抓有提醒的檔、盤中最快 30 秒一輪、發桌面通知）；瀏覽器整個關掉就收不到。
   const phase = getQuoteSessionPhase();
+  const backgroundNote = "；切到背景改為只監看有提醒的檔、盤中最快 30 秒一輪並發桌面通知；瀏覽器整個關掉就收不到（沒有伺服器推播）";
   const runtimeHint = getSelectedSource() === "official"
     ? phase === "open"
-      ? "僅在頁面顯示於前景時，每 10 秒用最新即時價判斷"
-      : `僅在頁面顯示於前景時，每 10 秒用最新行情判斷（目前非盤中，只有${quotePriceNoun(phase)}，不會有新成交）`
+      ? `頁面顯示於前景時每 10 秒用最新即時價判斷${backgroundNote}`
+      : `頁面顯示於前景時每 10 秒用最新行情判斷（目前非盤中，只有${quotePriceNoun(phase)}，不會有新成交）${backgroundNote}`
     : "券商模式不自動輪詢；按「重新整理」取得新報價後才判斷";
   box.innerHTML = `
     <div class="alert-head">
       <strong>到價提醒</strong>
-      <small>${authState.user ? `${runtimeHint}（跳提示＋音效，觸發一次即停）` : "登入後可設定（更多 → 帳號管理）"}</small>
+      <small>${authState.user ? `${runtimeHint}（跳提示＋音效，觸發一次即停）` : "登入後可建立到價提醒；提醒依帳號保存"}</small>
     </div>
     ${rows}
     ${authState.user ? `
@@ -11239,7 +11283,7 @@ function renderPriceAlertBox(stock) {
         </select>
         <input name="price" type="number" step="0.01" min="0.01" inputmode="decimal" placeholder="${escapeHtml(placeholder)}" aria-label="目標價" required />
         <button type="submit">新增</button>
-      </form>` : ""}
+      </form>` : `<button class="more-primary" data-login-alerts type="button">登入後建立提醒</button>`}
   `;
 }
 
@@ -13165,6 +13209,18 @@ document.addEventListener("click", async (event) => {
   // 關閉「看懂每個數字」浮層：點 ✕ 按鈕、或點半透明背景（點 modal 內容不會觸發）。
   if (event.target.closest("#strategyLegendClose") || event.target.id === "strategyLegend") {
     closeStrategyLegend();
+    return;
+  }
+
+  // 訪客的原地登入入口（庫存空態、到價提醒框）：記住來源，成功後回原處續作，取消回原按鈕。
+  const loginHoldings = event.target.closest("[data-login-holdings]");
+  if (loginHoldings) {
+    openLoginGateFor("holdings", loginHoldings, "登入以使用交易帳本；每個帳號的交易紀錄各自獨立");
+    return;
+  }
+  const loginAlerts = event.target.closest("[data-login-alerts]");
+  if (loginAlerts) {
+    openLoginGateFor("alerts", loginAlerts, "登入後可建立到價提醒；提醒依帳號保存");
     return;
   }
 
