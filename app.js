@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v43";
+const APP_SHELL_VERSION = "stock1-shell-v44";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -8594,8 +8594,11 @@ function renderSurvToolbar(tab) {
 function renderTechnicalSurveillance() {
   const box = el.technicalSurveillance;
   if (!box) return;
-  const surv = technicalState.data?.surveillance;
-  const halted = technicalState.data?.halted;
+  // 2026-09-09（CUA-08）：這段在 renderTechnicalAnalysis 的 loading return 之前執行，載入期間仍讀舊 payload，
+  // 從處置股切到正常股時整個等待期間都掛著上一檔的處置／停牌徽章。載入中一律不顯示舊資料。
+  const source = technicalState.loading ? null : technicalState.data;
+  const surv = source?.surveillance;
+  const halted = source?.halted;
   if (!surv && !halted) { box.hidden = true; box.innerHTML = ""; return; }
   box.hidden = false;
   // 停牌最嚴重（完全不能交易），優先顯示；若同時另有處置/注意標籤，併進文字提示。
@@ -9144,6 +9147,9 @@ function renderTechnicalAnalysis() {
     renderTechnicalChartMarkers(null);
     drawTechnicalChart(null);
     drawTechnicalMacdChart(null);
+    // 2026-09-09（CUA-08）：#technicalOhlc 只在 drawTechnicalChart 走到 renderChartOhlc 時才清，canvas 沒尺寸
+    // （面板隱藏、尚未布局）時舊週期的整張 OHLC 表會留著，表頭還預設標日K。這裡不依賴 canvas 直接清並標新週期載入中。
+    renderChartOhlc(el.technicalChart, { code: state.technicalCode, period: state.technicalPeriod }, [], { note: "載入中" });
     return;
   }
   if (technicalState.error) {
@@ -9476,12 +9482,12 @@ function buildDateTicks(visible) {
   });
 }
 
-function renderChartOhlc(canvas,data,visible) {
+function renderChartOhlc(canvas,data,visible,{ note="" }={}) {
   const target=document.getElementById(canvas===el.technicalChart?'technicalOhlc':canvas===el.zoomChartCanvas?'zoomOhlc':'');if(!target)return;
   const values=visible.map(candle=>`<tr><th scope="row">${escapeHtml(String(candle.date).replace(/^(\d{4})(\d{2})(\d{2})$/,'$1/$2/$3').replaceAll('-','/'))}</th>${['open','high','low','close'].map(key=>`<td>${escapeHtml(String(finiteNumberOrNull(candle[key]) ?? '--'))}</td>`).join('')}</tr>`).join('');
   const open=target.open, focus=target.querySelector('summary')===document.activeElement?'summary':target.querySelector('.ohlc-scroller')===document.activeElement?'.ohlc-scroller':null;
   const region=target.querySelector('.ohlc-scroller'), scrollTop=region?.scrollTop || 0, scrollLeft=region?.scrollLeft || 0;
-  const html=`<summary>讀取本圖日期與 OHLC 資料</summary><p>${escapeHtml(data?.code || '')} ${escapeHtml(formatTechnicalPeriod(data?.period || 'day'))} · 與當下 K 線相同的座標與可見範圍。已還原／估算與缺漏依圖表原資料；不是歷史實際成交价。</p><div class="ohlc-scroller" tabindex="0" role="region" aria-label="本圖 OHLC 資料，可水平捲動"><table><caption>當下可見 ${visible.length} 根 K 線</caption><thead><tr><th scope="col">日期</th><th scope="col">開</th><th scope="col">高</th><th scope="col">低</th><th scope="col">收</th></tr></thead><tbody>${values}</tbody></table></div>`;
+  const html=`<summary>讀取本圖日期與 OHLC 資料</summary><p>${escapeHtml(data?.code || '')} ${escapeHtml(formatTechnicalPeriod(data?.period || 'day'))}${note?`（${escapeHtml(note)}）`:''} · 與當下 K 線相同的座標與可見範圍。已還原／估算與缺漏依圖表原資料；不是歷史實際成交价。</p><div class="ohlc-scroller" tabindex="0" role="region" aria-label="本圖 OHLC 資料，可水平捲動"><table><caption>當下可見 ${visible.length} 根 K 線</caption><thead><tr><th scope="col">日期</th><th scope="col">開</th><th scope="col">高</th><th scope="col">低</th><th scope="col">收</th></tr></thead><tbody>${values}</tbody></table></div>`;
   if(target._ohlcHtml===html)return;target._ohlcHtml=html;target.innerHTML=html;target.open=open;
   const updated=target.querySelector('.ohlc-scroller');updated.scrollTop=scrollTop;updated.scrollLeft=scrollLeft;if(focus)target.querySelector(focus)?.focus({preventScroll:true});
 }
@@ -13714,8 +13720,11 @@ function scheduleCanvasRedraw(...kinds) {
     canvasRedrawDirty.clear();
     if (dirty.has("detail")) drawChart(getSelectedStock());
     if (dirty.has("technical") && state.screen === "technical") {
-      drawTechnicalChart(technicalState.data);
-      drawTechnicalMacdChart(technicalState.data);
+      // 2026-09-09（CUA-08）：technicalState.data 在載入期間刻意保留（放大入口守衛用），但 resize／rAF 重繪不能拿它
+      // 把舊週期 K 線畫回剛清空的圖；載入中一律畫空白等待。
+      const technicalData = technicalState.loading ? null : technicalState.data;
+      drawTechnicalChart(technicalData);
+      drawTechnicalMacdChart(technicalData);
     }
     if (dirty.has("zoom") && zoomChartState.open) {
       invalidateZoomReadoutLayout();
