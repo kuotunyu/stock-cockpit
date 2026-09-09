@@ -1,18 +1,41 @@
 // 局部資訊順序（computer use 心得 F07／CUA-07）：核心任務入口不能被說明推到首屏外。
 // 隔日沖 warnings 一則一整行、不限則數；已登入零持股仍先渲染整個持股計畫風險區才到「記第一筆」；
 // 計畫彈窗容量長文在表單之前；手機技術頁四張摘要卡把圖表推到 830px 以下。這檔釘 DOM／CSS 結構，實際幾何由 browser 測試量。
-import test, { before, after } from "node:test";
+import test, { before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createAppWindow } from "../helpers/dom-harness.mjs";
 
 let app;
-before(async () => { app = await createAppWindow(); });
+before(async () => {
+  app = await createAppWindow();
+  // 複審 N7：本檔幾個案例會改 authState.user／stocks／tradesState，之後的案例雖只做靜態檢查，仍每案還原，不留殘留。
+  app.evalIn(`window.__density = { user: authState.user, trades: JSON.stringify({ schemaVersion: tradesState.schemaVersion, records: tradesState.records, quarantinedRecords: tradesState.quarantinedRecords, portfolio: tradesState.portfolio }) };`);
+});
+afterEach(() => app.evalIn(`authState.user = window.__density.user; stocks.length = 0; Object.assign(tradesState, JSON.parse(window.__density.trades)); if (document.activeElement && document.activeElement.blur) document.activeElement.blur();`));
 after(() => app.cleanup());
 
 const json = (expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 const styles = readFileSync(new URL("../../styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
+
+// 複審 N7：不再用某條無關規則（.today-focus-grid）當錨點找 760px 區塊；直接列出所有 760px 區塊，依大括號深度切出每一塊。
+function mediaBlocks(css, query) {
+  const blocks = [];
+  for (let from = 0; ;) {
+    const start = css.indexOf(query, from);
+    if (start < 0) break;
+    let depth = 0; let end = -1;
+    for (let index = css.indexOf("{", start); index < css.length; index += 1) {
+      if (css[index] === "{") depth += 1;
+      else if (css[index] === "}") { depth -= 1; if (depth === 0) { end = index; break; } }
+    }
+    if (end < 0) throw new Error("media block not closed");
+    blocks.push({ start, end, text: css.slice(start, end + 1) });
+    from = end + 1;
+  }
+  return blocks;
+}
 
 const WARNINGS = [
   "上市與上櫃整批收盤資料日尚未對齊（上市 2026/09/07、上櫃 2026/09/08），稍後會自動補齊。",
@@ -141,18 +164,16 @@ test("交易計畫彈窗：容量長文收進原生「保存限制與匯出」de
 test("技術頁手機：圖表卡 order 排在摘要卡之前（只在 760px 區塊內），桌機基底 order 不變", () => {
   assert.match(styles, /\.technical-summary\s*\{[^}]*order:\s*4;/, "桌機基底：摘要 4");
   assert.match(styles, /\.technical-chart-card\s*\{[^}]*order:\s*5;/, "桌機基底：圖表 5");
-  const gridOverride = styles.search(/\.today-focus-grid\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
-  const mediaStart = styles.lastIndexOf("@media (max-width: 760px)", gridOverride);
-  let depth = 0; let mediaEnd = -1;
-  for (let index = styles.indexOf("{", mediaStart); index < styles.length; index += 1) {
-    if (styles[index] === "{") depth += 1;
-    else if (styles[index] === "}") { depth -= 1; if (depth === 0) { mediaEnd = index; break; } }
-  }
-  const mobile = styles.slice(mediaStart, mediaEnd);
-  assert.match(mobile, /\.technical-chart-card\s*\{[^}]*order:\s*4;/, "手機：圖表 4");
-  assert.match(mobile, /\.technical-summary\s*\{[^}]*order:\s*5;/, "手機：摘要 5");
-  const outside = styles.slice(0, mediaStart) + styles.slice(mediaEnd);
-  assert.doesNotMatch(outside, /\.technical-chart-card\s*\{[^}]*order:\s*4;/, "圖表 order 4 不得出現在手機區塊外");
+  const blocks = mediaBlocks(styles, "@media (max-width: 760px)");
+  assert.ok(blocks.length >= 1, "styles.css 要有 760px 手機區塊");
+  const chartOrder = /\.technical-chart-card\s*\{[^}]*order:\s*4;/;
+  const summaryOrder = /\.technical-summary\s*\{[^}]*order:\s*5;/;
+  const holding = blocks.filter((block) => chartOrder.test(block.text));
+  assert.equal(holding.length, 1, "手機：圖表 order 4 恰好在一個 760px 區塊內");
+  assert.match(holding[0].text, summaryOrder, "手機：摘要 5 與圖表 4 在同一個 760px 區塊");
+  const outside = blocks.reduce((css, block) => css.replace(block.text, ""), styles);
+  assert.doesNotMatch(outside, chartOrder, "圖表 order 4 不得出現在任何 760px 區塊外");
+  assert.doesNotMatch(outside, summaryOrder, "摘要 order 5 不得出現在任何 760px 區塊外");
   const summaryIndex = html.indexOf('id="technicalSummary"');
   const chartIndex = html.indexOf('class="technical-chart-card"');
   assert.ok(summaryIndex > 0 && chartIndex > summaryIndex, "DOM 順序不變：摘要仍在圖表卡之前（只換 CSS order）");

@@ -192,6 +192,9 @@ test('隔日沖／策略／回測的載入畫面不再寫硬承諾，並帶單�
   const app=await fixture(t);
   app.evalIn('loadMarketBreadth=async()=>{};showToast=()=>{};loadSwingVerify=()=>{};renderSwingVerifyPanel=()=>{};');
   const parsed=JSON.parse(app.evalIn(`JSON.stringify((() => {
+    // 複審 N9：startedAt 與渲染都以同一個釘住的時鐘為準，不依賴真實經過時間。
+    const realNow = Date.now; Date.now = () => 1700000000000;
+    try {
     Object.assign(overnightState,{loading:true,loaded:false,error:'',startedAt:Date.now()-5000});
     state.overnightView='overview'; state.screen='overnight';
     renderOvernightGroups();
@@ -199,6 +202,7 @@ test('隔日沖／策略／回測的載入畫面不再寫硬承諾，並帶單�
     renderStrategyBoard();
     Object.assign(backtestState,{loading:true,loaded:false,error:''});
     return { overnight: el.overnightGroups.innerHTML, strategy: el.strategyBoard.innerHTML, backtest: renderBacktestPerformance() };
+      } finally { Date.now = realNow; }
   })())`));
   for(const [key,fragment] of Object.entries(parsed)){
     assert.doesNotMatch(fragment,/10–30 秒|數十秒|十幾秒|當天會直接用快取|之後有快取/,`${key} 不得再有硬承諾`);
@@ -214,6 +218,9 @@ test('經過時間只改單一節點的文字：健檢輸入框的值與焦點�
   const app=await fixture(t);
   app.evalIn('loadSwingVerify=()=>{};renderSwingVerifyPanel=()=>{};');
   const result=JSON.parse(app.evalIn(`JSON.stringify((() => {
+    // 複審 N9：startedAt 與渲染都以同一個釘住的時鐘為準，不依賴真實經過時間。
+    const realNow = Date.now; Date.now = () => 1700000000000;
+    try {
     Object.assign(strategyState,{loading:true,loaded:false,error:'',startedAt:Date.now()-40000});
     state.screen='strategy';
     renderStrategyBoard();
@@ -226,6 +233,7 @@ test('經過時間只改單一節點的文字：健檢輸入框的值與焦點�
     const out={before,after,sameNode:el.strategyBoard.firstElementChild===boardNode,value:input.value,focused:document.activeElement===input};
     stopScanWaitTimer('strategy');Object.assign(strategyState,{loading:false,startedAt:0});
     return out;
+      } finally { Date.now = realNow; }
   })())`));
   assert.match(result.before,/已等 40 秒/);
   assert.match(result.after,/已等 65 秒/);
