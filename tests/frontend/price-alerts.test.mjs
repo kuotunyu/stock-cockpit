@@ -234,3 +234,34 @@ test("rowTemplate：有效提醒的列帶 🔔 鈴鐺；全部已觸發則不帶
   app.evalIn(`priceAlertsState.alerts[0].active = false;`);
   assert.ok(!app.evalIn(`rowTemplate(stocks[0], "watchlist")`).includes("alert-bell"), "沒有等待中的提醒 → 不帶鈴鐺");
 });
+
+test("syncAlertsToServer 完成後的重繪是背景重繪：不得把使用者正聚焦的處置卡換掉（焦點掉到 body）", async () => {
+  // 真實序列（interaction-smoke 在慢機器上的失敗 trace）：策略頁按「建立三筆到價提醒」→ 350ms 後 PUT /api/alerts，
+  // 回應落在使用者已切到處置看板、Escape 關明細回焦到卡之後；成功路徑若用裸 render()，整頁重繪把卡換掉、焦點落到 body。
+  const result = JSON.parse(await app.evalIn(`(async () => {
+    const orig = { screen: state.screen, tab: state.surveillanceTab, data: surveillanceBoardState.data, loaded: surveillanceBoardState.loaded, user: authState.user, put: putConfirmedResource };
+    authState.user = { id: "u1", username: "admin", role: "admin" };
+    priceAlertsState.alerts = [{ id: "a1", code: "6488", op: ">=", price: 1000, active: true, triggeredAt: "" }];
+    surveillanceBoardState.data = { ok: true, queryDate: "2026-09-07", counts: { inDisposition: 1 }, warnings: [],
+      inDisposition: [{ code: "6488", name: "環球晶", exchange: "TPEx", interval: "5", startSlash: "2026/09/01", endSlash: "2026/09/12", daysToRelease: 5 }] };
+    surveillanceBoardState.loaded = true;
+    state.screen = "surveillance"; state.surveillanceTab = "inDisposition";
+    render();
+    const card = document.querySelector('.surv-card[data-code="6488"]');
+    card.focus();
+    const before = document.activeElement === card;
+    putConfirmedResource = async (path, body) => ({ ok: true, rev: 2, alerts: body.alerts });
+    try {
+      await syncAlertsToServer();
+    } finally {
+      putConfirmedResource = orig.put;
+    }
+    const active = document.activeElement;
+    const out = { before, activeIsCard: Boolean(active) && active.matches('.surv-card[data-code="6488"]'), activeDesc: active ? active.tagName + (active.dataset.code ? "[" + active.dataset.code + "]" : "") : null, rev: priceAlertsState.rev };
+    state.screen = orig.screen; state.surveillanceTab = orig.tab; surveillanceBoardState.data = orig.data; surveillanceBoardState.loaded = orig.loaded; authState.user = orig.user; priceAlertsState.alerts = []; render();
+    return JSON.stringify(out);
+  })()`));
+  assert.equal(result.before, true, "前提：卡片已聚焦");
+  assert.equal(result.rev, 2, "前提：同步成功並套用伺服器 rev");
+  assert.equal(result.activeIsCard, true, `同步完成的重繪後焦點要還在同一檔處置卡，實際 ${result.activeDesc}`);
+});

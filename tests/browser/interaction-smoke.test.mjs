@@ -186,3 +186,53 @@ test("expired-session：曾登入旗標遇 401 會顯示到期登入閘", { time
     await fixture.close();
   }
 });
+
+test("populated：建立提醒後的背景同步晚到，不得把處置看板 Escape 後剛回焦的卡換掉", { timeout: 90_000 }, async () => {
+  // 慢機器上的真實序列（見 .agents/reports/cua-2026-09-09 的 trace 分析）：PUT /api/alerts 在 350ms 防抖後才送出，
+  // 回應落在使用者已切到處置看板、Escape 關明細回焦之後。這裡把 PUT 的回應扣住到回焦之後才放行，讓競態每次都發生。
+  const fixture = await createBrowserFixture({ scenario: "populated" });
+  try {
+    const { page } = fixture;
+    await page.setViewportSize({ width: 375, height: 900 });
+    const heldPuts = [];
+    let holdPuts = false;
+    await page.route("**/api/alerts", async (route) => {
+      if (holdPuts && route.request().method() === "PUT") { heldPuts.push(route); return; }
+      await route.fallback();
+    });
+    await visibleNav(page, "strategy").click();
+    await page.locator(".swing-card").waitFor();
+    holdPuts = true;
+    await page.locator(".swing-plan-alerts").first().click();
+
+    await visibleNav(page, "surveillance").click();
+    await page.locator('[data-surv-tab="inDisposition"]').click();
+    const surveillanceOpener = page.locator(".surv-card").first();
+    await surveillanceOpener.focus();
+    await page.keyboard.press("Enter");
+    await page.locator("#detailPanel.is-open").waitFor({ state: "visible" });
+    await page.keyboard.press("Escape");
+    await page.locator("#detailPanel.is-open").waitFor({ state: "detached" });
+    await page.waitForFunction(() => document.activeElement?.dataset.code === "6488");
+
+    // 等防抖後的 PUT 真的送出，再放行它的回應。
+    for (let round = 0; round < 60 && heldPuts.length === 0; round += 1) await page.waitForTimeout(50);
+    assert.equal(heldPuts.length, 1, "前提：建立提醒後應有一次 PUT /api/alerts 被扣住");
+    holdPuts = false;
+    await heldPuts[0].fallback();
+    await page.waitForResponse((response) => response.url().endsWith("/api/alerts") && response.request().method() === "PUT");
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+    const active = await page.evaluate(() => ({
+      code: document.activeElement?.dataset.code || "",
+      selector: document.activeElement?.className || document.activeElement?.tagName || "",
+      alertsSynced: priceAlertsState.rev,
+    }));
+    assert.equal(active.code, "6488", `提醒同步回應晚到的重繪不得把剛回焦的處置卡換掉，實際 ${active.selector}`);
+  } catch (error) {
+    await fixture.captureFailure("interaction-smoke-alert-sync-focus");
+    throw error;
+  } finally {
+    await fixture.close();
+  }
+});

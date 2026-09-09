@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v45";
+const APP_SHELL_VERSION = "stock1-shell-v46";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -2579,7 +2579,9 @@ async function syncAlertsToServer() {
     if (Number.isFinite(Number(payload?.rev))) priceAlertsState.rev = Number(payload.rev);
     if (mutationVersion === alertMutationVersion) {
       if (Array.isArray(payload?.alerts)) priceAlertsState.alerts = payload.alerts;
-      render();
+      // 這是 350ms 防抖後的背景回呼：使用者可能已切到別頁（例如處置看板 Escape 關明細後焦點剛回到卡片），
+      // 或正在別的表單打字。裸 render() 會把 active screen 整個重建、焦點掉到 body；背景重繪一律走受保護版本。
+      renderLiveDataUpdate();
     } else {
       alertSyncPending = true;
     }
