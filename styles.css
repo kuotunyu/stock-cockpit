@@ -7666,6 +7666,8 @@ details[data-overnight-warnings-fold] > .overnight-warning {
   .technical-chart-card > header {
     grid-template-columns: minmax(0, 1fr) auto;
     row-gap: 4px;
+    /* CI（Linux CJK 後備字型較寬）標題會折兩行、標題列 97px；內距收 2px 留餘裕，預算仍是 ≤100px。 */
+    padding: 10px 12px;
   }
 
   .technical-chart-card > header > div:first-child {
