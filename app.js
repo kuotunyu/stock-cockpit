@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v48";
+const APP_SHELL_VERSION = "stock1-shell-v49";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -6264,7 +6264,8 @@ function upsertStockFromPick(pick) {
       price: pick.price,
       change: pick.changePct || 0,
       changeText: formatSignedPercent(pick.changePct || 0),
-      unit: 0,
+      // 隔日沖訊號沒有單量（最新一筆成交量）欄位：保留未知，等官方報價接上；不硬寫 0（2026-09-09 第五批②，與 CUA-01 同類）。
+      unit: null,
       total: pick.volumeLots || 0,
       signal: signalFromChange(pick.changePct),
       stage: pick.metrics?.volumeRatio5 || 0,

@@ -249,3 +249,54 @@ test("評分與分類：avgVol 未知與 0 的結果必須相同（不改選股�
   })()`);
   assert.deepEqual(probes.unknown, probes.zero);
 });
+
+// ---- 第五批 ②：隔日沖訊號建立的股票沒有「單量」，入口不得硬寫 0 ----
+
+test("upsertStockFromPick：訊號沒有單量欄位 → unit 保留未知，列表與明細顯示 --，總量照常；報價到了才有值", () => {
+  const result = json(`(() => {
+    stocks.length = 0;
+    upsertStockFromPick(${pickFixture("1106", 1.8)});
+    const stock = stocks.find((item) => item.code === "1106");
+    const detail = buildIndicatorDetail(stock)["量價摘要"];
+    const row = rowTemplate(stock, "watchlist");
+    const flowCell = (row.match(/<span class="stock-cell metric-stack[^"]*">\\s*<span>([^<]*)<\\/span>\\s*<span class="flow-split">/) || [])[1] || "";
+    // 先記下訊號階段的值：之後的報價會就地合併到同一個物件。
+    const unitBefore = stock.unit; const totalBefore = stock.total;
+    upsertStockFromQuote(${quoteFixture("1106")});
+    const after = stocks.find((item) => item.code === "1106");
+    return {
+      unit: unitBefore, total: totalBefore,
+      detailUnit: detail.metrics.find((m) => m.label === "單量").value,
+      detailShare: detail.metrics.find((m) => m.label === "單量占比").value,
+      detailTotal: detail.metrics.find((m) => m.label === "總量").value,
+      status: detail.status,
+      flowCell,
+      unitAfterQuote: after.unit,
+    };
+  })()`);
+  assert.equal(result.unit, null, "訊號 API 沒有單量，入口不得補 0");
+  assert.equal(result.total, 800, "總量來自 volumeLots，照常保留");
+  assert.equal(result.detailUnit, "--");
+  assert.equal(result.detailShare, "無法計算", "沒有單量就不能算單量占比（不得算成 0%）");
+  assert.equal(result.detailTotal, "800");
+  assert.equal(result.status, "部分資料");
+  assert.equal(result.flowCell, "--", "列表單量欄顯示 --，不是 0");
+  assert.equal(result.unitAfterQuote, 10, "官方報價到了就用報價的單量");
+});
+
+test("評分與分類：unit 未知與 0 的結果必須相同（單量不參與門檻）", () => {
+  const same = json(`(() => {
+    const base = { ...${JSON.stringify(STOCK_BASE)}, code: "1107", name: "合成", price: 100, spark: [98, 100], total: 800, avgVol: 1.8, turnover: 1.2, flow: 120, streak: 80, stage: 1.8, slope: 8, groups: ["overnight"], strategies: ["強勢續攻"] };
+    const compute = (unit) => {
+      const stock = { ...base, unit };
+      return {
+        intraday: stockIntradayScore(stock),
+        strategyScore: getStrategyScore(stock),
+        reason: getStockReason(stock),
+        matches: ["momentum", "breakout", "pullback", "volume"].map((key) => { try { return stockMatchesStrategy(stock, key); } catch { return "n/a"; } }),
+      };
+    };
+    return { asNull: compute(null), asZero: compute(0) };
+  })()`);
+  assert.deepEqual(same.asNull, same.asZero);
+});
