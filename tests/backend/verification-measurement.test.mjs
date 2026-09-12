@@ -34,7 +34,9 @@ test('同種子合成 cohort 身份可重現，來源／出版／完整月份／
     assert.deepEqual(Object.keys(first.verificationCaptures),Object.keys(second.verificationCaptures));
     for(const memo of Object.values(first.verificationBenchmarks.memos)) {
       const capture=first.verificationPublications.captures[memo.captureId];
-      assert.ok(capture.inputEvidence.every(row=>row.observedAt<=capture.publishedAt));
+      // 證據只存在擷取清單的 outcomes（發布紀錄自 2026-09-12 起只留 inputEvidenceRef）
+      const evidence=first.verificationCaptures[memo.captureId]?.outcomes||capture.inputEvidence;
+      assert.ok(evidence.every(row=>row.observedAt<=capture.publishedAt));
       for(const month of Object.values(memo.calendar.monthEvidence)) {
         assert.ok(month.coveredThrough<=month.observedAt.slice(0,10).replaceAll('-',''));
         assert.ok(month.observedAt<=memo.completedAt);

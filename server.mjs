@@ -2355,6 +2355,8 @@ async function loadDbOnce() {
   const verificationChanged = stableJson(migratedVerification) !== stableJson({ signalSnapshots: dbCache.signalSnapshots || [], swingVerification: dbCache.swingVerification });
   Object.assign(dbCache, migratedVerification);
   let changed = recoveredFromCorruption || verificationChanged;
+  // 2026-09-12：發布紀錄裡與擷取清單重複的 260 列證據剝掉（每策略每天 177 KB、無讀取端）。
+  if (stripDuplicatedPublicationEvidence(dbCache)) changed = true;
   // 既有 DB 補標 passwordSource：這個欄位是 2026-07-31 才加的，在那之前建立的帳號沒有。
   // 唯一可靠的判準就是實際驗一次 hash——不能用 createdAt === updatedAt 這種啟發式，
   // 那只說明「沒改過任何欄位」，不代表密碼是哪一組。
@@ -9897,6 +9899,33 @@ function verificationInputContent(value) {
     .map(([key,item]) => [key, verificationInputContent(item)]));
 }
 
+// 舊資料遷移：發布紀錄（與 swingSnapshots 內嵌的發布副本）的 inputEvidence 若與擷取清單的 outcomes 逐位元組相同就剝掉，
+// 留下 inputEvidenceRef；不同或沒有擷取清單的保留，不猜哪份才對。剝過一次之後每次啟動都是 O(筆數) 的欄位檢查。
+function stripDuplicatedPublicationEvidence(db) {
+  let changed = false;
+  const manifests = db?.verificationCaptures || {};
+  const strip = (record) => {
+    if (!record || !Array.isArray(record.inputEvidence)) return;
+    const manifest = manifests[record.captureId];
+    if (!manifest || !Array.isArray(manifest.outcomes)) return;
+    if (stableJson(record.inputEvidence) !== stableJson(manifest.outcomes)) return;
+    delete record.inputEvidence;
+    record.inputEvidenceRef = "verificationCaptures.outcomes";
+    changed = true;
+  };
+  for (const record of Object.values(db?.verificationPublications?.captures || {})) strip(record);
+  for (const snapshot of Object.values(db?.swingSnapshots || {})) strip(snapshot?.body?.publication);
+  return changed;
+}
+
+// API 回應不帶 260 列證據：前端只讀 scanQuality／coverage／publication.captureId 等摘要與 signals，
+// inputEvidence 與 candidatePool（合計約 220 KB）沒有任何前端讀取端。builder 的 body 本身保留（內部與測試用）。
+function publicSignalsView(body) {
+  if (!body || typeof body !== "object") return body;
+  const { inputEvidence, candidatePool, ...rest } = body;
+  return rest;
+}
+
 function publishVerification(db, strategy, body) {
   const tradeDate = compactToIsoDate(toCompactDate(body.asOf));
   const scope = cloneJson(body.requestScope || {});
@@ -9940,7 +9969,10 @@ function publishVerification(db, strategy, body) {
     sourceTimes: cloneJson(body.sourceTimes || {}), coverage: cloneJson(body.coverage || {}),
     scanQuality: cloneJson(body.scanQuality || {}), warnings: cloneJson(body.warnings || []), regime: cloneJson(body.regime || null),
     degraded: (body.scanQuality?.coverageRate ?? 100) < 100 || body.scanQuality?.corporateActionResultsComplete === false || Boolean(body.warnings?.length),
-    inputEvidence: cloneJson(body.inputEvidence || null),
+    // 260 列輸入證據只存一份：verificationCaptures[captureId].outcomes（buildCaptureManifest 從同一個 body 複製）。
+    // 以前這裡再存一份 inputEvidence（每策略每天 177 KB、逐位元組相同），而且沒有任何讀取端；發布紀錄還會被
+    // 內嵌進 swingSnapshots 與 API 回應，等於同一份證據存三遍、送一遍。
+    inputEvidenceRef: "verificationCaptures.outcomes",
     signals: picks.map(pick => ({ ...cloneJson(pick),
       ...(isHoldingIdentity(identity) ? { holdingPosition: createHypotheticalHoldingPosition(tradeDate,
         strategy === 'swing' ? pick.plan?.entry : pick.price, strategy === 'swing' ? pick.plan?.structuralStop : null) } : {}),
@@ -15216,7 +15248,7 @@ async function handleApi(request, requestUrl, response) {
       const dateCompact = toCompactDate(requestUrl.searchParams.get("date"));
       const maxPerGroup = Math.min(50, Math.max(1, Number(requestUrl.searchParams.get("limit") || 20)));
       const body = await buildOvernightSignals({ dateCompact, maxPerGroup });
-      jsonResponse(response, 200, body);
+      jsonResponse(response, 200, publicSignalsView(body));
     } catch (error) {
       apiFailure(response, 502, error);
     }
@@ -15278,7 +15310,7 @@ async function handleApi(request, requestUrl, response) {
         lastSwingForceRefreshAt = Date.now();
       }
       const body = await buildSwingBoard({ scenarioKey, limit, forceRefresh });
-      jsonResponse(response, 200, body);
+      jsonResponse(response, 200, publicSignalsView(body));
     } catch (error) {
       apiFailure(response, 502, error);
     }
@@ -16523,7 +16555,7 @@ export {
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
-  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope,
+  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, publicSignalsView,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
   runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,
