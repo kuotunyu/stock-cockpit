@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v57";
+const APP_SHELL_VERSION = "stock1-shell-v58";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -3237,6 +3237,8 @@ const tradesState = {
   records: [],
   quarantinedRecords: [],
   portfolio: null,
+  scorecard: null, // 我的成績單（伺服器從帳本算好）
+  settlement: null, // T+2 交割款
   loaded: false,
   rev: 0, // 蓋寫防護版本號
   mutating: false, // 同一時間只允許一個帳本寫入，避免連點被 rev 重放成兩筆
@@ -3581,6 +3583,8 @@ function applyTradesPayload(payload) {
   tradesState.records = Array.isArray(payload.records) ? payload.records : [];
   tradesState.quarantinedRecords = Array.isArray(payload.quarantinedRecords) ? payload.quarantinedRecords : [];
   tradesState.portfolio = payload.portfolio || null;
+  tradesState.scorecard = payload.scorecard || null;
+  tradesState.settlement = payload.settlement || null;
   // 官方歸檔有、帳本沒登錄的除權／現增（伺服器比對後回傳）。漏記不只是顯示假虧損，
   // 之後想賣掉含配股的股數還會被賣超檢查擋下，所以要主動提示補登。
   tradesState.missingCorporateActions = Array.isArray(payload.missingCorporateActions)
@@ -3913,6 +3917,96 @@ function formatMoney(value, { signed = false } = {}) {
 // D-22 補登：官方歸檔有、帳本沒登錄的除權／現增。快速鈕只在除權當天出現，
 // 錯過就沒有入口了——而漏記會讓之後賣出含配股的股數被賣超檢查擋下，所以要能事後補。
 // 比率一律用官方值，使用者不必自己查（手填最容易把「每仟股配股數」當成比率）。
+// ===== 我的成績單（帳本側）=====
+// 策略成績單量的是系統訊號；這裡量的是你自己的成交。數字全部來自 /api/trades 的 scorecard／settlement，前端不重算。
+function taipeiTodayCompact() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replace(/-/g, "");
+}
+
+function renderSettlementLine() {
+  const settlement = tradesState.settlement;
+  const days = settlement?.days || [];
+  if (!days.length) return "";
+  const label = (date) => `${String(date).slice(4, 6)}/${String(date).slice(6, 8)}`;
+  const parts = days.map((day) => `${label(day.date)} ${day.net < 0 ? `應付 ${formatMoney(-day.net)}` : `應收 ${formatMoney(day.net)}`}（${day.items.map((item) => `${item.side === "buy" ? "買" : "賣"} ${escapeHtml(item.code)}×${Number(item.shares || 0).toLocaleString("zh-TW")}`).join("、")}）`);
+  const source = settlement.calendarSource === "weekends-only" ? "目前只跳週末（開休市表尚未載入），遇假日以券商通知為準" : "依官方開休市表";
+  return `<p class="hold-settlement" title="T+2 交割：成交日後第 2 個交易日，買進要付價金＋手續費、賣出收價金−費稅；${source}"><strong>交割款</strong> ${parts.join("・")}</p>`;
+}
+
+function renderPersonalScorecard(open = false) {
+  const settlement = renderSettlementLine();
+  const card = tradesState.scorecard;
+  if (!card?.overall || !tradesState.records.length) return settlement;
+  const o = card.overall;
+  const today = taipeiTodayCompact();
+  const month = (card.months || []).find((item) => item.key === today.slice(0, 6));
+  const year = (card.years || []).find((item) => item.key === today.slice(0, 4));
+  const minTrades = Number(card.minTrades) || 20;
+  const enough = o.trades >= minTrades;
+  const rateText = !o.trades ? "--" : enough ? `${o.winRate}%` : `累積中 ${o.trades}/${minTrades} 筆`;
+  const pf = o.profitFactor != null ? String(o.profitFactor) : o.profitFactorReason === "no-losing-trade" ? "尚無虧損筆" : "--";
+  const money = (value) => formatMoney(value, { signed: true });
+  const tone = (value) => (value > 0 ? "is-up" : value < 0 ? "is-down" : "");
+  const monthRows = (card.months || []).slice(0, 12).map((item) => `<tr><td>${item.key.slice(0, 4)}/${item.key.slice(4, 6)}</td><td class="${tone(item.realizedPnl)}">${money(item.realizedPnl)}</td><td>${item.trades}</td><td>${item.trades ? `${item.winRate}%` : "--"}</td><td>${formatMoney(item.fees + item.taxes)}</td><td>${item.dividendsNet ? formatMoney(item.dividendsNet) : "--"}</td></tr>`).join("");
+  return `${settlement}
+    <details class="hold-scorecard" data-holdings-scorecard-fold${open ? " open" : ""}>
+      <summary><strong>${glossLink("我的成績單")}</strong><span>本月 ${money(month?.realizedPnl || 0)}・今年 ${money(year?.realizedPnl || 0)}・勝率 ${rateText}</span></summary>
+      <div class="hold-dividend-summary hold-scorecard-grid" aria-label="我的成績單">
+        <div title="每筆賣出（已實現）損益 > 0 的比例；未滿 ${minTrades} 筆不當結論"><span>勝率</span><strong>${rateText}</strong></div>
+        <div title="獲利總和 ÷ 虧損總和（皆已扣費稅）"><span>${glossLink("獲利因子")}</span><strong>${pf}</strong></div>
+        <div title="已實現損益總和 ÷ 賣出筆數：每做一筆平均賺賠多少"><span>${glossLink("每筆平均", "淨期望值")}</span><strong class="${tone(o.expectancy)}">${o.expectancy != null ? money(o.expectancy) : "--"}</strong></div>
+        <div title="連續虧損最長的一串（以賣出筆為單位）"><span>${glossLink("最長連虧", "中位數與最長連虧")}</span><strong>${o.maxConsecutiveLosses} 筆</strong></div>
+        <div title="今年到目前為止的買賣手續費與證交稅合計"><span>今年費稅</span><strong>${formatMoney((year?.fees || 0) + (year?.taxes || 0))}</strong></div>
+        <div title="今年已入帳的股利淨額（不含待入帳）"><span>今年股利入帳</span><strong>${formatMoney(year?.dividendsNet || 0)}</strong></div>
+      </div>
+      ${monthRows ? `<div class="hold-scorecard-table" tabindex="0" role="region" aria-label="逐月已實現，可左右捲動"><table class="hold-scorecard-months"><thead><tr><th>月份</th><th>已實現</th><th>筆數</th><th>勝率</th><th>費稅</th><th>股利入帳</th></tr></thead><tbody>${monthRows}</tbody></table></div>` : ""}
+      <p class="hold-hint">口徑：已實現＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費），和上方「已實現累計」同一個數；不含未實現、不含股利（股利另列）；勝率與連虧以每筆賣出為單位，同一檔分批賣算多筆。${o.best ? `最佳一筆 ${escapeHtml(o.best.code)} ${money(o.best.pnl)}，最差一筆 ${escapeHtml(o.worst.code)} ${money(o.worst.pnl)}。` : ""}</p>
+    </details>`;
+}
+
+// CSV：UTF-8 含 BOM（Excel 直接開不會亂碼）、CRLF、逗號與引號照 RFC 4180 跳脫。
+function tradesCsvText(kind) {
+  const quote = (value) => { const text = String(value ?? ""); return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; };
+  const isoDate = (value) => { const text = String(value || ""); return text.length === 8 ? `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}` : text; };
+  let header;
+  let rows;
+  if (kind === "realized") {
+    header = ["賣出日", "代號", "股數", "賣出價", "均價成本", "價金", "手續費", "證交稅", "淨收", "成本", "損益", "損益%"];
+    rows = (tradesState.portfolio?.realized || []).map((r) => [isoDate(r.date), r.code, r.shares, r.sellPrice, r.avgCost, r.grossProceeds, r.fee, r.tax, r.netProceeds, r.costOfSold, r.pnl, r.pnlPct ?? ""]);
+  } else {
+    header = ["成交日", "代號", "買賣", "價格", "股數", "手續費", "證交稅", "價金", "時段", "商品類型", "紀錄ID"];
+    const sideLabel = { buy: "買進", sell: "賣出", dividend: "股利", corporateAction: "公司行動" };
+    rows = tradesState.records.map((t) => {
+      const gross = Number(t.price) * Number(t.shares);
+      return [isoDate(t.date), t.code, sideLabel[t.side] || t.side, t.price ?? "", t.shares ?? "", t.fee ?? "", t.tax ?? "", Number.isFinite(gross) ? Math.round(gross) : "", t.session || "", t.instrumentType || "", t.id || ""];
+    });
+  }
+  return `\ufeff${[header, ...rows].map((row) => row.map(quote).join(",")).join("\r\n")}\r\n`;
+}
+
+async function downloadTradesCsv(kind = "ledger") {
+  if (!authState.user) {
+    setLoginGateVisible(true, "登入後才能匯出帳本");
+    return;
+  }
+  let objectUrl = "";
+  let anchor = null;
+  try {
+    const blob = new Blob([tradesCsvText(kind)], { type: "text/csv;charset=utf-8" });
+    objectUrl = URL.createObjectURL(blob);
+    anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = `stock1-${kind === "realized" ? "realized" : "ledger"}-${taipeiTodayCompact()}.csv`;
+    anchor.hidden = true;
+    document.body.appendChild(anchor);
+    anchor.click();
+    showToast(`${kind === "realized" ? "已實現" : "帳本"} CSV 已下載（UTF-8 含 BOM，Excel 可直接開）`);
+  } finally {
+    anchor?.remove();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+}
+
 function renderMissingCorporateActions() {
   const missing = tradesState.missingCorporateActions || [];
   if (!missing.length) return "";
@@ -4261,6 +4355,7 @@ function renderHoldingsPanel() {
   // 零持股時風險區收成一句＋原生 details 放在表單之後（2026-09-09 CUA-07）：以前空庫存也先渲染整個風險區
   // （自身表單、兩個 details）才到「記第一筆」。展開狀態跨行情重繪保留，做法同 verificationFoldAttributes。
   const previousRiskFoldOpen = Boolean(panel.querySelector("[data-holdings-risk-fold]")?.open);
+  const previousScorecardOpen = Boolean(panel.querySelector("[data-holdings-scorecard-fold]")?.open);
   panel.innerHTML = `
     <div class="hold-summary">
       <div><span>總市值</span><strong>${unpriced ? '--' : formatMoney(totalValue)}</strong>${unpriced ? `<small>已報價市值 ${formatMoney(totalValue)}</small>` : ''}</div>
@@ -4277,6 +4372,7 @@ function renderHoldingsPanel() {
       </div>` : ""}
     ${holdings.length ? renderPortfolioPlanRisk(buildHoldingsPlanRisk()) : ""}
     ${renderMissingCorporateActions()}
+    ${renderPersonalScorecard(previousScorecardOpen)}
     ${unpriced ? `<p class="hold-hint">${unpriced} 檔暫無報價，未計入市值與未實現損益，報酬率分母也只算已報價部位（開盤後會自動補上）；「總成本」仍為全部持股。</p>` : ""}
     ${closedPositionDividendHtml}
     ${tradesState.quarantinedRecords.length ? `<div class="trade-review-banner" role="status"><strong>${tradesState.quarantinedRecords.length} 筆舊資料待整理</strong><span>原始內容已安全保留，未納入持股與損益；不會在升級時被靜默刪除。</span></div>` : ""}
@@ -4344,7 +4440,7 @@ function renderHoldingsPanel() {
     <details class="hold-plan-risk-fold" data-holdings-risk-fold${previousRiskFoldOpen ? " open" : ""}><summary>持股計畫風險設定（警示值、管理計畫）</summary>${renderPortfolioPlanRisk(buildHoldingsPlanRisk())}</details>`}
     <p class="hold-hint">費稅留白時，依成交日、商品與目前的預設券商方案估算：0.1425% × <label class="hold-discount">折數 <input data-trade-discount type="number" step="0.05" min="0.1" max="1" value="${settings.feeDiscount}" aria-label="預設手續費折數" ${tradesState.mutating ? "disabled" : ""} /></label>、每筆最低 ${settings.minFee} 元。這只是估算方案，不是所有券商的法定費率；填入對帳單金額後以實際值為準。成本採加權平均法，未實現損益尚未預扣未來賣出成本。</p>
     <div class="trade-list">
-      <div class="trade-list-head"><strong>交易紀錄</strong><small>${tradesState.records.length} 筆${tradesState.records.length > tradesHistoryLimit ? `（目前顯示最近 ${tradesHistoryLimit} 筆）` : ""}・賣出列的損益為該筆已實現</small>${tradesState.records.length > tradesHistoryLimit ? `<button type="button" data-trade-load-more>再顯示 ${Math.min(40, tradesState.records.length - tradesHistoryLimit)} 筆</button>` : ""}</div>
+      <div class="trade-list-head"><strong>交易紀錄</strong><small>${tradesState.records.length} 筆${tradesState.records.length > tradesHistoryLimit ? `（目前顯示最近 ${tradesHistoryLimit} 筆）` : ""}・賣出列的損益為該筆已實現</small><span class="trade-list-export"><button type="button" class="watch-secondary-action" data-action="export-trades-csv" data-csv="ledger" title="全部交易紀錄，UTF-8 含 BOM，Excel 可直接開">匯出帳本 CSV</button><button type="button" class="watch-secondary-action" data-action="export-trades-csv" data-csv="realized" title="每筆賣出的已實現損益（含費稅與成本），報稅或對帳用">匯出已實現 CSV</button></span>${tradesState.records.length > tradesHistoryLimit ? `<button type="button" data-trade-load-more>再顯示 ${Math.min(40, tradesState.records.length - tradesHistoryLimit)} 筆</button>` : ""}</div>
       ${recordRows || `<p class="hold-hint">還沒有任何紀錄。</p>`}
     </div>
   `;
@@ -12930,6 +13026,11 @@ document.addEventListener("click", (event) => {
     });
     return;
   }
+  const exportCsv = event.target.closest('[data-action="export-trades-csv"]');
+  if (exportCsv) {
+    downloadTradesCsv(exportCsv.dataset.csv);
+    return;
+  }
   const divQuick = event.target.closest("[data-dividend-quick]");
   if (divQuick) {
     divQuick.blur();
@@ -14019,6 +14120,7 @@ const GLOSSARY = [
   { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
   { term: "盤中曾達／曾破", aliases: ["曾達", "曾破", "曾達+2%", "曾破−2%", "盤中曾達"], cat: "成績單與決策", def: "觀察日的<strong>最高價曾碰到 +2%</strong>／<strong>最低價曾碰到 −2%</strong>——只是盤中曾觸及的價位（最大有利／不利幅度），<strong>不是可實現損益</strong>，兩者同一天可以同時成立。要在最高價出場是事後才知道的；真正能執行的是開盤賣或收盤賣的淨獲利率。" },
   { term: "同期大盤", aliases: ["同期大盤", "同期加權指數", "指數基準"], cat: "成績單與決策", def: "隔日沖成績單的對照組：每個完成觀察日「訊號日收盤→觀察日收盤」的<strong>加權指數</strong>報酬，日等權平均，與「平均隔日收」看同一段期間。訊號的平均隔日收若長期<strong>低於同期大盤</strong>，表示選出來的股票沒有比直接抱指數好；高於才有超額。兩邊都是價格觀察，不是可成交回測，也不含費稅。" },
+  { term: "我的成績單", aliases: ["我的成績單", "帳本成績單", "交割款"], cat: "成績單與決策", def: "庫存損益頁裡量<strong>你自己</strong>成交的成績，和策略成績單（量系統訊號）是兩回事。已實現＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費）；勝率、獲利因子、每筆平均、最長連虧都以「每筆賣出」為單位，未滿 20 筆不當結論。「交割款」是 T+2：成交日後第 2 個交易日，買進要付價金＋手續費、賣出收價金−費稅，開休市表沒載入時只跳週末。" },
   { term: "淨期望值", aliases: ["期望值", "淨期望", "每筆平均淨報酬"], cat: "成績單與決策", def: "每做一筆平均賺賠多少：把每筆的<strong>淨報酬</strong>（扣一買一賣的模型費稅）平均起來。勝率高不代表賺錢——十筆贏九筆各賺 0.3%、輸一筆賠 4%，期望值還是負的；反過來也成立。隔日沖成績單的淨期望值用「次日開盤買、當日收盤賣」這個做得到的口徑算，正才值得做；未計每筆最低手續費與滑價，小額部位實際會更差一點。" },
   { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "開盤進場淨獲利率", "開盤進場勝率", "跳空略過"], cat: "成績單與決策", def: "唯一實際做得到的進場口徑：訊號要等 13:30 收盤後的整批資料才算得出來，訊號日收盤已經買不到，真實進場是<strong>次日開盤</strong>。隔日沖成績單的「開盤進場」＝次日開盤買、當日收盤賣，扣模型費稅後淨報酬 > 0 算贏；觀察日整天只有漲停一個成交價（一價鎖死）代表開盤買不到，不進分母。波段驗證則是同一批驗證單改以第一個交易日的開盤價當進場價重算並陳；開盤已經在停損下方或目標上方的單這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];

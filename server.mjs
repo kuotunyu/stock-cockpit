@@ -1866,6 +1866,110 @@ function buildPortfolio(payload) {
   };
 }
 
+// ===== 我的成績單（帳本側）=====
+// 策略成績單量的是系統訊號；這裡量的是「你自己」的成交：已實現損益按月／按年、勝率、獲利因子、每筆平均（期望值）、
+// 最長連虧、費稅、股利入帳。已實現損益＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費），與 buildPortfolio 同一個數。
+// 未滿 minTrades 筆只講「累積中」，不當結論（和策略成績單的 20 天門檻同一個精神）。
+const PERSONAL_SCORECARD_MIN_TRADES = 20;
+function buildPersonalScorecard(payload, portfolio = buildPortfolio(payload)) {
+  const records = Array.isArray(payload?.records) ? payload.records : [];
+  // buildPortfolio 把最新的放前面；勝率／連虧要按時間序
+  const realized = Array.isArray(portfolio?.realized) ? [...portfolio.realized].reverse() : [];
+  const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+  const buckets = new Map();
+  const bucket = (key) => {
+    if (!buckets.has(key)) buckets.set(key, { key, realizedPnl: 0, trades: 0, wins: 0, losses: 0, fees: 0, taxes: 0, dividendsNet: 0, buyAmount: 0, sellAmount: 0 });
+    return buckets.get(key);
+  };
+  for (const t of records) {
+    const month = String(t.date || "").slice(0, 6);
+    if (month.length !== 6) continue;
+    const gross = num(t.price) * num(t.shares);
+    if (t.side === "buy") {
+      const m = bucket(month); m.fees += num(t.fee); m.buyAmount += gross;
+    } else if (t.side === "sell") {
+      const m = bucket(month); m.fees += num(t.fee); m.taxes += num(t.tax); m.sellAmount += gross;
+    } else if (t.side === "dividend" && t.status !== "receivable") {
+      const m = bucket(month);
+      m.dividendsNet += Number.isFinite(Number(t.receivedAmount)) ? Math.max(0, Number(t.receivedAmount)) : Math.max(0, gross - num(t.fee));
+    }
+  }
+  let run = 0; let longest = 0; let best = null; let worst = null; let total = 0;
+  for (const r of realized) {
+    const pnl = num(r.pnl);
+    const m = bucket(String(r.date || "").slice(0, 6));
+    m.realizedPnl += pnl; m.trades += 1; total += pnl;
+    if (pnl > 0) m.wins += 1; else if (pnl < 0) m.losses += 1;
+    // 平盤（0）不算虧也不重置連虧
+    if (pnl < 0) { run += 1; longest = Math.max(longest, run); } else if (pnl > 0) run = 0;
+    if (!best || pnl > best.pnl) best = { code: r.code, date: r.date, pnl, pnlPct: r.pnlPct ?? null };
+    if (!worst || pnl < worst.pnl) worst = { code: r.code, date: r.date, pnl, pnlPct: r.pnlPct ?? null };
+  }
+  const wins = realized.filter((r) => num(r.pnl) > 0);
+  const losses = realized.filter((r) => num(r.pnl) < 0);
+  const gain = wins.reduce((sum, r) => sum + num(r.pnl), 0);
+  const loss = losses.reduce((sum, r) => sum - num(r.pnl), 0);
+  const avgPct = (rows) => { const valid = rows.map((r) => r.pnlPct).filter(Number.isFinite); return valid.length ? roundTo(valid.reduce((a, b) => a + b, 0) / valid.length) : null; };
+  const finish = (m) => ({ ...m, realizedPnl: Math.round(m.realizedPnl), fees: Math.round(m.fees), taxes: Math.round(m.taxes), dividendsNet: Math.round(m.dividendsNet),
+    buyAmount: Math.round(m.buyAmount), sellAmount: Math.round(m.sellAmount), winRate: m.trades ? roundTo((m.wins / m.trades) * 100, 1) : null });
+  const months = [...buckets.values()].sort((a, b) => b.key.localeCompare(a.key)).map(finish);
+  const years = new Map();
+  for (const m of months) {
+    const key = m.key.slice(0, 4);
+    const y = years.get(key) || { key, realizedPnl: 0, trades: 0, wins: 0, losses: 0, fees: 0, taxes: 0, dividendsNet: 0, buyAmount: 0, sellAmount: 0 };
+    for (const field of ["realizedPnl", "trades", "wins", "losses", "fees", "taxes", "dividendsNet", "buyAmount", "sellAmount"]) y[field] += m[field];
+    years.set(key, y);
+  }
+  return {
+    basis: "realized-avg-cost-net-of-fees-v1",
+    minTrades: PERSONAL_SCORECARD_MIN_TRADES,
+    overall: {
+      trades: realized.length, wins: wins.length, losses: losses.length, flat: realized.length - wins.length - losses.length,
+      winRate: realized.length ? roundTo((wins.length / realized.length) * 100, 1) : null,
+      profitFactor: loss > 0 ? roundTo(gain / loss) : null,
+      profitFactorReason: loss > 0 ? null : realized.length ? "no-losing-trade" : "no-trades",
+      expectancy: realized.length ? Math.round(total / realized.length) : null,
+      avgWin: wins.length ? Math.round(gain / wins.length) : null,
+      avgLoss: losses.length ? Math.round(loss / losses.length) : null,
+      avgWinPct: avgPct(wins), avgLossPct: avgPct(losses),
+      maxConsecutiveLosses: longest, best, worst, realizedPnl: Math.round(total),
+    },
+    months,
+    years: [...years.values()].sort((a, b) => b.key.localeCompare(a.key)).map(finish),
+  };
+}
+
+// T+2 交割：買進要付「價金＋手續費」、賣出收「價金−手續費−證交稅」，交割日＝成交日後第 2 個交易日。
+// 只看最近兩週的成交（更早的早就交割完）；開休市表只用已快取的（帳本讀取不打上游），沒有就只跳週末並標明。
+function buildSettlementSchedule(records, todayCompact, holidayRows = []) {
+  const today = toCompactDate(todayCompact) || toTaipeiCompactDate();
+  const floor = addDaysCompact(today, -14);
+  const items = [];
+  for (const t of Array.isArray(records) ? records : []) {
+    if (t.side !== "buy" && t.side !== "sell") continue;
+    const date = toCompactDate(t.date);
+    if (!date || date < floor) continue;
+    const settleDate = nextScheduledTradingDate(nextScheduledTradingDate(date, holidayRows), holidayRows);
+    if (!settleDate || settleDate < today) continue;
+    const gross = (Number(t.price) || 0) * (Number(t.shares) || 0);
+    const amount = t.side === "buy" ? -(gross + (Number(t.fee) || 0)) : gross - (Number(t.fee) || 0) - (Number(t.tax) || 0);
+    items.push({ settleDate, tradeDate: date, code: t.code, side: t.side, shares: Number(t.shares) || 0, amount: Math.round(amount) });
+  }
+  const days = new Map();
+  for (const item of items) {
+    const day = days.get(item.settleDate) || { date: item.settleDate, payable: 0, receivable: 0, net: 0, items: [] };
+    if (item.amount < 0) day.payable += -item.amount; else day.receivable += item.amount;
+    day.net += item.amount;
+    day.items.push(item);
+    days.set(item.settleDate, day);
+  }
+  return {
+    asOf: today,
+    calendarSource: holidayRows.length ? "cached-official-holiday-schedule" : "weekends-only",
+    days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)),
+  };
+}
+
 function sanitizeUser(user) {
   if (!user) return null;
   return {
@@ -14992,11 +15096,15 @@ async function handleApi(request, requestUrl, response) {
     db.trades ||= {};
     if (request.method === "GET") {
       const payload = normalizeTradesPayload(db.trades[auth.user.id]);
+      const portfolio = buildPortfolio(payload);
       jsonResponse(response, 200, {
         ok: true,
         rev: getDataRev(db, auth.user.id, "trades"),
         ...payload,
-        portfolio: buildPortfolio(payload),
+        portfolio,
+        // 我的成績單（帳本側）與 T+2 交割都只從帳本算、不打上游；開休市表只用已快取的那份。
+        scorecard: portfolio.ok ? buildPersonalScorecard(payload, portfolio) : null,
+        settlement: buildSettlementSchedule(payload.records, toTaipeiCompactDate(), tradingCalendarCache.value?.holidayRows || []),
         // 官方歸檔裡有、但帳本沒登錄的除權／現增；前端據此提供事後補登。
         missingCorporateActions: await findMissingCorporateActions(payload),
       });
@@ -16828,7 +16936,7 @@ export {
   buildAdjustedPeriodRows, resolveCorporateActionAdjustments,
   parseYahooSplitFactors, normalizeYahooHistoryRows,
   // 隔日沖／波段評分
-  buildPick, buildRiskTags, buildReasons, corporateActionGapRatio, officialCorporateActionRatio, plausibleShareFactor,
+  buildPick, buildRiskTags, buildReasons, buildPersonalScorecard, buildSettlementSchedule, corporateActionGapRatio, officialCorporateActionRatio, plausibleShareFactor,
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,
   SWING_FORMULA_VERSION, stockTickSize, roundToStockTick,
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,
