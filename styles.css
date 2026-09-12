@@ -1605,9 +1605,20 @@ button.today-focus-card:focus-visible {
 .pick-quote strong,
 .pick-quote small,
 .pick-reasons,
-.pick-risks {
+.pick-risks,
+.pick-flow {
   display: block;
 }
+
+/* 籌碼標籤：法人買賣超用漲跌色、要先想清楚的用琥珀、其餘中性；波段卡的 inline 版縮小一號。 */
+.pick-flow { color: var(--muted); }
+.pick-flow em { font-style: normal; margin-right: 6px; }
+.pick-chip.is-flow { font-size: var(--fs-note); font-weight: 700; }
+.pick-chip.is-flow.is-up { color: var(--up-text); border-color: rgba(255, 99, 99, 0.35); }
+.pick-chip.is-flow.is-down { color: var(--down-text); border-color: rgba(38, 166, 91, 0.4); }
+.pick-chip.is-flow.is-warn { color: var(--warn-text); border-color: rgba(255, 177, 44, 0.5); background: rgba(255, 177, 44, 0.08); }
+.pick-chip.is-flow .gloss-link { color: inherit; }
+.swing-tags .pick-chip.is-flow { min-height: 26px; padding: 3px 8px; }
 
 .pick-main strong {
   font-size: 18px;

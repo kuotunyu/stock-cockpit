@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v59";
+const APP_SHELL_VERSION = "stock1-shell-v60";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -1175,6 +1175,25 @@ function renderReasonChips(reasons = []) {
     return `<span class="pick-chip is-note">${glossMaybe(metric.label)}</span>`;
   });
   return `<span class="pick-chip-list">${chips.join("") || '<span class="pick-chip is-muted">目前未標記</span>'}</span>`;
+}
+
+// 籌碼標籤：伺服器掃描時算好（法人買賣超、融資使用率／券資比、當沖比、即將除權息），只標示、不進評分。
+// 每顆都連到名詞解釋；tone：up／down（法人買賣超）、warn（要先想清楚）、info。
+function renderFlowChips(pick, { inline = false } = {}) {
+  const items = Array.isArray(pick?.chips?.items) ? pick.chips.items : [];
+  const chips = items.map((item) => `<span class="pick-chip is-flow is-${escapeHtml(item.tone || "info")}" title="${escapeHtml(item.asOf ? `${item.asOf} 的官方數字` : "官方數字")}">${item.term ? glossLink(item.label, item.term) : escapeHtml(item.label)}</span>`);
+  const dividend = pick?.dividendAhead;
+  if (dividend?.exDate) {
+    const date = `${String(dividend.exDate).slice(4, 6)}/${String(dividend.exDate).slice(6, 8)}`;
+    const what = [
+      Number.isFinite(dividend.cashDividend) && dividend.cashDividend > 0 ? `現金 ${formatNumber(dividend.cashDividend)} 元` : "",
+      Number.isFinite(dividend.stockRatio) && dividend.stockRatio > 0 ? `配股 ${formatNumber(dividend.stockRatio)}` : "",
+    ].filter(Boolean).join("、");
+    const when = Number(dividend.daysUntil) <= 0 ? "今日" : `${dividend.daysUntil} 天後`;
+    chips.push(`<span class="pick-chip is-flow is-warn" title="除權息日參考價會下調；進場前先想填息、二代健保補充保費（單筆 ≥ 2 萬）與股利所得稅。驗證引擎會用官方參考價還原，不會把除息缺口記成虧損">${glossLink(`${when}除${dividend.kind === "cash-dividend" ? "息" : "權息"} ${date}${what ? `・${what}` : ""}`, "即將除權息")}</span>`);
+  }
+  if (!chips.length) return "";
+  return inline ? chips.join("") : `<span class="pick-flow"><em>籌碼</em><span class="pick-chip-list pick-flow-list">${chips.join("")}</span></span>`;
 }
 
 function renderRiskChips(tags = []) {
@@ -6666,6 +6685,7 @@ function renderOvernightGroups() {
                       <em>風險</em>
                       ${renderRiskChips(pick.riskTags)}${pick.fillRisk === "limit-up-locked" ? `<span class="pick-chip is-risk is-alert" title="訊號日整天只有漲停一個成交價：盤後追不到，次日開盤能不能買要看開盤；成績單的開盤進場口徑在觀察日也鎖死時會把它排除">漲停鎖死・買不到</span>` : ""}
                     </span>
+                    ${renderFlowChips(pick)}
                     <span class="pick-backtest">
                       <em>回測</em>
                       ${renderBacktestChips(pick.recentBacktest)}
@@ -7563,6 +7583,7 @@ function renderSwingCard(pick) {
             ? `<span class="swing-warn is-alert" title="今天整天只有漲停這一個成交價，掛買單排不到，下方的「進場」價位今天買不到。訊號本身仍然成立，但這檔不會列入波段驗證統計。">漲停鎖死・今天買不到</span>`
             : ""}
           ${warns}
+          ${renderFlowChips(pick, { inline: true })}
           </div>
           <p class="swing-desc">${escapeHtml(pick.scenario?.desc || "")}</p>
         </div>
@@ -14183,6 +14204,9 @@ const GLOSSARY = [
   { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
   { term: "盤中曾達／曾破", aliases: ["曾達", "曾破", "曾達+2%", "曾破−2%", "盤中曾達"], cat: "成績單與決策", def: "觀察日的<strong>最高價曾碰到 +2%</strong>／<strong>最低價曾碰到 −2%</strong>——只是盤中曾觸及的價位（最大有利／不利幅度），<strong>不是可實現損益</strong>，兩者同一天可以同時成立。要在最高價出場是事後才知道的；真正能執行的是開盤賣或收盤賣的淨獲利率。" },
   { term: "同期大盤", aliases: ["同期大盤", "同期加權指數", "指數基準"], cat: "成績單與決策", def: "隔日沖成績單的對照組：每個完成觀察日「訊號日收盤→觀察日收盤」的<strong>加權指數</strong>報酬，日等權平均，與「平均隔日收」看同一段期間。訊號的平均隔日收若長期<strong>低於同期大盤</strong>，表示選出來的股票沒有比直接抱指數好；高於才有超額。兩邊都是價格觀察，不是可成交回測，也不含費稅。" },
+  { term: "融資使用率與券資比", aliases: ["融資使用率", "券資比", "融資", "融券"], cat: "風險與制度", def: "<strong>融資使用率</strong>＝融資餘額 ÷ 融資限額：偏高（本站 60% 起標警示）代表散戶槓桿籌碼重，大跌時容易出現斷頭賣壓。<strong>券資比</strong>＝融券餘額 ÷ 融資餘額：偏高（30% 起標警示）代表空單多，急漲時可能軋空，但也代表有人看空。兩者都是前一交易日的官方餘額，只標示、不進選股評分。" },
+  { term: "當沖比", aliases: ["當沖比率", "當沖", "暫停先賣後買當沖"], cat: "風險與制度", def: "當日沖銷成交股數 ÷ 當日總成交股數（證交所每日當沖統計，目前只接上市）。比率高（本站 40% 起標警示）代表那天的量有很大一部分是當天買當天賣沖出來的，收盤後留下來的籌碼比看起來少，隔日沖策略尤其要當心。「暫停先賣後買當沖」是主管機關對該檔的限制註記。只標示、不進評分。" },
+  { term: "即將除權息", aliases: ["即將除息", "即將除權", "除權息預告"], cat: "風險與制度", def: "官方預告未來 10 天內的除權息日。當天參考價會依股利下調，看起來像跌但不是；進場前先想三件事：會不會填息、單筆 ≥ 2 萬的股利要扣 2.11% 二代健保補充保費、股利要計入所得。系統的驗證引擎會用官方參考價還原，不會把除息缺口記成虧損。" },
   { term: "紀律提醒", aliases: ["紀律提醒", "本月虧損上限", "連虧停手"], cat: "成績單與決策", def: "你自己設的兩條停手線：<strong>本月虧損上限</strong>（元，看本月已實現）與<strong>連虧停手</strong>（筆，看最新一筆往前數的連續虧損）。達到就在庫存損益頁與隔日沖總覽顯示橫幅，記完賣出也會提醒。它不會擋你下單，只是把「今天不該再做」講出來；存在這台裝置，不進帳本。" },
   { term: "我的成績單", aliases: ["我的成績單", "帳本成績單", "交割款", "今年稅務估算"], cat: "成績單與決策", def: "庫存損益頁裡量<strong>你自己</strong>成交的成績，和策略成績單（量系統訊號）是兩回事。已實現＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費）；勝率、獲利因子、每筆平均、最長連虧都以「每筆賣出」為單位，未滿 20 筆不當結論。「交割款」是 T+2：成交日後第 2 個交易日，買進要付價金＋手續費、賣出收價金−費稅，開休市表沒載入時只跳週末。" },
   { term: "淨期望值", aliases: ["期望值", "淨期望", "每筆平均淨報酬"], cat: "成績單與決策", def: "每做一筆平均賺賠多少：把每筆的<strong>淨報酬</strong>（扣一買一賣的模型費稅）平均起來。勝率高不代表賺錢——十筆贏九筆各賺 0.3%、輸一筆賠 4%，期望值還是負的；反過來也成立。隔日沖成績單的淨期望值用「次日開盤買、當日收盤賣」這個做得到的口徑算，正才值得做；未計每筆最低手續費與滑價，小額部位實際會更差一點。" },

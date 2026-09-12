@@ -9061,6 +9061,108 @@ function aggregateOvernightRecords(records) {
       : null };
 }
 
+// ===== 當沖統計（TWSE TWTB4U，每日）=====
+// 當沖成交股數 ÷ 當日總成交股數 ＝ 當沖比：比率高代表那天的量是沖出來的，隔日賣壓與籌碼穩定度是另一回事。
+// 上櫃的每日當沖統計端點尚未核對（TPEx 網站有 Cloudflare 驗證），先只接上市；抓不到就沒有標籤、不擋掃描。
+// 非交易日（或收盤統計還沒出）也回 stat OK，但逐檔表只剩代號／名稱／暫停註記三欄：解析器要求有成交股數欄，沒有就視為尚無資料。
+const DAY_TRADE_STATS_URL = "https://www.twse.com.tw/exchangeReport/TWTB4U";
+const DAY_TRADE_STATS_TTL_MS = 6 * 60 * 60 * 1000;
+const dayTradeStatsCache = new Map(); // dateCompact → { expiresAt, value }
+function parseDayTradeStatsPayload(payload) {
+  if (!payload || payload.stat !== "OK" || !Array.isArray(payload.tables)) return null;
+  const table = payload.tables.find((item) => Array.isArray(item?.fields) && item.fields.includes("證券代號") && Array.isArray(item.data));
+  if (!table) return null;
+  const index = (name) => table.fields.indexOf(name);
+  const codeIdx = index("證券代號"); const suspendIdx = index("暫停現股賣出後現款買進當沖註記");
+  const sharesIdx = index("當日沖銷交易成交股數"); const buyIdx = index("當日沖銷交易買進成交金額"); const sellIdx = index("當日沖銷交易賣出成交金額");
+  if (codeIdx < 0 || sharesIdx < 0) return null;
+  const records = {};
+  for (const row of table.data) {
+    const code = String(row?.[codeIdx] || "").trim().toUpperCase();
+    if (!/^[0-9A-Z]{4,6}$/.test(code)) continue;
+    records[code] = { code, dayTradeShares: parseNumber(row[sharesIdx]) ?? 0, buyAmount: buyIdx >= 0 ? parseNumber(row[buyIdx]) : null,
+      sellAmount: sellIdx >= 0 ? parseNumber(row[sellIdx]) : null, suspended: suspendIdx >= 0 && String(row[suspendIdx] || "").trim() === "Y" };
+  }
+  return records;
+}
+async function getDayTradeStats(dateCompact) {
+  const date = toCompactDate(dateCompact) || toTaipeiCompactDate();
+  const cached = dayTradeStatsCache.get(date);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const payload = await fetchJson(`${DAY_TRADE_STATS_URL}?response=json&date=${date}&selectType=All`, { headers: { "user-agent": "Mozilla/5.0" } });
+  const records = parseDayTradeStatsPayload(payload);
+  if (!records) throw new Error(`當沖統計 stat=${String(payload?.stat || "").slice(0, 40)}`);
+  const value = { date: compactToIsoDate(date), source: "TWSE TWTB4U", records };
+  dayTradeStatsCache.set(date, { expiresAt: Date.now() + DAY_TRADE_STATS_TTL_MS, value });
+  return value;
+}
+
+// ===== 籌碼標籤 =====
+// 法人買賣超、融資使用率／券資比、當沖比、即將除權息：只標示、不進評分（不改選股所以不升版）。
+// 任一來源抓不到就少那一類標籤，不擋掃描；每個標籤都帶 asOf 讓人知道是哪一天的數字。
+const CHIP_THRESHOLDS = Object.freeze({ institutionalMinLots: 100, marginUsageInfoPct: 40, marginUsageWarnPct: 60, shortRatioInfoPct: 15, shortRatioWarnPct: 30,
+  dayTradeInfoPct: 20, dayTradeWarnPct: 40, dividendHorizonDays: 10 });
+async function loadChipSources(dateCompact) {
+  const settled = await Promise.allSettled([
+    getInstitutionalData({ codes: [], dateCompact }),
+    getMarginData({ codes: [], dateCompact }),
+    getDayTradeStats(dateCompact),
+    getDividendSchedule(),
+  ]);
+  const value = (result) => (result.status === "fulfilled" ? result.value : null);
+  return { asOf: dateCompact, institutional: value(settled[0]), margin: value(settled[1]), dayTrade: value(settled[2]), dividends: value(settled[3]) };
+}
+// 未來 N 天內的除權息（官方預告表）：進場前該知道參考價會下調、填息與稅的事。
+function dividendAheadFor(code, schedule, asOf, horizonDays = CHIP_THRESHOLDS.dividendHorizonDays) {
+  const list = typeof schedule?.get === "function" ? schedule.get(code) : null;
+  const today = toCompactDate(asOf);
+  if (!Array.isArray(list) || !list.length || !today) return null;
+  const limit = addDaysCompact(today, horizonDays);
+  const next = list.map((item) => ({ ...item, exDate: toCompactDate(item.exDate) }))
+    .filter((item) => item.exDate && item.exDate > today && item.exDate <= limit)
+    .sort((a, b) => a.exDate.localeCompare(b.exDate))[0];
+  if (!next) return null;
+  return { exDate: next.exDate, daysUntil: compactDaysDiff(today, next.exDate), kind: next.kind || "unknown",
+    cashDividend: Number.isFinite(next.cashDividend) ? next.cashDividend : null, stockRatio: Number.isFinite(next.stockRatio) ? next.stockRatio : null };
+}
+function buildChipTags(sources, code, volumeLots) {
+  if (!sources || !code) return null;
+  const items = [];
+  const lots = (shares) => (Number.isFinite(Number(shares)) ? Math.round(Number(shares) / 1000) : null);
+  const inst = sources.institutional?.records?.[code];
+  if (inst) {
+    for (const [key, label] of [["foreignNet", "外資"], ["trustNet", "投信"]]) {
+      const net = lots(inst[key]);
+      if (net === null || Math.abs(net) < CHIP_THRESHOLDS.institutionalMinLots) continue;
+      items.push({ key, label: `${label}${net > 0 ? "買超" : "賣超"} ${Math.abs(net).toLocaleString("en-US")} 張`, tone: net > 0 ? "up" : "down",
+        asOf: sources.institutional.date || null, term: "三大法人（外資／投信／自營）" });
+    }
+  }
+  const margin = sources.margin?.records?.[code];
+  if (margin) {
+    if (Number.isFinite(margin.marginUsagePct) && margin.marginUsagePct >= CHIP_THRESHOLDS.marginUsageInfoPct) {
+      items.push({ key: "marginUsage", label: `融資使用率 ${Math.round(margin.marginUsagePct)}%`, tone: margin.marginUsagePct >= CHIP_THRESHOLDS.marginUsageWarnPct ? "warn" : "info",
+        asOf: sources.margin.date || null, term: "融資使用率與券資比" });
+    }
+    if (Number.isFinite(margin.shortMarginRatio) && margin.shortMarginRatio >= CHIP_THRESHOLDS.shortRatioInfoPct) {
+      items.push({ key: "shortRatio", label: `券資比 ${Math.round(margin.shortMarginRatio)}%`, tone: margin.shortMarginRatio >= CHIP_THRESHOLDS.shortRatioWarnPct ? "warn" : "info",
+        asOf: sources.margin.date || null, term: "融資使用率與券資比" });
+    }
+  }
+  const day = sources.dayTrade?.records?.[code];
+  if (day) {
+    if (Number(volumeLots) > 0 && Number.isFinite(day.dayTradeShares)) {
+      const ratio = (day.dayTradeShares / 1000) / Number(volumeLots) * 100;
+      if (ratio >= CHIP_THRESHOLDS.dayTradeInfoPct) {
+        items.push({ key: "dayTrade", label: `當沖比 ${Math.round(ratio)}%`, tone: ratio >= CHIP_THRESHOLDS.dayTradeWarnPct ? "warn" : "info", asOf: sources.dayTrade.date || null, term: "當沖比" });
+      }
+    }
+    if (day.suspended) items.push({ key: "dayTradeSuspended", label: "暫停先賣後買當沖", tone: "info", asOf: sources.dayTrade.date || null, term: "當沖比" });
+  }
+  if (!items.length) return null;
+  return { items, sources: { institutional: sources.institutional?.date || null, margin: sources.margin?.date || null, dayTrade: sources.dayTrade?.date || null } };
+}
+
 function overnightSnapshotFormulaVersion(snapshot) {
   return String(snapshot?.formulaVersion || LEGACY_OVERNIGHT_FORMULA_VERSION);
 }
@@ -9070,6 +9172,8 @@ async function buildOvernightSignalsUncached({
   reference, latestDate,
 } = {}) {
   const riskSets = await getRiskSets(latestDate);
+  // 籌碼標籤來源（法人、融資券、當沖、除權息預告）：只標示不進評分，抓不到就少那一類，不擋掃描。
+  const chipSources = await loadChipSources(latestDate);
 
   // 上市與上櫃的整批收盤檔更新時間不同（傍晚常出現上櫃已更新、上市還是前一日）。
   // 落後的市場會被日期過濾掉，清單只剩半個市場——必須明確警示，避免誤判「今天訊號特別少」。
@@ -9164,7 +9268,11 @@ async function buildOvernightSignalsUncached({
 
   const picks = enriched.flat();
   // 注意/處置/變更交易股保留並標示（前端可切換隱藏）。
-  for (const pick of picks) pick.surveillance = riskSets.surveillance.get(pick.code) || null;
+  for (const pick of picks) {
+    pick.surveillance = riskSets.surveillance.get(pick.code) || null;
+    pick.chips = buildChipTags(chipSources, pick.code, pick.volumeLots);
+    pick.dividendAhead = dividendAheadFor(pick.code, chipSources.dividends, latestDate);
+  }
   const groups = groupPicks(picks, maxPerGroup);
   inputEvidence.sort((a,b) => `${a.exchange}:${a.code}`.localeCompare(`${b.exchange}:${b.code}`));
   const readyCount = inputEvidence.filter(item => item.outcome !== 'data-insufficient').length;
@@ -14023,6 +14131,9 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     loadFundamentalsHistory().then(() => ensureCorporateActionResults(scanFromDate, latestDate)),
   ]);
   const candidates = preselectSwingQuotes(reference, riskSets, latestDate, maxCandidates).map(quote => ({ ...quote }));
+  // 籌碼標籤來源（只標示不進評分）；當沖比要用候選池當日成交張數當分母。
+  const chipSources = await loadChipSources(latestDate);
+  const volumeByCode = new Map(candidates.map((quote) => [quote.code, quote.volumeLots]));
   const candidatePool = freezeVerificationCandidates(candidates, reference);
   const inputEvidence = candidatePool.map(item => ({ ...item }));
   // 同時抓取數再調低（5→3）：當月逐檔 K 在高並發下最容易被證交所限流而退回前一交易日，
@@ -14111,6 +14222,10 @@ async function scanSwingBoard(reference, latestDate, scenarioKey, maxCandidates)
     if (!info) { pick.surveillance = null; continue; }
     const interval = lookupStockSurveillance(pick.code, surveillanceBoardCache.value)?.interval ?? null;
     pick.surveillance = interval ? { ...info, interval } : info;
+  }
+  for (const pick of picks) {
+    pick.chips = buildChipTags(chipSources, pick.code, volumeByCode.get(pick.code));
+    pick.dividendAhead = dividendAheadFor(pick.code, chipSources.dividends, latestDate);
   }
 
   // 各場景命中數：同一次掃描已對每檔跑過所有場景偵測，兩個分頁的數字都來自這一份、保證一致。
@@ -16964,7 +17079,8 @@ export {
   buildAdjustedPeriodRows, resolveCorporateActionAdjustments,
   parseYahooSplitFactors, normalizeYahooHistoryRows,
   // 隔日沖／波段評分
-  buildPick, buildRiskTags, buildReasons, buildPersonalScorecard, buildSettlementSchedule, DIVIDEND_TAX_RULES, estimateDividendTax, corporateActionGapRatio, officialCorporateActionRatio, plausibleShareFactor,
+  buildPick, buildRiskTags, buildReasons, buildPersonalScorecard, buildSettlementSchedule, DIVIDEND_TAX_RULES, estimateDividendTax,
+  parseDayTradeStatsPayload, getDayTradeStats, buildChipTags, dividendAheadFor, loadChipSources, CHIP_THRESHOLDS, corporateActionGapRatio, officialCorporateActionRatio, plausibleShareFactor,
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,
   SWING_FORMULA_VERSION, stockTickSize, roundToStockTick,
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,

@@ -485,3 +485,21 @@ test("TPEx tradingStock（上櫃逐檔月歷史）：tables[0].data 列 ≥9 欄
   const close = Number(String(row[6]).replace(/,/g, ""));
   assert.ok(Number.isFinite(close) && close > 0, `第 7 欄應是收盤價：${row[6]}`);
 });
+
+test("TWSE 每日當沖統計 TWTB4U：tables[1] 逐檔含證券代號、暫停註記、當沖成交股數", async (t) => {
+  const payload = await fetchLatestTradingPayload(
+    t,
+    (date) => `https://www.twse.com.tw/exchangeReport/TWTB4U?response=json&date=${date}&selectType=All`,
+    "https://www.twse.com.tw/zh/trading/day-trading/twtb4u.html",
+    // 非交易日（或收盤統計還沒出）也回 stat OK，但逐檔表只有代號／名稱／暫停註記三欄：要往前找到有成交股數的那天
+    (body) => body?.stat === "OK" && Array.isArray(body.tables) && body.tables.some((item) => Array.isArray(item?.fields) && item.fields.includes("當日沖銷交易成交股數")),
+  );
+  if (!payload) return;
+  const table = payload.tables.find((item) => Array.isArray(item?.fields) && item.fields.includes("證券代號") && item.fields.includes("當日沖銷交易成交股數"));
+  assert.ok(table, "要有逐檔表（fields 含「證券代號」）");
+  for (const field of ["證券代號", "暫停現股賣出後現款買進當沖註記", "當日沖銷交易成交股數", "當日沖銷交易買進成交金額", "當日沖銷交易賣出成交金額"]) {
+    assert.ok(table.fields.includes(field), `逐檔表缺欄位 ${field}：${table.fields.join("、")}`);
+  }
+  assert.ok(table.data.length > 500, `全市場當沖標的應有數百檔，實際 ${table.data.length}`);
+  assert.match(String(table.data[0][0]).trim(), /^[0-9A-Z]{4,6}$/, `第 0 欄應為代號，實際 ${table.data[0][0]}`);
+});
