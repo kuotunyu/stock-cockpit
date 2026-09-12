@@ -22,9 +22,16 @@ permissions:
 
 jobs:
   date-sweep:
-    name: 日期炸彈掃描
+    # 整套 16 個日期序列跑要 23～30 分鐘，貼著 30 分鐘上限——2026-09-09／09-11 兩晚都被逾時砍掉、
+    # 09-08／09-10 只是勉強過。拆成 4 片矩陣（scripts/date-sweep.mjs 的 --shard=i/n，輪流分配），
+    # 每片 4 個日期約 6～8 分鐘；片內仍序列跑（測試會搶 DATA_DIR lease，並行會互踢）。
+    name: 日期炸彈掃描 (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -40,8 +47,8 @@ jobs:
 
       # 把系統時鐘平移到一組結構上有風險的日子，每個日子跑一次完整測試。
       # 完全離線、確定性，紅了就是真的有問題。
-      - name: Run date sweep
-        run: npm run test:dates
+      - name: Run date sweep (shard ${{ matrix.shard }} of 4)
+        run: npm run test:dates -- --shard=${{ matrix.shard }}/4
 
   upstream-shape:
     name: 上游欄位形狀

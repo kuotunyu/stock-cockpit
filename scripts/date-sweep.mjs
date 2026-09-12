@@ -186,11 +186,33 @@ function normalizeTarget(input) {
   return withZone;
 }
 
+// 分片：`--shard=i/n` 取第 i 片（1 起算）。用輪流分配（index % n）而不是切塊，讓每片都混到
+// 月初／月底／假日／深夜這幾類，某一類特別慢時不會全堆在同一片。CI 用 4 片：整套 16 個日期
+// 序列跑要 23～30 分鐘，貼著 30 分鐘上限，2026-09-09／09-11 兩晚都被逾時砍掉。
+export function shardTargets(targets, spec) {
+  if (!spec) return targets;
+  const match = /^(\d+)\/(\d+)$/.exec(String(spec).trim());
+  if (!match) throw new Error(`--shard 格式是 i/n（例如 2/4），收到：${spec}`);
+  const index = Number(match[1]);
+  const total = Number(match[2]);
+  if (!(total >= 1) || !(index >= 1) || index > total) throw new Error(`--shard 超出範圍：${spec}`);
+  return targets.filter((_, position) => position % total === index - 1);
+}
+
 function runSweep() {
-  const args = process.argv.slice(2);
-  const targets = args.length
-    ? args.map((arg) => ({ at: normalizeTarget(arg), label: "指定日期" }))
-    : riskyDates();
+  const rawArgs = process.argv.slice(2);
+  const shardSpec = rawArgs.find((arg) => arg.startsWith("--shard="))?.slice("--shard=".length) || "";
+  const args = rawArgs.filter((arg) => !arg.startsWith("--shard="));
+  const targets = shardTargets(
+    args.length
+      ? args.map((arg) => ({ at: normalizeTarget(arg), label: "指定日期" }))
+      : riskyDates(),
+    shardSpec,
+  );
+  if (!targets.length) {
+    console.error(`[date-sweep] 分片 ${shardSpec} 沒有分到任何日期。`);
+    process.exit(1);
+  }
   const files = testFiles();
   // 檔案數歸零就必須停：沒有檔案參數的 `node --test` 會自動探索整個專案，
   // 把 tests/live/ 的真實網路測試一起跑掉（同 scripts/test-coverage.mjs 的守衛）。
@@ -228,5 +250,7 @@ function runSweep() {
   process.exit(1);
 }
 
+// 三種身分：preload（SWEEP_AT）、主控（直接 node scripts/date-sweep.mjs）、被測試 import（只要純函式，不能開跑）。
+const isMainModule = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (SWEEP_AT) await installShiftedClock(SWEEP_AT);
-else runSweep();
+else if (isMainModule) runSweep();
