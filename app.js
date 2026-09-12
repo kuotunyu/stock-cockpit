@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v63";
+const APP_SHELL_VERSION = "stock1-shell-v64";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -480,6 +480,8 @@ const verifyHistoryState = {
   loading: false,
   data: null,
   error: "",
+  expanded: new Set(), // 手機逐日表（M4）展開的日期；行情重繪不會收回去
+  visibleDays: 5, // 手機逐日表先給 5 天，「顯示更早」一次 +20（桌機 CSS 全顯示，不理這個數）
 };
 
 const notesState = {
@@ -4155,6 +4157,22 @@ document.addEventListener('click', async event => {
   const target = [...document.querySelectorAll('#tradePlanList [data-trade-plan-edit]')].find(item => item.dataset.tradePlanEdit === id);
   target?.click(); document.querySelector('#tradePlanForm [name=stopPrice]')?.focus();
 });
+// 手機庫存摘要條（M4）：今日損益／未實現／市值／本月已實現四格一條（桌機 CSS 不顯示，仍用原本的總覽格）。
+// 今日損益＝Σ(現價 − 昨收) × 股數，只算有昨收的檔；缺昨收另計檔數，不用 0 冒充。本月已實現讀伺服器成績單的當月桶。
+function renderHoldingsStrip({ todayPnl, todayCounted, todayMissing, totalUnrealized, totalValue, unpriced }) {
+  const monthKey = taipeiTodayCompact().slice(0, 6);
+  const card = tradesState.scorecard;
+  const monthRealized = card ? ((card.months || []).find((item) => item.key === monthKey)?.realizedPnl ?? 0) : null;
+  const tone = (value) => (value > 0 ? "is-up" : value < 0 ? "is-down" : "");
+  return `
+    <div class="hold-strip" aria-label="今天的四個數字">
+      <div><span>今日損益</span><strong class="${todayCounted ? tone(todayPnl) : ""}">${todayCounted ? formatMoney(todayPnl, { signed: true }) : "--"}</strong>${todayMissing ? `<small>缺 ${todayMissing} 檔昨收</small>` : ""}</div>
+      <div><span>未實現</span><strong class="${tone(totalUnrealized)}">${formatMoney(totalUnrealized, { signed: true })}</strong></div>
+      <div><span>市值</span><strong>${unpriced ? "--" : formatMoney(totalValue)}</strong></div>
+      <div><span>本月已實現</span><strong class="${monthRealized === null ? "" : tone(monthRealized)}">${monthRealized === null ? "--" : formatMoney(monthRealized, { signed: true })}</strong></div>
+    </div>`;
+}
+
 function renderHoldingsPanel() {
   const panel = el.holdingsPanel;
   if (!panel) return;
@@ -4227,6 +4245,7 @@ function renderHoldingsPanel() {
   let pricedCost = 0; // 報酬率的分母只能算「有報價、已計入市值與未實現」的那部分成本
   let unpriced = 0;
   const holdingValues = []; // 有報價的各檔市值，算集中度用
+  let todayPnl = 0; let todayCounted = 0; let todayMissing = 0; // 手機摘要條的今日損益
   const holdRows = holdings
     .map((h) => {
       const stock = byCode.get(h.code);
@@ -4240,6 +4259,8 @@ function renderHoldingsPanel() {
         totalUnrealized += unrealized;
         pricedCost += h.cost;
         holdingValues.push(value);
+        const previousClose = finiteNumberOrNull(stock?.previousClose);
+        if (previousClose !== null && previousClose > 0) { todayPnl += (price - previousClose) * h.shares; todayCounted += 1; } else todayMissing += 1;
       } else {
         unpriced += 1;
       }
@@ -4407,11 +4428,12 @@ function renderHoldingsPanel() {
   const previousRiskFoldOpen = Boolean(panel.querySelector("[data-holdings-risk-fold]")?.open);
   const previousScorecardOpen = Boolean(panel.querySelector("[data-holdings-scorecard-fold]")?.open);
   panel.innerHTML = `
+    ${renderHoldingsStrip({ todayPnl, todayCounted, todayMissing, totalUnrealized, totalValue, unpriced })}
     <div class="hold-summary">
-      <div><span>總市值</span><strong>${unpriced ? '--' : formatMoney(totalValue)}</strong>${unpriced ? `<small>已報價市值 ${formatMoney(totalValue)}</small>` : ''}</div>
+      <div data-hold-kpi="value"><span>總市值</span><strong>${unpriced ? '--' : formatMoney(totalValue)}</strong>${unpriced ? `<small>已報價市值 ${formatMoney(totalValue)}</small>` : ''}</div>
       ${top3Share != null ? `<div title="前三大持股市值 ÷ 已報價總市值；僅顯示觀察占比，不代表分散安全"><span>前三大占比${unpriced ? '（總市值未知）' : ''}</span><strong>${unpriced ? '--' : `${top3Share}%`}</strong></div>` : ""}
       <div><span>總成本</span><strong>${formatMoney(totalCost)}</strong></div>
-      <div><span>未實現損益</span><strong class="${upTone}">${formatMoney(totalUnrealized, { signed: true })}${totalPct != null ? `（${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(1)}%）` : ""}</strong></div>
+      <div data-hold-kpi="unrealized"><span>未實現損益</span><strong class="${upTone}">${formatMoney(totalUnrealized, { signed: true })}${totalPct != null ? `（${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(1)}%）` : ""}</strong></div>
       <div><span>已實現累計</span><strong class="${realizedPnl >= 0 ? "is-up" : "is-down"}">${formatMoney(realizedPnl, { signed: true })}</strong></div>
     </div>
     ${(hasDividendRecords || dividendRecognizedGross || dividendReceivableGross || dividendReceivedNet) ? `
@@ -7033,25 +7055,35 @@ function renderVerifyHistory() {
     return `<div class="overnight-empty">${escapeHtml(data.message || "尚未累積驗證紀錄")}</div>`;
   }
   const rate = (hit, total) => (Number.isFinite(hit) && total ? `${Math.round((hit / total) * 100)}%` : "--");
+  // 手機（≤760px）一天一行：日期｜開盤進場｜淨期望值｜›，點 › 展開其餘欄位；先給 visibleDays 天，「顯示更早」一次 +20。
+  // 桌機 CSS 不理這些 class／按鈕（全顯示、無 ›）。
+  const rowClass = (record, index) => [
+    index >= verifyHistoryState.visibleDays ? "is-older" : "",
+    verifyHistoryState.expanded.has(String(record.asOf)) ? "is-expanded" : "",
+  ].filter(Boolean).join(" ");
+  const rowToggle = (record) => `<button class="verify-row-toggle" type="button" data-verify-toggle="${escapeHtml(String(record.asOf))}" aria-expanded="${verifyHistoryState.expanded.has(String(record.asOf)) ? "true" : "false"}" aria-label="展開這一天的其餘欄位">›</button>`;
+  const netMobile = (record) => `<span class="verify-net-mobile" data-col="淨期望值">${Number.isFinite(record.openEntryNet?.avg) ? formatSignedPercent(record.openEntryNet.avg) : "--"}</span>`;
   const rows = data.records
-    .map((record) => (record.status !== "final" || record.complete === false)
+    .map((record, index) => (record.status !== "final" || record.complete === false)
       ? `
-        <div class="verify-history-row is-pending">
+        <div class="verify-history-row is-pending ${rowClass(record, index)}">
           <span data-col="訊號→觀察">${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
           <span data-col="驗證檔數">${record.verified || 0}/${record.signals} 檔</span>
           <span class="verify-pending-note">${record.status === "partial" ? "部分官方行情待補，暫不納入累計" : "等待實際下一交易日的正式行情"}</span>
         </div>
       `
       : `
-        <div class="verify-history-row">
+        <div class="verify-history-row ${rowClass(record, index)}">
           <span data-col="訊號→觀察">${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
           <span data-col="驗證檔數">${record.verified} 檔</span>
           <span data-col="開盤進場">${rate(record.winAtOpenEntry, record.metricCoverage?.winAtOpenEntry?.validCount ?? record.verified)}</span>
+          ${netMobile(record)}
           <span data-col="開盤觀察">${rate(record.winAtOpen, record.metricCoverage?.winAtOpen?.validCount ?? record.verified)}</span>
           <span data-col="曾達+2%">${rate(record.hitPlus2, record.metricCoverage?.hitPlus2?.validCount ?? record.verified)}</span>
           <span data-col="曾破−2%">${rate(record.brokeMinus2, record.metricCoverage?.brokeMinus2?.validCount ?? record.verified)}</span>
           <span data-col="平均開盤">${formatSignedPercent(record.avgOpenReturn)}</span>
           <span data-col="平均收盤">${formatSignedPercent(record.avgCloseReturn)}</span>
+          ${rowToggle(record)}
         </div>
       `)
     .join("");
@@ -7129,6 +7161,9 @@ function renderVerifyHistory() {
       </div>
       ${rows}
       </div>
+      ${data.records.length > verifyHistoryState.visibleDays
+        ? `<button class="verify-older" type="button" data-verify-more>顯示更早 ${Math.min(20, data.records.length - verifyHistoryState.visibleDays)} 天（共 ${data.records.length} 天）</button>`
+        : ""}
     </section>
   `;
 }
@@ -7551,6 +7586,16 @@ function renderSwingCard(pick) {
   const reasonHtml = reasons.length
     ? `<p class="swing-reason"><span class="swing-reason-tag">為何上榜</span>${reasons.join("、")}。</p>`
     : "";
+  // 手機（≤760px）「為什麼入選」摺成一句（summary 印 reasons），桌機永遠展開、summary 由 CSS 隱藏；
+  // 預設開合同 details.sv-fold 的 matchMedia 慣例。
+  const swingWhyOpen = !(typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches);
+  const whyBrief = reasons.length ? reasons.join("、") : String(pick.scenario?.desc || "");
+  // 手機三格計畫：結構停損／目標旁標相對進場的百分比（桌機 CSS 不顯示）
+  const pctFromEntry = (value) => {
+    if (!Number.isFinite(value) || !Number.isFinite(entry) || entry <= 0) return "";
+    const pct = ((value - entry) / entry) * 100;
+    return `<i class="swing-stat-pct">${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%</i>`;
+  };
   // 收盤日期標示：少數個股的官方收盤資料會比大盤晚一個交易日（當月被限流漏抓、或官方逐檔尚未更新），
   // 這時卡片的「收盤」其實是前一交易日的價格，會與右側「即時報價」不同天。把實際日期標在「收盤」旁，
   // 避免使用者以為同一天卻對不上（例如利華卡片 6/12 收 45.1，右側面板是 6/15 即時 44.9）。
@@ -7603,18 +7648,21 @@ function renderSwingCard(pick) {
           </div>
           <p class="swing-desc">${escapeHtml(pick.scenario?.desc || "")}</p>
         </div>
-        ${reasonHtml}
-        <div class="swing-facts">${factsHtml}</div>
-        ${entryTipHtml}
+        <details class="swing-why"${swingWhyOpen ? " open" : ""}>
+          <summary><span class="swing-why-tag">為什麼入選</span><span class="swing-why-brief">${escapeHtml(whyBrief)}</span></summary>
+          ${reasonHtml}
+          <div class="swing-facts">${factsHtml}</div>
+          ${entryTipHtml}
+        </details>
       </div>
       <div class="swing-plan">
         <div class="swing-stat swing-stat-entry" title="建議進場價，預設＝當日收盤價，所以和右上角的收盤是同一個數字"><span>${glossLink("進場")}</span><strong>${formatNumber(pick.plan?.entry)}</strong></div>
         <div class="swing-stat" title="初始停損：進場後先設在收盤 −5%"><span>${glossLink("建議停損")} <i class="swing-stat-hint">−5%</i></span><strong>${formatNumber(pick.plan?.initialStop)}</strong></div>
-        <div class="swing-stat" title="依支撐（擺動低點／布林下軌／月線）設的較大停損；盈虧比就是用它算的"><span>${glossLink("結構停損")}</span><strong>${formatNumber(pick.plan?.structuralStop)}</strong></div>
+        <div class="swing-stat" title="依支撐（擺動低點／布林下軌／月線）設的較大停損；盈虧比就是用它算的"><span>${glossLink("結構停損")}</span><strong>${formatNumber(pick.plan?.structuralStop)}${pctFromEntry(stop)}</strong></div>
         <div class="swing-stat swing-stat-sub" title="進階：股價漲到此價（收盤 +5%）後，改用移動停利往上跟、鎖住獲利。這只是提醒價：成績單的驗證不模擬移停，結案只看停損、目標與 15 日"><span>${glossLink("啟動移停")} <i class="swing-stat-hint">+5%</i></span><strong>${formatNumber(pick.plan?.trailingTrigger)}</strong></div>
         <div class="swing-stat" title="上方壓力或波段量測幅度推估的目標價${Number.isFinite(pick.plan?.nearestResistance)
           ? `。⚠ 上方 ${formatNumber(pick.plan.nearestResistance)} 還有一個更近的擺動高點，它太貼近收盤價（2% 內）所以不當目標用，但路上會先遇到它。`
-          : ""}"><span>${glossLink("目標")}</span><strong>${formatNumber(pick.plan?.target)}</strong>${
+          : ""}"><span>${glossLink("目標")}</span><strong>${formatNumber(pick.plan?.target)}${pctFromEntry(target)}</strong>${
           Number.isFinite(pick.plan?.nearestResistance) ? '<i class="swing-stat-hint is-warn">前有壓力</i>' : ""
         }</div>
         <div class="swing-stat swing-rr ${rrTone}" title="盈虧比＝(目標−進場)÷(進場−結構停損)。括號內是扣掉一買一賣手續費與證交稅之後的淨值，選股門檻用的是淨值（毛值會讓「剛好過關」的設定其實賠錢）"><span>${glossLink("盈虧比")}</span><strong>${Number.isFinite(rr) ? rr.toFixed(1) : "—"}${
@@ -13240,6 +13288,21 @@ document.addEventListener("input", (event) => {
 
 // 到價提醒的刪除（detail 面板與「更多 → 訊號提醒」兩處共用同一個 data 屬性）。
 document.addEventListener("click", (event) => {
+  // 手機逐日表（M4）：› 展開單日其餘欄位（只改 DOM＋記進 Set，不整頁重繪）；「顯示更早」一次 +20 天
+  const verifyToggle = event.target.closest("[data-verify-toggle]");
+  if (verifyToggle) {
+    const key = verifyToggle.dataset.verifyToggle;
+    const open = !verifyHistoryState.expanded.has(key);
+    if (open) verifyHistoryState.expanded.add(key); else verifyHistoryState.expanded.delete(key);
+    verifyToggle.closest(".verify-history-row")?.classList.toggle("is-expanded", open);
+    verifyToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    return;
+  }
+  if (event.target.closest("[data-verify-more]")) {
+    verifyHistoryState.visibleDays += 20;
+    render();
+    return;
+  }
   // 手機的到價提醒說明摺在 ⓘ 後面（桌機 CSS 不顯示這顆鈕）
   const helpToggle = event.target.closest("[data-alert-help]");
   if (helpToggle) {
@@ -13718,7 +13781,8 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  if (event.target.closest('.swing-stat-size details')) return;
+  // 卡片內的 details（部位估算假設、手機的「為什麼入選」）點 summary 只開合，不開明細
+  if (event.target.closest('.swing-stat-size details, .swing-why > summary')) return;
   const swingPick = event.target.closest("[data-swing-code]");
   if (swingPick) {
     const code = normalizeStockCodeInput(swingPick.dataset.swingCode);

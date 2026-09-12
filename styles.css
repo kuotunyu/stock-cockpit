@@ -10391,3 +10391,84 @@ details[data-overnight-warnings-fold] > .overnight-warning {
   .alert-head small { display: none; }
   .price-alert-box.is-help-open .alert-head small { display: block; flex-basis: 100%; }
 }
+
+/* ===== 手機成績單逐日表、策略卡三段式、庫存摘要條（M4，2026-09-13）===== */
+/* 桌機：這些手機專用元件不顯示；「為什麼入選」details 永遠展開、summary 藏起來，內容占原本 reason／facts／entry 三列 */
+.verify-row-toggle, .verify-older, .verify-history-row > .verify-net-mobile, .hold-strip, .swing-stat-pct { display: none; }
+.swing-why { grid-area: reason-start / reason-start / entry-end / reason-end; min-width: 0; }
+.swing-why > summary { display: none; }
+.swing-why > .swing-facts, .swing-why > .swing-entry-tip { margin-top: 8px; }
+
+@media (max-width: 760px) {
+  /* 逐日表：一天一行（日期｜開盤進場｜淨期望值｜›），點 › 展開其餘欄位兩欄排；先給 5 天，「顯示更早」一次 20 天 */
+  .verify-history-row { grid-template-columns: minmax(0, 1fr) auto auto 36px; gap: 6px 10px; align-items: center; }
+  .verify-history-row > span[data-col] { display: none; }
+  .verify-history-row > span[data-col="訊號→觀察"] { display: grid; grid-area: 1 / 1; }
+  .verify-history-row > span[data-col="開盤進場"] { display: grid; grid-area: 1 / 2; }
+  .verify-history-row > span[data-col="淨期望值"] { display: grid; grid-area: 1 / 3; } /* 特異性要贏過上面的 span[data-col] display:none */
+  .verify-row-toggle { grid-area: 1 / 4; display: inline-grid; place-items: center; width: 36px; height: 44px; margin: -8px 0; border: 0; background: transparent; color: var(--muted-2); font-size: 24px; line-height: 1; cursor: pointer; transition: transform 160ms ease; }
+  .verify-history-row.is-expanded > span[data-col] { display: grid; }
+  .verify-history-row.is-expanded > span[data-col]:not([data-col="訊號→觀察"]):not([data-col="開盤進場"]):not(.verify-net-mobile) { grid-column: span 2; }
+  .verify-history-row.is-expanded .verify-row-toggle { transform: rotate(90deg); }
+  .verify-history-row.is-older { display: none; }
+  .verify-history-row.is-pending { grid-template-columns: minmax(0, 1fr) auto; }
+  .verify-history-row.is-pending > span[data-col] { display: grid; grid-area: auto; }
+  .verify-history-row.is-pending > .verify-pending-note { grid-column: 1 / -1; }
+  .verify-older { display: block; width: 100%; min-height: 44px; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--orange-2); font-size: 15px; font-weight: 800; cursor: pointer; }
+
+  /* 策略卡三段式：頭 → 計畫（進場／結構停損／目標一列三格＋一行文字）→ 盈虧比條 → chips → 為什麼入選（摺）→ 按鈕 */
+  .swing-card {
+    grid-template-areas:
+      "rank"
+      "head"
+      "plan"
+      "rrbar"
+      "signal"
+      "reason"
+      "actions";
+  }
+  .swing-why { grid-area: reason; }
+  .swing-why > summary { display: flex; gap: 8px; align-items: baseline; min-height: 44px; padding: 6px 0; cursor: pointer; list-style: none; font-size: 15px; line-height: 1.4; }
+  .swing-why > summary::-webkit-details-marker { display: none; }
+  .swing-why > summary::before { content: "▸"; flex: none; color: var(--orange-2); }
+  .swing-why[open] > summary::before { content: "▾"; }
+  .swing-why-tag { flex: none; font-weight: 800; color: var(--orange-2); }
+  .swing-why-brief { min-width: 0; color: var(--muted-2); overflow-wrap: anywhere; }
+  .swing-why > .swing-reason { display: none; } /* 摘要列已經講過 */
+  .swing-why > .swing-facts { margin-top: 4px; }
+  /* 標題列：名稱＋代號在左、收盤＋漲跌在右（M1 是上下兩列，130px） */
+  .swing-headline { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+  .swing-quote-inline { flex-direction: column; align-items: flex-end; gap: 0; }
+  .swing-plan { display: flex; flex-wrap: wrap; gap: 6px; }
+  .swing-plan > .swing-stat { flex: 1 1 28%; min-width: 0; min-height: 0; padding: 8px 10px; gap: 2px; }
+  .swing-plan > .swing-stat > span { font-size: 13.5px; }
+  .swing-plan > .swing-stat > strong { font-size: 21px; }
+  .swing-plan > .swing-stat-entry { order: 1; }
+  .swing-plan > .swing-stat:nth-child(3) { order: 2; }
+  .swing-plan > .swing-stat:nth-child(5) { order: 3; }
+  .swing-plan > .swing-stat:nth-child(3) strong { color: var(--down-text); }
+  .swing-plan > .swing-stat:nth-child(5) strong { color: var(--up-text); }
+  .swing-plan > .swing-stat:nth-child(2),
+  .swing-plan > .swing-stat:nth-child(4),
+  .swing-plan > .swing-rr,
+  .swing-plan > .swing-stat-size { order: 4; flex: 1 1 auto; display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; min-height: 32px; padding: 4px 8px; background: transparent; border: 1px solid var(--line); border-radius: 6px; white-space: nowrap; }
+  .swing-plan > .swing-stat:nth-child(2) strong,
+  .swing-plan > .swing-stat:nth-child(4) strong,
+  .swing-plan > .swing-rr strong,
+  .swing-plan > .swing-stat-size strong { font-size: 16px; }
+  .swing-plan > .swing-stat-size { flex: 1 1 100%; }
+  .swing-stat-pct { display: inline; margin-left: 4px; font-size: var(--fs-badge); font-style: normal; font-weight: 700; color: var(--muted-2); }
+  .swing-actions { flex-direction: column; }
+  .swing-actions button { width: 100%; min-height: 44px; }
+
+  /* 庫存摘要條：今日損益／未實現／市值／本月已實現，四格一條；總覽格裡重複的市值／未實現藏起來 */
+  .hold-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 8px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .hold-strip > div { min-width: 0; padding: 8px 8px; border-right: 1px solid var(--line); display: grid; gap: 2px; align-content: start; }
+  .hold-strip > div:last-child { border-right: 0; }
+  .hold-strip span { color: var(--muted-2); font-size: var(--fs-badge); font-weight: 700; }
+  .hold-strip strong { font-family: var(--mono); font-size: 16px; font-weight: 700; overflow-wrap: anywhere; }
+  .hold-strip strong.is-up { color: var(--up-text); }
+  .hold-strip strong.is-down { color: var(--down-text); }
+  .hold-strip small { color: var(--muted-2); font-size: var(--fs-badge); }
+  .hold-summary > [data-hold-kpi="value"], .hold-summary > [data-hold-kpi="unrealized"] { display: none; }
+}

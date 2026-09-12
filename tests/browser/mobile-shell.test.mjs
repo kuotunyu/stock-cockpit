@@ -70,11 +70,13 @@ test("375px 策略卡：單欄、計畫格每格 ≥ 100px、動作列在卡片�
       const rect = c.getBoundingClientRect();
       const actions = c.querySelector(".swing-actions")?.getBoundingClientRect();
       return { cols: getComputedStyle(c).gridTemplateColumns.trim().split(/\s+/).length, width: Math.round(rect.width),
-        stats: [...c.querySelectorAll(".swing-stat")].map((s) => Math.round(s.getBoundingClientRect().width)),
+        stats: [...c.querySelectorAll(".swing-plan > .swing-stat-entry, .swing-plan > .swing-stat:nth-child(3), .swing-plan > .swing-stat:nth-child(5)")].map((s) => Math.round(s.getBoundingClientRect().width)),
+        others: [...c.querySelectorAll(".swing-plan > .swing-stat:not(.swing-stat-entry):not(:nth-child(3)):not(:nth-child(5))")].map((s) => Math.round(s.getBoundingClientRect().width)),
         actionsBottomGap: actions ? Math.round(rect.bottom - actions.bottom) : null, actionsWidth: actions ? Math.round(actions.width) : null };
     });
     assert.equal(card.cols, 1, "手機策略卡是單欄（以前 areas 漏了 actions 塌成三欄）");
-    assert.ok(card.stats.length >= 4 && card.stats.every((w) => w >= 100), `計畫格寬度 ${card.stats.join("/")}，每格應 ≥ 100px（以前 28px）`);
+    assert.ok(card.stats.length === 3 && card.stats.every((w) => w >= 100), `進場／結構停損／目標三格寬度 ${card.stats.join("/")}，每格應 ≥ 100px（以前 28px；M4 起一列三格）`);
+    assert.ok(card.others.length >= 3 && card.others.every((w) => w >= 60), `次要計畫項目寬度 ${card.others.join("/")}`);
     assert.ok(card.actionsWidth >= card.width - 40, "動作列吃滿卡片寬");
     assert.ok(card.actionsBottomGap !== null && card.actionsBottomGap <= 24, "動作列在卡片底部");
   } finally {
@@ -189,6 +191,94 @@ test("375px 明細抽屜（M3）：半屏 sheet 有把手、價格一行無色�
     await page.mouse.move(x, header2.top + 8 + 160, { steps: 6 });
     await page.mouse.up();
     await page.locator("#detailPanel.is-open").waitFor({ state: "detached", timeout: 5000 });
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("375px 成績單逐日表一天一行＋展開＋顯示更早、策略卡三段式一屏內、庫存摘要條（M4）", { timeout: 120_000 }, async () => {
+  const fixture = await createBrowserFixture({ scenario: "populated" });
+  try {
+    const { page } = fixture;
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.locator('[data-overnight-view="performance"]').click(); // 隔日沖頁的「成績單」視圖
+    await page.locator(".verify-history-row:not(.is-head)").first().waitFor({ state: "attached" });
+    await page.waitForTimeout(400);
+    const daily = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll(".verify-history-row:not(.is-head)")];
+      const visible = rows.filter((r) => r.getBoundingClientRect().height > 0);
+      return { total: rows.length, visible: visible.length, tableHeight: Math.round(document.querySelector(".verify-history-table").getBoundingClientRect().height),
+        rowHeight: Math.round(visible[0]?.getBoundingClientRect().height || 0), more: Boolean(document.querySelector("[data-verify-more]")),
+        firstLine: ["訊號→觀察", "開盤進場", "淨期望值"].map((col) => visible[0]?.querySelector(`[data-col="${col}"]`)?.getBoundingClientRect().width > 0) };
+    });
+    assert.ok(daily.total >= 20, `fixture 應有 ≥ 20 天，實際 ${daily.total}`);
+    assert.equal(daily.visible, 5, "先給最近 5 天");
+    assert.ok(daily.rowHeight <= 72, `一天一行 ${daily.rowHeight}px`);
+    assert.ok(daily.tableHeight <= 420, `逐日表 ${daily.tableHeight}px（以前 20 張卡）`);
+    assert.equal(daily.more, true, "要有「顯示更早」");
+    assert.deepEqual(daily.firstLine, [true, true, true], "收合列印日期／開盤進場／淨期望值三格");
+    const toggle = page.locator(".verify-history-row:not(.is-head) [data-verify-toggle]").first();
+    await toggle.scrollIntoViewIfNeeded();
+    await toggle.click();
+    const expanded = await page.evaluate(() => {
+      const row = document.querySelector(".verify-history-row.is-expanded");
+      return row ? { height: Math.round(row.getBoundingClientRect().height), shown: [...row.querySelectorAll("span[data-col]")].filter((s) => s.getBoundingClientRect().height > 0).length } : null;
+    });
+    assert.ok(expanded && expanded.shown >= 8 && expanded.height > daily.rowHeight + 40, `展開後其餘欄位顯示：${JSON.stringify(expanded)}`);
+    await page.locator("[data-verify-more]").scrollIntoViewIfNeeded();
+    await page.locator("[data-verify-more]").click();
+    await page.waitForTimeout(500);
+    const afterMore = await page.evaluate(() => ({
+      visible: [...document.querySelectorAll(".verify-history-row:not(.is-head)")].filter((r) => r.getBoundingClientRect().height > 0).length,
+      stillExpanded: document.querySelectorAll(".verify-history-row.is-expanded").length,
+    }));
+    assert.ok(afterMore.visible >= 20, `顯示更早後 ${afterMore.visible} 天`);
+    assert.equal(afterMore.stillExpanded, 1, "重繪後展開狀態保留");
+    // 策略卡三段式
+    await page.locator('.bottom-nav .nav-action[data-screen="strategy"]').click();
+    await page.locator(".swing-card").first().waitFor();
+    await page.waitForTimeout(300);
+    const card = await page.evaluate(() => {
+      const c = document.querySelector(".swing-card");
+      const r = (n) => (n ? n.getBoundingClientRect() : null);
+      const stats = [...c.querySelectorAll(".swing-plan > .swing-stat")].map((s) => ({ top: Math.round(r(s).top), width: Math.round(r(s).width) }));
+      const why = c.querySelector("details.swing-why");
+      const order = [".swing-plan", ".swing-rrbar", ".swing-signal-line", ".swing-why", ".swing-actions"].map((s) => c.querySelector(s)).filter(Boolean).map((n) => Math.round(r(n).top));
+      return { height: Math.round(r(c).height), stats, whyOpen: why?.open, summaryHeight: Math.round(r(why?.querySelector("summary")).height),
+        buttons: [...c.querySelectorAll(".swing-actions button")].map((b) => ({ width: Math.round(r(b).width), height: Math.round(r(b).height) })), order, pct: c.querySelectorAll(".swing-stat-pct").length };
+    });
+    assert.ok(card.height <= 700, `策略卡 ${card.height}px 應一屏內（812 − 頂欄 92 − 導覽 78）`);
+    assert.ok(card.stats.length >= 6 && card.stats[0].top === card.stats[2].top && card.stats[2].top === card.stats[4].top, `進場／結構停損／目標同一列：${JSON.stringify(card.stats)}`);
+    assert.ok(card.stats[0].width >= 90 && card.stats[2].width >= 90 && card.stats[4].width >= 90, "三格各 ≥ 90px");
+    assert.equal(card.whyOpen, false, "為什麼入選預設摺起");
+    assert.ok(card.summaryHeight >= 40, "摺疊列可觸控");
+    assert.ok(card.buttons.length === 2 && card.buttons.every((b) => b.height >= 44 && b.width >= 300), `按鈕全寬 44px：${JSON.stringify(card.buttons)}`);
+    assert.ok(card.order.every((top, i) => i === 0 || top > card.order[i - 1]), `區塊順序 計畫→盈虧比條→chips→為什麼→按鈕：${card.order.join("/")}`);
+    assert.equal(card.pct, 2, "結構停損／目標各標相對進場百分比");
+    await page.locator(".swing-card details.swing-why > summary").first().click();
+    await page.waitForTimeout(250);
+    assert.equal(await page.evaluate(() => document.querySelector(".swing-card details.swing-why").open), true, "點摘要展開");
+    assert.equal(await page.locator("#detailPanel.is-open").count(), 0, "點摘要不可誤開明細");
+    // 庫存摘要條（fixture 沒持股，注入一檔）
+    await page.locator('.bottom-nav .nav-action[data-screen="watchlist"]').click();
+    await page.evaluate(() => {
+      tradesState.portfolio = { ok: true, holdings: [{ code: "6488", shares: 1000, avgCost: 400, cost: 400000 }], realized: [], totals: { cost: 400000, realizedPnl: 0 } };
+      tradesState.records = []; tradesState.loaded = true;
+      state.watchList = "hold"; renderHoldingsPanel();
+    });
+    await page.waitForTimeout(300);
+    const strip = await page.evaluate(() => {
+      const s = document.querySelector(".hold-strip");
+      return { visible: Boolean(s) && s.getBoundingClientRect().height > 0,
+        cells: s ? [...s.children].map((c) => ({ w: Math.round(c.getBoundingClientRect().width), label: c.querySelector("span")?.textContent })) : null,
+        hiddenTiles: [...document.querySelectorAll(".hold-summary > [data-hold-kpi]")].filter((n) => n.getBoundingClientRect().height === 0).length,
+        bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth };
+    });
+    assert.equal(strip.visible, true, "手機有摘要條");
+    assert.deepEqual(strip.cells.map((c) => c.label), ["今日損益", "未實現", "市值", "本月已實現"]);
+    assert.ok(strip.cells.every((c) => c.w >= 80), JSON.stringify(strip.cells));
+    assert.equal(strip.hiddenTiles, 2, "總覽格裡重複的市值／未實現在手機藏起來");
+    assert.equal(strip.bodyFits, true);
   } finally {
     await fixture.close();
   }
