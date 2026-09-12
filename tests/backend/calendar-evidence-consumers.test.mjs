@@ -28,7 +28,7 @@ test('v1 cash/price與unknown pending都停等缺章，恢復後按8/31停損；
  for(const identity of [cash,price,null]){
   const e=entry(identity);const result=mod.replaySwingVerificationHistory(e,rows,'20260901',calendar(true));
   assert.equal(e.status,'pending');assert.equal(e.lastChecked,'20260828');assert.equal(e.daysHeld,0);assert.equal(result.unavailableReason,'calendar-coverage-unknown');
-  mod.replaySwingVerificationHistory(e,rows,'20260901',calendar());assert.equal(e.status,'loss');assert.equal(e.resultPct,-5);assert.equal(e.resolvedAt,'20260831');
+  mod.replaySwingVerificationHistory(e,rows,'20260901',calendar());assert.equal(e.status,'loss');assert.equal(e.resultPct,-5.1,'觸價停損滑一檔');assert.equal(e.resolvedAt,'20260831');
   const saved=structuredClone(e);mod.replaySwingVerificationHistory(e,[bar('20260831',120,99,119)],'20260901',calendar());assert.deepEqual(e,saved);
  }
 });
@@ -57,7 +57,7 @@ test('production歷史runner在原月章不足時保存pending，恢復後續驗
   await mod.advanceSwingVerification(reference,'20261201',{riskSets:null});
   let live=(await mod.loadDb()).swingVerification['20260828'][0];assert.equal(live.status,'pending');assert.equal(live.lastChecked,'20260828');assert.equal(live.verificationRetry.reason,'calendar-coverage-unknown');
   recovered=true;t.mock.timers.setTime(Date.now()+6*60*1000);await mod.advanceSwingVerification(reference,'20261201',{riskSets:null});
-  live=(await mod.loadDb()).swingVerification['20260828'][0];assert.equal(live.status,'loss');assert.equal(live.resultPct,-5);assert.equal(live.evaluationApplied.calendarEvidencePolicyVersion,'official-session-interval-v1');
+  live=(await mod.loadDb()).swingVerification['20260828'][0];assert.equal(live.status,'loss');assert.equal(live.resultPct,-5.1);assert.equal(live.evaluationApplied.calendarEvidencePolicyVersion,'official-session-interval-v1');
   assert.equal((await mod.loadDb()).swingVerification['20260101'][0].resultPct,8);
   const maturity=await mod.getMaturityCalendar('20260828','20260901');assert.equal(maturity.monthEvidence['202608'].coveredThrough,'20260831');
  }finally{remove();t.mock.timers.reset();}

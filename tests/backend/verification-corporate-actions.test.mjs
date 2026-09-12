@@ -125,7 +125,7 @@ test("波段驗證：沒有公司行動時真的跌破停損，仍必須記 loss
     officialRow({ rawDate: D1, open: 99, high: 99.5, low: 94, close: 94.2, exchangePreviousClose: 100 }),
   ], D1, calendar);
   assert.equal(entry.status, "loss");
-  assert.equal(entry.resultPct, -5);
+  assert.equal(entry.resultPct, -5.1, "觸價停損滑一檔：95 → 94.9");
   assert.equal(entry.entry, 100, "沒有事件就不能動計畫價");
   assert.equal(entry.corporateActions, undefined);
   assert.equal(entry.corporateActionPending, undefined);
@@ -140,7 +140,8 @@ test("波段驗證：除息後真的續跌，以調整後的停損價結案", ()
   assert.equal(entry.status, "loss");
   assert.equal(entry.entry, 95);
   assert.equal(entry.stop, 90.25);
-  assert.equal(entry.resultPct, -5, "含息總報酬：相對調整後 entry 仍是 −5%");
+  // 調整後停損 90.25 下方一檔（<100 元升降單位 0.1）＝ 90.15，相對調整後 entry 95 ＝ −5.11%
+  assert.equal(entry.resultPct, -5.11, "含息總報酬：相對調整後 entry −5%，再滑一檔");
 });
 
 // D-01 子項 1：舊行為是「交易所昨收缺值 → 偵測不到事件 → 照原始價判定」，並被當成已知限制

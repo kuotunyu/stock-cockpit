@@ -179,11 +179,11 @@ test("場景卡：依大盤季線上／下分層；未達最小樣本只給筆�
     state.screen = "strategy";
     swingVerifyState.data = { ok: true, currentFormulaVersion: "v", formulaVersions: [], recent: [], pendingCount: 0,
       scenarios: [{ scenario: "midBandDefense", samples: 30, wins: 12, losses: 8, expired: 2, pending: 8, resolved: 22, winRate: 54.5, winRateMinSamples: 20,
-        byRegime: { aboveMa60: { resolved: 20, wins: 12, winRate: 60 }, belowMa60: { resolved: 2, wins: 0, winRate: null }, unknown: { resolved: 0, wins: 0, winRate: null } } }] };
+        byRegime: { aboveMa60: { resolved: 20, wins: 12, winRate: 60 }, nearMa60: { resolved: 5, wins: 3, winRate: null }, belowMa60: { resolved: 2, wins: 0, winRate: null }, unknown: { resolved: 0, wins: 0, winRate: null } } }] };
     renderSwingVerifyPanel();
     return document.getElementById("swingVerify").innerHTML;
   })()`)).replace(/\s+/g, " ");
-  assert.match(html.replace(/<[^>]+>/g, ""), /大盤季線上 60%・季線下 0\/2/);
+  assert.match(html.replace(/<[^>]+>/g, ""), /大盤季線上 60%・季線附近 3\/5・季線下 0\/2/, "±1% 內另成「季線附近」一層");
   assert.match(html, /data-glossary-term="大盤位階"/, "「大盤」要能點開位階的名詞解釋");
   assert.doesNotMatch(html, /位階未知/);
 });

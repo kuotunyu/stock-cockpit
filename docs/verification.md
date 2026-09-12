@@ -53,3 +53,5 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 此修正維持已知價格／含息 v1 的財務評估、進出場、公司行動與成本定義。已知舊 pending 仍可續驗，未知身份保留原限制，既有 final 不重算。實際波段 advance 的 `evaluationApplied` 記錄來源政策版本、原月份證據與 inputFingerprint，`scope=this-advance-only`，不聲稱過去每一步都已通過新檢查。固定期間 benchmark 的獨立 calendarVersion v2 保持原樣。
 
 隔日 evidence adapter 的 `officialDays` 保留已讀官方月 K 裡、訊號日之後的合格正價格日期集，與精確觀察日 bar 分開；較早日期即使不在稀疏市場日曆內，也不能被排定日成功 bar 蓋掉。direct quote 驗原 TWSE/TPEx OpenAPI 或官方月 K 來源及實際使用的正 OHLC／price，保留原 source；Yahoo 或未具名 fallback 不能重貼成官方 final。MIS 使用獨立、同日且正值的官方 intraday 欄位，仍明示盤中。缺足夠官方來源時待補，恢復後才完成。
+
+2026-09-12 起三個口徑補充：（1）波段驗證的觸價停損改記<strong>停損價下方一檔</strong>（台股升降單位）出場，但不低於當日最低價，並在驗證單記 `exitSlippageTicks`（0 或 1）；跳空開低與跌停順延仍用實際開盤價，不另扣。已結案紀錄不重算。（2）成績單的大盤位階分層改看 `distMa60Pct`：|收盤／MA60 − 1| ≤ 1% 歸「季線附近」（`byRegime.nearMa60`），舊紀錄只有布林就照布林、缺值仍 unknown。（3）隔日總覽 `totals.indexBenchmark` 並列同期加權指數：每個完成觀察日「訊號日收盤→觀察日收盤」的指數報酬、日等權平均，指數缺值的日子少算並回報 `missingDays`；與「平均隔日收」看同一段期間，兩邊都是價格觀察，不是可成交回測。

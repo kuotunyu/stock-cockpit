@@ -193,6 +193,17 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   assert.match(more.textContent, /曾達\+2%/);
   assert.match(more.textContent, /平均隔日收/);
   assert.match(enough, /data-glossary-term="盤中曾達／曾破"/, "曾達／曾破也要連到名詞解釋");
+  assert.doesNotMatch(enough, /同期大盤/, "沒有指數基準就不印，不用 -- 佔位");
+  // 同期加權指數：放在「更多口徑」裡、與平均隔日收並列，抓不到指數缺值天數要講
+  const withIndex = render({ days: 25, signals: 300, hitPlus2: 100, brokeMinus2: 50, winAtOpen: 150, winAtClose: 120, avgOpenReturn: 0.2, avgCloseReturn: 0.31, minDays: 20,
+    ci: { hitPlus2: null, winAtOpen: null, winAtClose: null }, indexBenchmark: { source: "taiex-close-to-close", days: 24, missingDays: 1, avgReturn: 0.45 } });
+  host = app.doc.createElement("div");
+  host.innerHTML = withIndex;
+  const indexChip = [...host.querySelectorAll("details.verify-more span")].find((c) => c.textContent.includes("同期大盤"));
+  assert.ok(indexChip, "同期大盤要在更多口徑裡");
+  assert.match(indexChip.textContent, /同期大盤 ▲0\.45%/);
+  assert.match(indexChip.getAttribute("title"), /24 天，1 天指數缺值/);
+  assert.match(indexChip.innerHTML, /data-glossary-term="同期大盤"/);
   // 整個區間都在 50% 以下：琥珀（is-warn），不是綠
   const weak = render({ days: 25, signals: 300, hitPlus2: 100, brokeMinus2: 50, winAtOpen: 90, winAtClose: 120, avgOpenReturn: -0.2, avgCloseReturn: 0.1, minDays: 20,
     ci: { hitPlus2: null, winAtOpen: { n: 25, mean: 0.3, low: 0.2, high: 0.42 }, winAtClose: null } });
@@ -229,6 +240,7 @@ test("長期成績單：依大盤季線上／下分層的一行", () => {
     ], totals: { days: 30, signals: 300, hitPlus2: 100, brokeMinus2: 50, winAtOpen: 150, winAtClose: 100,
       minDays: 20, ci: {}, byRegime: {
         aboveMa60: { days: 20, signals: 200, hitPlus2: 80, winAtOpen: 120, winAtClose: 80, avgCloseReturn: 0.4, minDays: 20, ci: { winAtOpen: { n: 20, mean: 0.6, low: 0.52, high: 0.68 }, winAtClose: null } },
+        nearMa60: { days: 3, signals: 30, hitPlus2: 10, winAtOpen: 15, winAtClose: 12, avgCloseReturn: 0.1, minDays: 20, ci: { winAtOpen: null, winAtClose: null } },
         belowMa60: { days: 8, signals: 80, hitPlus2: 20, winAtOpen: 24, winAtClose: 16, avgCloseReturn: -0.6, minDays: 20, ci: { winAtOpen: { n: 8, mean: 0.3, low: 0.1, high: 0.5 }, winAtClose: null } },
         unknown: { days: 2, signals: 20, hitPlus2: 0, winAtOpen: 6, winAtClose: 4, avgCloseReturn: 0, minDays: 20, ci: { winAtOpen: null, winAtClose: null } } } } };
     verifyHistoryState.loading = false;
@@ -237,6 +249,7 @@ test("長期成績單：依大盤季線上／下分層的一行", () => {
   })()`));
   assert.match(html.replace(/<[^>]+>/g, ""), /大盤季線上 20 天：開盤賣 60%（區間 52～68%）・收盤賣 40%/);
   assert.match(html, /data-glossary-term="大盤位階"/, "「大盤」要能點開位階的名詞解釋");
+  assert.match(html.replace(/<[^>]+>/g, ""), /季線上 20 天：.*｜季線附近 3 天（累積中 3\/20）｜季線下 8 天/, "±1% 內的日子另成「季線附近」一層，排在上下之間");
   assert.match(html, /季線下 8 天（累積中 8\/20）/, "未滿最小天數的分層不印百分比");
   assert.doesNotMatch(html, /季線下 8 天：開盤賣/);
   assert.match(html, /位階未知 2 天/);

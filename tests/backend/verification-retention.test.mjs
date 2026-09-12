@@ -292,7 +292,7 @@ async function runCalendarReviewCase(caseYear, extraRow, missingIndex = false) {
 test("I1：有效交易日期但指數 -- 仍保留 1/3 停損日，不得誤判 1/4 win", async () => {
   const {result,stopDay}=await runCalendarReviewCase(2024,null,true);
   assert.equal(result.status,"loss"); assert.equal(result.resolvedAt,stopDay);
-  assert.equal(result.resultPct,-5); assert.equal(result.daysHeld,1);
+  assert.equal(result.resultPct,-5.1); assert.equal(result.daysHeld,1);
 });
 
 test("I1：混月份／格式錯誤／不存在日期列不可在 filter 後逃過整月完整性驗證", async () => {

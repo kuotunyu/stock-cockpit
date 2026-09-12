@@ -64,12 +64,21 @@ test("推進：碰到停損＝停損（跳空開低用開盤價計滑價）；�
   const stopHit = makeEntry();
   mod.advanceSwingVerificationEntry(stopHit, dayQuote({ low: 94, high: 99, open: 97 }));
   assert.equal(stopHit.status, "loss");
-  assert.equal(stopHit.resultPct, -5, "出場＝停損 95");
+  assert.equal(stopHit.resultPct, -5.1, "觸價停損是市價單：出場＝停損 95 下方一檔 94.9（<100 元升降單位 0.1）");
+  assert.equal(stopHit.exitSlippageTicks, 1);
+
+  // 當日最低價剛好等於停損：沒有比停損更低的成交價可滑，出場＝停損、滑價 0 檔
+  const lowAtStop = makeEntry();
+  mod.advanceSwingVerificationEntry(lowAtStop, dayQuote({ low: 95, high: 99, open: 97, price: 96 }));
+  assert.equal(lowAtStop.status, "loss");
+  assert.equal(lowAtStop.resultPct, -5, "不能記成沒成交過的價位");
+  assert.equal(lowAtStop.exitSlippageTicks, 0);
 
   const gapDown = makeEntry();
   mod.advanceSwingVerificationEntry(gapDown, dayQuote({ open: 92, low: 91, high: 96, price: 93 }));
   assert.equal(gapDown.status, "loss");
   assert.equal(gapDown.resultPct, -8, "跳空開低 → 用開盤價 92 計實際出場");
+  assert.equal(gapDown.exitSlippageTicks, undefined, "開盤成交價已是實際價，不另扣滑價");
 
   const both = makeEntry();
   mod.advanceSwingVerificationEntry(both, dayQuote({ low: 94, high: 111 }));
@@ -99,7 +108,7 @@ test("D-24：開盤落在停損與目標之間時，維持原本的雙觸保守�
   // 開盤 102 在區間內 → 盤中先後真的不明 → 保守記停損。
   mod.advanceSwingVerificationEntry(inside, dayQuote({ open: 102, high: 111, low: 94, price: 96 }));
   assert.equal(inside.status, "loss", "開盤沒越過任何一邊，序列不明的前提仍成立");
-  assert.equal(inside.resultPct, -5, "出場價＝停損 95");
+  assert.equal(inside.resultPct, -5.1, "出場價＝停損 95 下方一檔");
 
   // 邊界：開盤恰等於停損 → 仍走停損出場（價格相同，不因改寫而漂移）。
   const atStop = makeEntry();
@@ -119,7 +128,7 @@ test("D-24：開盤價缺值時不得用 NaN 判定，退回既有的高低價�
   // 官方資料偶爾缺開盤價；num() 會給 NaN，不可讓它靜默通過比較。
   mod.advanceSwingVerificationEntry(noOpen, { rawDate: compactTradingDay(0), open: null, high: 111, low: 94, price: 96 });
   assert.equal(noOpen.status, "loss", "開盤未知 → 序列不明 → 保守記停損");
-  assert.equal(noOpen.resultPct, -5);
+  assert.equal(noOpen.resultPct, -5.1);
 });
 
 test("推進：15 個交易日沒碰到 → 以收盤結案（超時）；期間內無觸價只累加天數", () => {
@@ -363,12 +372,12 @@ test("regime 分層：建單時記錄大盤位階（精簡版），summary 依�
   const pick = (code, scenario) => ({ code, name: code, scenario: { key: scenario }, score: 80, plan: { entry: 100, structuralStop: 95, target: 110, rr: 2 } });
   mod.recordSwingVerification(db, {
     asOf: day, formulaVersion: mod.SWING_FORMULA_VERSION,
-    regime: { asOf: day, close: 1, ma20: 1, ma60: 1, aboveMa20: true, aboveMa60: false },
+    regime: { asOf: day, close: 0.98, ma20: 0.97, ma60: 1, aboveMa20: true, aboveMa60: false },
     picks: [pick("1101", "midBandDefense")],
   });
   const entry = db.swingVerification[day][0];
-  // 兩個布林＋與均線的距離（close/ma − 1）；仍不塞整段均線。close 1／ma 1 → 距離 0。
-  assert.deepEqual(entry.regime, { asOf: day, aboveMa20: true, aboveMa60: false, distMa20Pct: 0, distMa60Pct: 0 }, "只留分層用得到的欄位，不塞整段均線");
+  // 兩個布林＋與均線的距離（close/ma − 1）；仍不塞整段均線。close 0.98／ma60 1 → 距離 −2%。
+  assert.deepEqual(entry.regime, { asOf: day, aboveMa20: true, aboveMa60: false, distMa20Pct: 0.0103, distMa60Pct: -0.02 }, "只留分層用得到的欄位，不塞整段均線");
   mod.recordSwingVerification(db, { asOf: day, formulaVersion: mod.SWING_FORMULA_VERSION, picks: [pick("1102", "midBandDefense")] });
   assert.equal(db.swingVerification[day][1].regime, null, "抓不到 regime 就 null，不猜");
   assert.equal(mod.regimeBucket(entry.regime), "belowMa60");
@@ -449,7 +458,7 @@ test("跌停鎖死：碰停損那天賣不掉 → 順延到下一個有開的交
   const normal = makeEntry({ lastChecked: compactTradingDay(-3) });
   mod.advanceSwingVerificationEntry(normal, quoteAt(d1, { open: 96, high: 97, low: 94, price: 95.5 }), { price: 100 });
   assert.equal(normal.status, "loss");
-  assert.equal(normal.resultPct, -5);
+  assert.equal(normal.resultPct, -5.1, "觸價停損滑一檔");
   assert.equal(normal.exitModel, "same-day");
   // 連續兩天鎖死：第二天仍等
   const twice = makeEntry({ lastChecked: compactTradingDay(-3) });

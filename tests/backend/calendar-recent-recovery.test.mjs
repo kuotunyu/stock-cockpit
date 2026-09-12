@@ -25,7 +25,7 @@ test('recent缺章pending不鎖當日；不重設advance key，同日來源恢�
   let e=(await m.loadDb()).swingVerification['20260828'][0];assert.equal(e.status,'pending');assert.equal(e.lastChecked,'20260828');assert.equal(e.verificationRetry.reason,'calendar-coverage-unknown');
   restored=true;t.mock.timers.setTime(Date.now()+6*60*1000);
   await m.advanceSwingVerification(reference,'20260901',{riskSets:null});
-  e=(await m.loadDb()).swingVerification['20260828'][0];assert.equal(e.status,'loss');assert.equal(e.resolvedAt,'20260831');assert.equal(e.resultPct,-5);assert.equal(augustCalls,3);
+  e=(await m.loadDb()).swingVerification['20260828'][0];assert.equal(e.status,'loss');assert.equal(e.resolvedAt,'20260831');assert.equal(e.resultPct,-5.1);assert.equal(augustCalls,3);
   assert.equal(e.evaluationApplied.calendarEvidencePolicyVersion,'official-session-interval-v1');assert.equal(e.evaluationApplied.scope,'this-advance-only');
  }finally{await srv.mod.shutdownServer();srv.mock.restore();await rm(srv.dataDir,{recursive:true,force:true});t.mock.timers.reset();}
 });

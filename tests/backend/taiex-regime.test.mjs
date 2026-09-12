@@ -52,9 +52,35 @@ test("regimeStamp：除了兩個布林，還存與均線的距離（日後可用
   assert.equal(mod.regimeStamp({ asOf: "x", aboveMa20: false, aboveMa60: false, close: 100, ma20: 0, ma60: null }).distMa60Pct, null, "均線缺值不猜");
 });
 
-test("regimeBucket：把 regime 對應到成績單分層鍵，缺值一律 unknown", () => {
+test("regimeBucket：有距離看距離（±1% 內＝季線附近），舊紀錄只有布林照布林，缺值一律 unknown", () => {
   assert.equal(mod.regimeBucket({ aboveMa60: true }), "aboveMa60");
   assert.equal(mod.regimeBucket({ aboveMa60: false }), "belowMa60");
   assert.equal(mod.regimeBucket(null), "unknown");
   assert.equal(mod.regimeBucket({}), "unknown");
+  assert.equal(mod.REGIME_NEAR_MA60_BAND, 0.01);
+  assert.equal(mod.regimeBucket({ aboveMa60: true, distMa60Pct: 0.0145 }), "aboveMa60");
+  assert.equal(mod.regimeBucket({ aboveMa60: true, distMa60Pct: 0.004 }), "nearMa60", "站上季線 0.4% 是貼著均線，不算季線上");
+  assert.equal(mod.regimeBucket({ aboveMa60: false, distMa60Pct: -0.01 }), "nearMa60", "邊界 −1% 含");
+  assert.equal(mod.regimeBucket({ aboveMa60: false, distMa60Pct: -0.0101 }), "belowMa60");
+  assert.equal(mod.regimeBucket({ aboveMa60: false, distMa60Pct: null }), "belowMa60", "距離缺值退回布林");
+});
+
+test("taiexPeriodBenchmark：訊號日收盤→觀察日收盤的指數報酬、日等權平均；缺哪天少算哪天並回報 missingDays", () => {
+  const history = [
+    { date: "20260901", close: 20000 }, { date: "20260902", close: 20200 }, { date: "20260903", close: 20100 },
+    { date: "20260904", close: 20302 }, { date: "20260905", close: null },
+  ];
+  const records = [
+    { asOf: "2026-09-01", observationDate: "2026-09-02" }, // +1%
+    { asOf: "2026-09-02", observationDate: "2026-09-03" }, // −0.495…%
+    { asOf: "2026-09-03", observationDate: "2026-09-04" }, // +1.0049…%
+    { asOf: "2026-09-04", observationDate: "2026-09-05" }, // 指數缺值 → 不算
+  ];
+  const bench = mod.taiexPeriodBenchmark(history, records);
+  assert.equal(bench.days, 3);
+  assert.equal(bench.missingDays, 1);
+  assert.equal(bench.source, "taiex-close-to-close");
+  assert.equal(bench.avgReturn, 0.5, "(1 − 0.495 + 1.005) / 3 ≈ 0.503 → 0.5");
+  assert.equal(mod.taiexPeriodBenchmark(null, records), null, "沒有指數歷史就 null，不擋成績單");
+  assert.equal(mod.taiexPeriodBenchmark(history, []), null);
 });

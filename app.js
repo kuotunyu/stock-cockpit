@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v53";
+const APP_SHELL_VERSION = "stock1-shell-v54";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -6661,7 +6661,7 @@ function renderVerifyRegimeLine(totals) {
     return `${label} ${bucket.days} 天：開盤賣 ${rate(bucket.winAtOpen, bucket.signals)}${ciText}・收盤賣 ${rate(bucket.winAtClose, bucket.signals)}`;
   };
   const unknown = by.unknown?.days ? `・位階未知 ${by.unknown.days} 天` : "";
-  return `<p class="verify-regime" title="以快照建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改任何選股">${glossLink("大盤", "大盤位階")}${part("季線上", by.aboveMa60)}｜${part("季線下", by.belowMa60)}${unknown}</p>`;
+  return `<p class="verify-regime" title="以快照建立當天的加權指數與 60 日均線的距離分層：高於 1% 季線上、低於 −1% 季線下、±1% 內季線附近（貼著均線那幾天分到上或下都是噪音）；同一批紀錄拆開看，不改任何選股">${glossLink("大盤", "大盤位階")}${part("季線上", by.aboveMa60)}｜${by.nearMa60?.days ? `${part("季線附近", by.nearMa60)}｜` : ""}${part("季線下", by.belowMa60)}${unknown}</p>`;
 }
 
 function verificationMetricNote(metric) {
@@ -6861,6 +6861,7 @@ function renderVerifyHistory() {
               <span class="${ciTone(totals.ci?.hitPlus2,'hitPlus2')}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">${glossLink('曾達+2%', '盤中曾達／曾破')} ${mainRate('hitPlus2')}${ciText(totals.ci?.hitPlus2,'hitPlus2')}</span>
               <span title="觀察日最低價曾碰到 −2%">${glossLink('曾破−2%', '盤中曾達／曾破')} ${mainRate('brokeMinus2')}</span>
               <span>平均隔日收 ${holding ? `價格 ${formatSignedPercent(totals.avgCloseReturn)}；含息淨 ${formatSignedPercent(totals.avgCloseReturnNet)}` : formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
+              ${Number.isFinite(totals?.indexBenchmark?.avgReturn) ? `<span title="同期加權指數：每個完成觀察日「訊號日收盤→觀察日收盤」的指數報酬，日等權平均（${totals.indexBenchmark.days} 天${totals.indexBenchmark.missingDays ? `，${totals.indexBenchmark.missingDays} 天指數缺值` : ""}）；與「平均隔日收」同一段期間，兩邊都是價格觀察、不是可成交回測">${glossLink("同期大盤")} ${formatSignedPercent(totals.indexBenchmark.avgReturn)}</span>` : ""}
             </details>
           </div>
         ` : ""}
@@ -7508,10 +7509,11 @@ function swingNextOpenLine(nextOpen) {
 function swingRegimeLine(byRegime) {
   if (!byRegime) return "";
   const above = byRegime.aboveMa60 || {};
+  const near = byRegime.nearMa60 || {};
   const below = byRegime.belowMa60 || {};
-  if (!(above.resolved || below.resolved)) return "";
+  if (!(above.resolved || near.resolved || below.resolved)) return "";
   const part = (label, bucket) => `${label} ${bucket.winRate != null ? `${bucket.winRate}%` : `${bucket.wins || 0}/${bucket.resolved || 0}`}`;
-  return `<small class="sv-regime" title="以驗證單建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改選股。未達最小樣本只顯示筆數。">${glossLink("大盤", "大盤位階")}${part("季線上", above)}・${part("季線下", below)}${byRegime.unknown?.resolved ? `・位階未知 ${byRegime.unknown.resolved} 筆` : ""}</small>`;
+  return `<small class="sv-regime" title="以驗證單建立當天的加權指數與 60 日均線的距離分層（±1% 內算季線附近）；同一批紀錄拆開看，不改選股。未達最小樣本只顯示筆數。">${glossLink("大盤", "大盤位階")}${part("季線上", above)}・${near.resolved ? `${part("季線附近", near)}・` : ""}${part("季線下", below)}${byRegime.unknown?.resolved ? `・位階未知 ${byRegime.unknown.resolved} 筆` : ""}</small>`;
 }
 
 function renderSwingVerifyPanel() {
@@ -13911,10 +13913,11 @@ const GLOSSARY = [
   { term: "信賴區間（成績單的括號）", aliases: ["信賴區間", "區間"], cat: "成績單與決策", def: "95% 信賴區間描述估計的不確定性：在抽樣與模型假設成立時，長期重複抽樣並用相同方法建立的區間，約 95% 會涵蓋真實參數；不是說這一次區間有 95% 機率包含真實勝率。本 App 以「日」為叢集處理同日股票共同波動，依該欄有效日期計算，未滿 20 個有效日期不顯示。日叢集仍不能消除日間相依，市場變化也可能使假設不成立；區間下界與歷史成績均不保證未來績效。" },
   { term: "獲利因子（PF）", aliases: ["獲利因子", "PF"], cat: "成績單與決策", def: "所有獲利單的報酬總和 ÷ 所有虧損單的虧損總和。<strong>大於 1</strong> 代表賺的比賠的多，1.5 以上算健康。它看的是「幅度」不是「次數」：勝率不高但賺大賠小的策略，獲利因子仍可能很好。" },
   { term: "中位數與最長連虧", aliases: ["中位數", "中位", "最長連虧", "最差單日"], cat: "成績單與決策", def: "<strong>中位數</strong>是把所有結案報酬排序後正中間的那個值，不像平均會被一兩筆極端值拉走。<strong>最長連虧</strong>是連續虧損最長的一串，用來想像最壞時要撐多久；「最差單日」是同一天結案的單平均最差的那一天。" },
-  { term: "大盤位階（季線上／下）", aliases: ["大盤位階", "位階", "季線上", "季線下", "月線上", "月線下"], cat: "成績單與決策", def: "加權指數收盤相對 20 日（月線）與 60 日（季線）均線的位置。只用來把成績單<strong>分層看</strong>（季線上／季線下各算一組），不是選股濾網——它不會改變任何選股結果。" },
+  { term: "大盤位階（季線上／下）", aliases: ["大盤位階", "位階", "季線上", "季線下", "月線上", "月線下"], cat: "成績單與決策", def: "加權指數收盤相對 20 日（月線）與 60 日（季線）均線的位置。只用來把成績單<strong>分層看</strong>（季線上／季線附近／季線下各算一組；收盤與季線距離在 ±1% 內算「季線附近」——貼著均線那幾天分到上或下都是噪音），不是選股濾網——它不會改變任何選股結果。" },
   { term: "期指基差", aliases: ["基差", "夜盤 vs 現貨收盤", "夜盤"], cat: "成績單與決策", def: "台指期近月價格減加權指數。正數（正價差）通常代表期貨偏多、負數偏空。只有<strong>日盤</strong>同一交易日的數字才叫基差；15:00 後期交所給的是夜盤價，減 13:30 的現貨收盤等於「夜盤自己的漲跌＋基差」，畫面上會改標「夜盤 vs 現貨收盤」。結算週換月時基差會跳一個月的持有成本，所以合約月份一起顯示。" },
   { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
   { term: "盤中曾達／曾破", aliases: ["曾達", "曾破", "曾達+2%", "曾破−2%", "盤中曾達"], cat: "成績單與決策", def: "觀察日的<strong>最高價曾碰到 +2%</strong>／<strong>最低價曾碰到 −2%</strong>——只是盤中曾觸及的價位（最大有利／不利幅度），<strong>不是可實現損益</strong>，兩者同一天可以同時成立。要在最高價出場是事後才知道的；真正能執行的是開盤賣或收盤賣的淨獲利率。" },
+  { term: "同期大盤", aliases: ["同期大盤", "同期加權指數", "指數基準"], cat: "成績單與決策", def: "隔日沖成績單的對照組：每個完成觀察日「訊號日收盤→觀察日收盤」的<strong>加權指數</strong>報酬，日等權平均，與「平均隔日收」看同一段期間。訊號的平均隔日收若長期<strong>低於同期大盤</strong>，表示選出來的股票沒有比直接抱指數好；高於才有超額。兩邊都是價格觀察，不是可成交回測，也不含費稅。" },
   { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "跳空略過"], cat: "成績單與決策", def: "波段驗證的另一個口徑：同一批驗證單改以<strong>第一個交易日的開盤價</strong>當進場價重算。訊號要等收盤後的整批資料才算得出來，真實進場多半是次日開盤，所以並陳。開盤已經在停損下方或目標上方的單，這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];
 const glossaryState = { cat: "", q: "", screenQuery: false };

@@ -9853,7 +9853,7 @@ function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, popula
       const scenarios = [...new Set(rows.map(row => row.scenario))].map(scenario => {
         const subset = rows.filter(row => row.scenario === scenario);
         return { scenario, ...summarizeSwingCohortRows(subset, identity),
-          byRegime: Object.fromEntries(['aboveMa60','belowMa60','unknown'].map(bucket => [bucket,
+          byRegime: Object.fromEntries(['aboveMa60','nearMa60','belowMa60','unknown'].map(bucket => [bucket,
             summarizeSwingCohortRows(subset.filter(row => row.regime === bucket), identity)])),
           withPeriodicCall: summarizeSwingCohortRows(subset.map(row => ({ ...row, periodic: false })), identity) };
       });
@@ -9878,7 +9878,7 @@ function summarizeMatureVerification(db, strategy, { asOf, calendar = {}, popula
       ...(isHoldingIdentity(identity) ? { holdingCoverage: Object.fromEntries(['open','close'].map(key => [key,
         holdingOutcomeCoverage(mature.map(row => row.performance?.holdingOutcomes?.[key]))])) } : {}),
       costRisk: costRisk(mature),
-      byRegime: Object.fromEntries(['aboveMa60','belowMa60','unknown'].map(bucket => [bucket, {
+      byRegime: Object.fromEntries(['aboveMa60','nearMa60','belowMa60','unknown'].map(bucket => [bucket, {
         ...aggregateOvernightRecords(records.filter(record => record.regime === bucket)),
         costRisk: costRisk(mature.filter(row => row.regime === bucket)) }])) };
   });
@@ -10177,9 +10177,32 @@ function taiexRegime(history, asOf) {
   return { asOf: rows.at(-1).date, close, ma20, ma60, aboveMa20: close > ma20, aboveMa60: close > ma60 };
 }
 
-// 成績單分層鍵：只認 aboveMa60 這個布林；缺值（沒抓到、舊紀錄）一律 unknown，不猜。
+// 同期加權指數：每個已完成觀察日「訊號日收盤 → 觀察日收盤」的指數報酬，日等權平均。
+// 成績單的「平均隔日收 +0.3%」旁邊要有「同期大盤 +0.5%」——訊號跑輸大盤時，數字自己會講；
+// 兩邊都是價格觀察、不是可成交回測。指數缺哪一天就少算哪一天並回報 missingDays，不用鄰近日補。
+function taiexPeriodBenchmark(history, records) {
+  const closes = new Map((history || []).filter((row) => row?.date && Number.isFinite(row.close) && row.close > 0).map((row) => [String(row.date), Number(row.close)]));
+  const returns = [];
+  for (const record of records || []) {
+    const from = closes.get(toCompactDate(record.asOf));
+    const to = closes.get(toCompactDate(record.observationDate));
+    if (from > 0 && to > 0) returns.push((to / from - 1) * 100);
+  }
+  if (!returns.length) return null;
+  return { source: "taiex-close-to-close", days: returns.length, missingDays: (records || []).length - returns.length, avgReturn: roundTo(average(returns), 2) };
+}
+
+// 成績單分層鍵：有距離就看距離——|收盤／MA60 − 1| ≤ 1% 歸「季線附近」（nearMa60），不硬塞上或下：
+// 單日 close > MA60 在均線附近會抖（零漂移隨機漫步每年翻轉約 18 次），貼著均線那幾天分到哪一層都是噪音。
+// 舊紀錄只有布林就照布林；缺值（沒抓到、舊紀錄）一律 unknown，不猜。
+const REGIME_NEAR_MA60_BAND = 0.01;
 function regimeBucket(regime) {
-  if (regime && typeof regime.aboveMa60 === "boolean") return regime.aboveMa60 ? "aboveMa60" : "belowMa60";
+  if (!regime) return "unknown";
+  if (Number.isFinite(regime.distMa60Pct)) {
+    if (Math.abs(regime.distMa60Pct) <= REGIME_NEAR_MA60_BAND) return "nearMa60";
+    return regime.distMa60Pct > 0 ? "aboveMa60" : "belowMa60";
+  }
+  if (typeof regime.aboveMa60 === "boolean") return regime.aboveMa60 ? "aboveMa60" : "belowMa60";
   return "unknown";
 }
 
@@ -10918,14 +10941,17 @@ async function buildVerificationHistory() {
   const done = records.filter((record) => record.complete && record.modelKey === selectedModelKey);
   const selectedIdentity = records.find(record => record.modelKey === selectedModelKey)?.identity || {};
   const knownCost = knownPriceCost(selectedIdentity) || isHoldingIdentity(selectedIdentity);
+  // 同期加權指數（訊號日收盤→觀察日收盤、日等權平均）：抓不到就 null，不擋成績單。
+  const taiexHistory = done.length ? await getTaiexHistory().then((result) => result?.value || null).catch(() => null) : null;
   const totals = done.length
     ? {
         ...aggregateOvernightRecords(done),
         netUnavailableReason: knownCost ? null : "legacy-unknown-cost-model",
+        indexBenchmark: taiexPeriodBenchmark(taiexHistory, done),
         // 低於 minDays 前端不染色；達到後附以「日」為叢集的 95% 信賴區間，染色看下界。
         minDays: OVERNIGHT_MIN_DAYS,
         // 依「快照建立當天大盤在季線上／下」分層——同一批紀錄拆兩欄，不改任何選股。
-        byRegime: Object.fromEntries(["aboveMa60", "belowMa60", "unknown"].map((bucket) => {
+        byRegime: Object.fromEntries(["aboveMa60", "nearMa60", "belowMa60", "unknown"].map((bucket) => {
           const subset = done.filter((record) => record.regime === bucket);
           return [bucket, {
             ...aggregateOvernightRecords(subset),
@@ -12890,7 +12916,12 @@ function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
     return true;
   }
   if (low <= entry.stop) {
-    resolve("loss", entry.stop);
+    // 觸價停損是市價單：成交在停損價下方一檔（台股升降單位），但不能低於當日最低價——那是沒成交過的價位。
+    // 以前記成剛好停損價，是最樂觀的假設。跳空開低與跌停順延的出場價本來就是實際開盤成交價，不另扣。
+    const tick = stockTickSize(entry.stop - 1e-9) || 0;
+    const slipped = Math.max(low, roundTo(entry.stop - tick, 2));
+    entry.exitSlippageTicks = slipped < entry.stop ? 1 : 0;
+    resolve("loss", slipped);
     return true;
   }
   if (high >= entry.target) {
@@ -13556,6 +13587,7 @@ async function buildSwingVerificationSummary() {
         // 依驗證單建立當天的大盤位階分層（同一批紀錄拆兩欄，不改選股）；舊紀錄沒有 regime → unknown。
         regimes: {
           aboveMa60: { resolved: 0, wins: 0 },
+          nearMa60: { resolved: 0, wins: 0 },
           belowMa60: { resolved: 0, wins: 0 },
           unknown: { resolved: 0, wins: 0 },
         },
@@ -16591,7 +16623,7 @@ export {
   OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, OVERNIGHT_MIN_DAYS, dayClusterCi, tQuantile975, overnightSnapshotFormulaVersion,
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
-  parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
+  parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime, taiexPeriodBenchmark, REGIME_NEAR_MA60_BAND,
   parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureOutcomes, publicSignalsView,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,

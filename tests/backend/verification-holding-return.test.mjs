@@ -109,7 +109,7 @@ test('後續股利使用事件前已配發股數；原始position不改寫', () 
 });
 test('每個價格結案分支都保留實際出場價；缺股數的新identity不補成1股', () => {
   for (const [quote,daysHeld,exit] of [[{open:94,high:96,low:93,price:95},0,94],[{open:112,high:113,low:94,price:100},0,112],
-    [{open:100,high:111,low:94,price:99},0,95],[{open:100,high:111,low:98,price:109},0,110],[{open:100,high:104,low:96,price:103},14,103]]) {
+    [{open:100,high:111,low:94,price:99},0,94.9],[{open:100,high:111,low:98,price:109},0,110],[{open:100,high:104,low:96,price:103},14,103]]) {
     const e={identity:mod.currentVerificationIdentity('swing'),status:'pending',entry:100,stop:95,target:110,lastChecked:D0,daysHeld};
     mod.advanceSwingVerificationEntry(e,{rawDate:D1,...quote});assert.equal(e.exit.price,exit);assert.equal(e.holdingOutcome.netPnl,null);
   }
