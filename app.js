@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v61";
+const APP_SHELL_VERSION = "stock1-shell-v62";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -4117,6 +4117,15 @@ async function loadHoldingsRiskPlans() {
   catch (error) { if (isCurrentAuthScope(scope) && !handleAuthRequired(error)) holdingsPlanRiskState.error = error.message; }
   finally { if (isCurrentAuthScope(scope)) { holdingsPlanRiskState.loading = false; renderLiveDataUpdate(); } }
 }
+document.addEventListener("change", (event) => {
+  const select = event.target instanceof Element ? event.target.closest("[data-mobile-sort]") : null;
+  if (!select) return;
+  if (state.sort !== select.value) {
+    state.sort = select.value;
+    state.sortDir = "desc";
+  }
+  render();
+});
 document.addEventListener('submit', event => {
   const form = event.target instanceof Element ? event.target.closest('[data-discipline-settings]') : null;
   if (!form) return;
@@ -12664,8 +12673,37 @@ function refreshLucideIcons() {
   }
 }
 
+// 手機版（≤760px）表頭藏起來後的排序入口：每個 .table-scroller 前放一顆 .mobile-sort（桌機 CSS 隱藏）。
+// 選項直接從該表頭的 [data-sort] 按鈕讀（title「依漲跌幅排序」→「漲跌幅」），所以三個行情表各自對應自己的欄位。
+function syncMobileSortControls(screenEl) {
+  if (!screenEl) return;
+  for (const scroller of screenEl.querySelectorAll(".table-scroller")) {
+    const buttons = [...scroller.querySelectorAll(".table-head [data-sort]")];
+    if (!buttons.length) continue;
+    let control = scroller.previousElementSibling?.classList.contains("mobile-sort") ? scroller.previousElementSibling : null;
+    if (!control) {
+      control = document.createElement("div");
+      control.className = "mobile-sort";
+      const options = buttons.map((button) => {
+        const label = (/依(.+?)排序/.exec(button.getAttribute("title") || "")?.[1]) || button.textContent.replace(/\s+/g, " ").trim();
+        return `<option value="${escapeHtml(button.dataset.sort)}">${escapeHtml(label)}</option>`;
+      }).join("");
+      control.innerHTML = `<label>排序 <select data-mobile-sort aria-label="排序欄位">${options}</select></label><button type="button" data-mobile-sort-dir aria-label="切換排序方向"></button>`;
+      scroller.parentNode.insertBefore(control, scroller);
+    }
+    const select = control.querySelector("[data-mobile-sort]");
+    if (select && [...select.options].some((option) => option.value === state.sort)) select.value = state.sort;
+    const dir = control.querySelector("[data-mobile-sort-dir]");
+    if (dir) {
+      dir.textContent = state.sortDir === "asc" ? "▲ 小→大" : "▼ 大→小";
+      dir.setAttribute("aria-pressed", state.sortDir === "asc" ? "true" : "false");
+    }
+  }
+}
+
 function renderActiveScreen() {
   const activeScreen = document.querySelector(`[data-screen-panel="${state.screen}"]`);
+  syncMobileSortControls(activeScreen);
   activeScreen?.querySelectorAll(".table-head button").forEach((button) => {
     const sorted = button.dataset.sort === state.sort;
     button.classList.toggle("is-sorted", sorted);
@@ -13746,6 +13784,13 @@ document.addEventListener("click", async (event) => {
     state.universe = "turnover";
     state.sort = "strategy";
     state.sortDir = "desc";
+    render();
+    return;
+  }
+
+  const mobileSortDir = event.target.closest("[data-mobile-sort-dir]");
+  if (mobileSortDir) {
+    state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
     render();
     return;
   }

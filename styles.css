@@ -1320,6 +1320,7 @@ button.today-focus-card:focus-visible {
     "rank main quote"
     "rank reasons reasons"
     "rank risks risks"
+    "rank flow flow"
     "rank backtest backtest";
   gap: 8px 12px;
   align-items: center;
@@ -1609,6 +1610,8 @@ button.today-focus-card:focus-visible {
 .pick-flow {
   display: block;
 }
+
+.pick-flow { grid-area: flow; }
 
 /* 籌碼標籤：法人買賣超用漲跌色、要先想清楚的用琥珀、其餘中性；波段卡的 inline 版縮小一號。 */
 .pick-flow { color: var(--muted); }
@@ -7775,6 +7778,7 @@ details[data-overnight-warnings-fold] > .overnight-warning {
       "rank quote"
       "reasons reasons"
       "risks risks"
+      "flow flow"
       "backtest backtest";
   }
 
@@ -7785,6 +7789,7 @@ details[data-overnight-warnings-fold] > .overnight-warning {
       "rank quote"
       "reasons reasons"
       "risks risks"
+      "flow flow"
       "backtest backtest";
     gap: 8px 10px;
     align-items: center;
@@ -10162,3 +10167,131 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 }
 /* 加到主畫面後 iPhone 的 home 指示條會壓在底部導覽上：留 safe-area，高度由既有 ResizeObserver 量進 --bottom-nav-height */
 .bottom-nav { padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+
+/* ===== 手機清單與表格改列（M2，2026-09-13）===== */
+@media (max-width: 760px) {
+  /* 訊號重點：兩欄小卡放不下股名，改單欄一列一檔；名稱與漲幅同一行（單欄有 340px，不再需要上下排） */
+  .today-focus-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .today-focus-card:not(.is-watch) strong { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .today-focus-card, .data-trust-card, button.today-focus-card { min-height: 0; padding: 10px 12px; gap: 4px; }
+  .today-focus-card p { font-size: var(--fs-note); }
+
+  /* 分群清單卡片：徽章｜名稱代號｜價格漲跌 一列，條件／風險／籌碼／回測各一行、橫向滑動不換行 */
+  .overnight-pick,
+  .overnight-group.is-overview .overnight-pick,
+  .overnight-group.is-focused .overnight-pick {
+    grid-template-columns: 52px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "rank main quote"
+      "reasons reasons reasons"
+      "risks risks risks"
+      "flow flow flow"
+      "backtest backtest backtest";
+    gap: 6px 8px;
+    align-items: start;
+    min-height: 0;
+    padding: 10px 12px;
+  }
+  .overnight-pick .pick-quote,
+  .overnight-group.is-overview .pick-quote,
+  .overnight-group.is-focused .pick-quote {
+    grid-area: quote;
+    grid-template-columns: minmax(0, 1fr);
+    justify-self: end;
+    justify-items: end;
+    text-align: right;
+    gap: 0;
+    min-width: 0;
+  }
+  .overnight-pick .pick-quote > span > small { display: none; }
+  .overnight-pick .pick-quote > span > strong { font-size: 18px; line-height: 1.2; }
+  .overnight-pick .pick-reasons,
+  .overnight-pick .pick-risks,
+  .overnight-pick .pick-flow,
+  .overnight-pick .pick-backtest,
+  .overnight-group.is-overview .pick-reasons,
+  .overnight-group.is-overview .pick-risks,
+  .overnight-group.is-overview .pick-backtest {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    grid-template-columns: none;
+    font-size: var(--fs-note);
+  }
+  .overnight-pick :is(.pick-reasons, .pick-risks, .pick-flow, .pick-backtest)::-webkit-scrollbar { display: none; }
+  .overnight-pick :is(.pick-reasons, .pick-risks, .pick-flow, .pick-backtest) > em { flex: 0 0 auto; }
+  .overnight-pick .pick-chip-list { flex-wrap: nowrap; }
+  .overnight-pick .pick-chip { white-space: nowrap; min-height: 28px; padding: 4px 8px; }
+  .overnight-pick .pick-reasons span { white-space: nowrap; }
+
+  /* 行情表（隔日沖清單／盤中選股／自選股）：不再橫向捲 704px 六欄；改兩行列——
+     第一行 K棒＋名稱代號 對 成交價漲跌，第二行 高低／單總量／週轉均量 三組小字。走勢圖在明細裡。 */
+  .table-scroller, .watch-table-scroller { overflow-x: hidden; }
+  .table-grid, .stock-row, .watch-row-select,
+  .screener-screen .table-grid, .screener-screen .stock-row { min-width: 0; }
+  .table-head, .watch-table-head, .screener-screen .table-head { display: none; }
+  .stock-row, .screener-screen .stock-row, .watch-row-select {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "main main quote"
+      "hl vol turn";
+    gap: 4px 10px;
+    align-items: center;
+    min-height: 64px;
+    padding: 8px 10px;
+  }
+  .watch-stock-row { min-width: 0; }
+  .stock-row .stock-cell { padding: 0; border: 0; justify-content: flex-start; }
+  .stock-row .stock-main { grid-area: main; gap: 8px; }
+  .stock-row .quote-value { grid-area: quote; flex-direction: column; align-items: flex-end; text-align: right; }
+  .stock-row .stock-cell:nth-child(3) { grid-area: hl; }
+  .stock-row .stock-cell:nth-child(4) { grid-area: vol; }
+  .stock-row .stock-cell:nth-child(5) { grid-area: turn; }
+  .stock-row .spark-cell { display: none; }
+  .stock-row .metric-stack { flex-direction: row; align-items: baseline; gap: 5px; font-size: 13px; line-height: 1.3; white-space: nowrap; }
+  .stock-row .metric-stack::before { font-family: var(--sans); font-size: 11.5px; font-weight: 700; color: var(--muted-2); }
+  .stock-row .stock-cell:nth-child(3)::before { content: "高/低"; }
+  .stock-row .stock-cell:nth-child(4)::before { content: "單/總"; }
+  .stock-row .stock-cell:nth-child(5)::before { content: "週轉/均"; }
+  .stock-row .flow-split { display: none; }
+  .stock-row .kbar { height: 40px; }
+  .stock-row .stock-main { min-width: 0; }
+  .stock-row .stock-name { min-width: 0; align-items: flex-start; gap: 2px; }
+  .stock-row .stock-name strong { font-size: 16px; line-height: 1.2; white-space: normal; overflow-wrap: anywhere; }
+  .stock-row .stock-name .surv-line { margin-top: 2px; }
+  .stock-row .stock-name .surv-tag { width: auto; min-height: 22px; padding: 0 8px; font-size: var(--fs-badge); }
+  .stock-row .stock-name span { font-size: var(--fs-badge); }
+  .stock-row .stock-reason { font-size: var(--fs-badge); }
+  .stock-row .quote-price .price-chip { font-size: 18px; }
+  .stock-row .quote-change { font-size: 13px; }
+  .stock-row.is-skeleton { min-height: 64px; }
+
+  /* 表頭藏起來後，排序改成一顆選單＋方向鈕（JS 在每個 .table-scroller 前放一個 .mobile-sort） */
+  .mobile-sort { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 6px 10px; font-size: var(--fs-note); color: var(--muted-2); }
+  .mobile-sort select { min-height: 40px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: #121416; color: var(--text); font: inherit; font-weight: 700; }
+  .mobile-sort button { min-height: 40px; min-width: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: #121416; color: var(--text); font: inherit; font-weight: 700; }
+
+  /* 盤中選股：子策略 2×4 格改成一列橫滑，模式列跟著收斂 */
+  .strategy-strip { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .strategy-strip::-webkit-scrollbar { display: none; }
+  .strategy-strip button { flex: 0 0 auto; }
+  .focus-switch button { min-height: 44px; }
+}
+@media (min-width: 761px) {
+  .mobile-sort { display: none; }
+}
+
+/* M2 補（2026-09-13）：自選股列的處置標籤在手機被 .stock-name span { display: block } 拉成整行寬的藥丸；
+   底部「重新整理」在 375px 會被狀態文字擠成「重新整／理」兩行。 */
+@media (max-width: 760px) {
+  .stock-row .stock-name .surv-line { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .stock-row .stock-name .surv-tag { display: inline-flex; width: auto; }
+  .refresh-bar { align-items: center; }
+  .refresh-bar button { flex: 0 0 auto; white-space: nowrap; min-height: 44px; }
+  /* 自選股摘要「最新最強 股名 漲跌」桌機一行 nowrap；手機讓它換行，股名不截斷 */
+  .watch-brief-stats .wb-stat { white-space: normal; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+  .watch-brief-stats .wb-stat strong { min-width: 0; overflow-wrap: anywhere; }
+}

@@ -82,6 +82,62 @@ test("375px 策略卡：單欄、計畫格每格 ≥ 100px、動作列在卡片�
   }
 });
 
+test("375px 清單改列（M2）：重點卡單欄、分群卡三欄一列且 chips 不換行、行情表兩行列不橫向捲、排序改選單", { timeout: 120_000 }, async () => {
+  const fixture = await createBrowserFixture({ scenario: "populated" });
+  try {
+    const { page } = fixture;
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.waitForTimeout(600);
+    const overnight = await page.evaluate(() => {
+      const grid = document.querySelector(".today-focus-grid");
+      const pick = document.querySelector(".overnight-pick");
+      const lines = pick ? [...pick.querySelectorAll(".pick-reasons, .pick-risks, .pick-backtest")].map((n) => Math.round(n.getBoundingClientRect().height)) : [];
+      return { gridCols: grid ? getComputedStyle(grid).gridTemplateColumns.trim().split(/\s+/).length : null,
+        cardWidths: [...document.querySelectorAll(".today-focus-card")].map((c) => Math.round(c.getBoundingClientRect().width)),
+        pickCols: pick ? getComputedStyle(pick).gridTemplateColumns.trim().split(/\s+/).length : null, lines };
+    });
+    assert.equal(overnight.gridCols, 1, "訊號重點在手機是單欄");
+    assert.ok(overnight.cardWidths.every((w) => w >= 300), `重點卡寬度 ${overnight.cardWidths.join("/")}`);
+    assert.equal(overnight.pickCols, 3, "分群卡：徽章｜名稱｜價格 三欄一列");
+    assert.ok(overnight.lines.length && overnight.lines.every((h) => h <= 44), `條件／風險／回測各一行不換行：${overnight.lines.join("/")}`);
+    for (const screen of ["screener", "watchlist"]) {
+      await page.locator(`.bottom-nav .nav-action[data-screen="${screen}"]`).click();
+      await page.waitForTimeout(800);
+      const table = await page.evaluate((name) => {
+        const panel = document.querySelector(`[data-screen-panel="${name}"]`);
+        const scroller = panel.querySelector(".watch-table-scroller, .table-scroller");
+        // 自選股列轉成 ARIA 表後，.watch-row-select 搬到內層名稱按鈕上；真正的列是 .watch-stock-row
+        const row = panel.querySelector(name === "watchlist" ? ".watch-stock-row" : ".stock-row:not(.is-skeleton)");
+        const head = panel.querySelector(".table-head");
+        const sort = panel.querySelector(".mobile-sort");
+        return { overflow: scroller ? scroller.scrollWidth - scroller.clientWidth : null, rowCols: row ? getComputedStyle(row).gridTemplateColumns.trim().split(/\s+/).length : null,
+          rowHeight: row ? Math.round(row.getBoundingClientRect().height) : null, headHidden: head ? getComputedStyle(head).display === "none" : null,
+          sortVisible: sort ? sort.getBoundingClientRect().height > 0 : false, bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth };
+      }, screen);
+      assert.equal(table.bodyFits, true, `${screen} body 不橫溢`);
+      assert.ok(table.overflow !== null && table.overflow <= 0, `${screen} 行情表不可橫向捲動（超出 ${table.overflow}px）`);
+      assert.equal(table.rowCols, 3, `${screen} 列是三欄兩行`);
+      assert.ok(table.rowHeight !== null && table.rowHeight <= 150, `${screen} 列高 ${table.rowHeight}px（以前 94px 高但要橫向捲；fixture 的 16 字名稱折兩行＋處置標籤約 140px）`);
+      assert.equal(table.headHidden, true, `${screen} 表頭在手機藏起來`);
+      assert.equal(table.sortVisible, true, `${screen} 要有排序選單`);
+    }
+    // 自選股列的處置標籤不可被拉成整行寬；底部「重新整理」不可折成兩行
+    const extras = await page.evaluate(() => {
+      const tag = document.querySelector('[data-screen-panel="watchlist"] .watch-stock-row .surv-tag');
+      const refresh = document.querySelector("#refreshData");
+      const brief = document.querySelector('[data-screen-panel="watchlist"] .watch-brief-top');
+      return { tagWidth: tag ? Math.round(tag.getBoundingClientRect().width) : null,
+        refreshWidth: Math.round(refresh.getBoundingClientRect().width), refreshHeight: Math.round(refresh.getBoundingClientRect().height),
+        briefClipped: brief ? brief.scrollWidth - brief.clientWidth : null };
+    });
+    assert.ok(extras.briefClipped !== null && extras.briefClipped <= 0, `摘要條「最新最強 股名」不可被裁切（超出 ${extras.briefClipped}px）`);
+    assert.ok(extras.tagWidth !== null && extras.tagWidth <= 120, `處置標籤是小藥丸不是整行：${extras.tagWidth}px`);
+    assert.ok(extras.refreshWidth >= 60 && extras.refreshHeight <= 48, `「重新整理」單行：${JSON.stringify(extras)}`);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("底部導覽留 safe-area、viewport 用 viewport-fit=cover", () => {
   const css = readFileSync(new URL("../../styles.css", import.meta.url), "utf8");
   const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
