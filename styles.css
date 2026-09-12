@@ -8216,9 +8216,9 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 
 .verify-history-row {
   display: grid;
-  grid-template-columns: 118px 90px repeat(5, minmax(78px, 1fr));
+  grid-template-columns: 118px 84px repeat(6, minmax(76px, 1fr));
   gap: 8px;
-  min-width: 760px;
+  min-width: 840px;
   align-items: center;
   padding: 8px 10px;
   border-radius: 8px;

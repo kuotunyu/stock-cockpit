@@ -8706,6 +8706,8 @@ function buildPick(metrics, groupInfo, nextDay = null, recentBacktest = null) {
     },
     nextDayPerformance: nextDay,
     recentBacktest,
+    // 訊號日整天只有漲停一個成交價：盤後想追也追不到，和波段同一個標記。
+    ...(isLimitUpLockedBar({ high: metrics.high, low: metrics.low, close: metrics.close }, { close: metrics.previousClose }) ? { fillRisk: "limit-up-locked" } : {}),
   };
 }
 
@@ -8835,8 +8837,41 @@ function classifyCohort(capture, { asOf, tradingDates, maxSessions = 15 }) {
   return { mature: knownSessions >= maxSessions, ageSessions: knownSessions, reason: knownSessions >= maxSessions ? null : 'window-not-complete' };
 }
 
+// 次日開盤進場的毛報酬：新列直接有 openEntryReturn；2026-09-13 之前落盤的 final 列沒有這一欄，
+// 由「收盤相對基準」與「開盤相對基準」推回 close/open − 1（同一個數，不需要重觀察）。一價漲停鎖死的列回 null。
+function openEntryReturnOf(row) {
+  if (!row || row.openEntrySkipped) return null;
+  if (Number.isFinite(row.openEntryReturn)) return row.openEntryReturn;
+  // 缺值是 null／undefined，不是 0：Number(null) === 0 會把「沒有開盤價」當成開盤等於基準價。
+  const open = row.openReturn;
+  const close = row.currentReturn;
+  if (typeof open !== "number" || typeof close !== "number" || !Number.isFinite(open) || !Number.isFinite(close) || 1 + open / 100 <= 0) return null;
+  return roundTo(((1 + close / 100) / (1 + open / 100) - 1) * 100, 4);
+}
+
+// 同一檔同日可能同時進兩群（強勢續攻的條件是回檔轉強的超集），以「檔」為單位去重、同檔取分數最高那筆代表。
+function dedupeRowsByCode(rows) {
+  const best = new Map();
+  for (const row of rows || []) {
+    const current = best.get(row.code);
+    if (!current || (Number(row.score) || 0) > (Number(current.score) || 0)) best.set(row.code, row);
+  }
+  return [...best.values()];
+}
+
+// 一天的開盤進場淨報酬摘要：獲利總和／虧損總和（算獲利因子用）、平均（算連虧用）。
+function openEntryNetSummary(rows, costKnown) {
+  const values = costKnown ? (rows || []).map((row) => netReturnPct(openEntryReturnOf(row))).filter(Number.isFinite) : [];
+  if (!values.length) return null;
+  const gain = values.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
+  const loss = values.filter((value) => value < 0).reduce((sum, value) => sum - value, 0);
+  return { count: values.length, gain: roundTo(gain, 4), loss: roundTo(loss, 4), avg: roundTo(values.reduce((sum, value) => sum + value, 0) / values.length, 4) };
+}
+
 function overnightMetricCoverage(rows, knownCost = true, holding = false) {
   const price = (row, field) => Number.isFinite(row[field]) ? row[field] : null;
+  const costKnown = knownCost || holding;
+  const openEntryNet = (row) => costKnown ? netReturnPct(openEntryReturnOf(row)) : null;
   const event = (row, field, evidence) => Number.isFinite(price(row, evidence)) && typeof row[field] === 'boolean' ? Number(row[field]) : null;
   return Object.fromEntries(Object.entries({
     avgOpenReturn: row => price(row, 'openReturn'), avgCloseReturn: row => price(row, 'currentReturn'),
@@ -8847,12 +8882,16 @@ function overnightMetricCoverage(rows, knownCost = true, holding = false) {
     winAtClose: row => holding ? (Number.isFinite(row.holdingOutcomes?.close?.netPnl) ? Number(row.holdingOutcomes.close.netPnl > 0) : null) : knownCost ? event(row, 'winAtClose', 'currentReturn') : null,
     avgOpenReturnNet: row => holding ? row.holdingOutcomes?.open?.holdingReturnPct ?? null : knownCost ? netReturnPct(price(row, 'openReturn')) : null,
     avgCloseReturnNet: row => holding ? row.holdingOutcomes?.close?.holdingReturnPct ?? null : knownCost ? netReturnPct(price(row, 'currentReturn')) : null,
+    // 次日開盤進場（可執行口徑）：價格觀察，含息模型也用同一條 0.471% 扣法（現金模型沒有開盤進場的部位定義）。
+    avgOpenEntryReturn: row => openEntryReturnOf(row),
+    avgOpenEntryReturnNet: row => openEntryNet(row),
+    winAtOpenEntry: row => Number.isFinite(openEntryNet(row)) ? Number(openEntryNet(row) > 0) : null,
   }).map(([key, read]) => [key, { ...datedMetric(rows, read, 'observationDate'),
-    ...(!knownCost && !holding && ['winAtOpen','winAtClose','avgOpenReturnNet','avgCloseReturnNet'].includes(key) ? { reason: 'legacy-unknown-cost-model' } : {}) }]));
+    ...(!knownCost && !holding && ['winAtOpen','winAtClose','avgOpenReturnNet','avgCloseReturnNet','avgOpenEntryReturnNet','winAtOpenEntry'].includes(key) ? { reason: 'legacy-unknown-cost-model' } : {}) }]));
 }
 
 function aggregateOvernightRecords(records) {
-  const coverage = Object.fromEntries(['avgOpenReturn','avgCloseReturn','avgHighReturn','avgOpenReturnNet','avgCloseReturnNet','hitPlus2','brokeMinus2','winAtOpen','winAtClose'].map(field => {
+  const coverage = Object.fromEntries(['avgOpenReturn','avgCloseReturn','avgHighReturn','avgOpenReturnNet','avgCloseReturnNet','hitPlus2','brokeMinus2','winAtOpen','winAtClose','avgOpenEntryReturn','avgOpenEntryReturnNet','winAtOpenEntry'].map(field => {
     const parts = records.map(record => record.metricCoverage[field]);
     const validCount = parts.reduce((sum, part) => sum + part.validCount, 0);
     const totalCount = parts.reduce((sum, part) => sum + part.totalCount, 0);
@@ -8871,11 +8910,25 @@ function aggregateOvernightRecords(records) {
     }
     return dayClusterCi([...days.values()], 'x', 'n');
   };
+  // 開盤進場的獲利因子與最長連虧（以「觀察日」為叢集）：只有帶 openEntryNet 的逐日紀錄算得出來。
+  const openEntryDays = records.filter(record => record.openEntryNet && Number.isFinite(record.openEntryNet.avg))
+    .slice().sort((a, b) => String(a.observationDate).localeCompare(String(b.observationDate)));
+  let run = 0; let longest = 0; let worst = null;
+  for (const record of openEntryDays) {
+    if (record.openEntryNet.avg < 0) { run += 1; longest = Math.max(longest, run); } else run = 0;
+    if (!worst || record.openEntryNet.avg < worst.avgNet) worst = { day: record.observationDate, avgNet: record.openEntryNet.avg, count: record.openEntryNet.count };
+  }
+  const gain = openEntryDays.reduce((sum, record) => sum + record.openEntryNet.gain, 0);
+  const loss = openEntryDays.reduce((sum, record) => sum + record.openEntryNet.loss, 0);
   return { days: records.length, signals: records.reduce((sum, record) => sum + record.verified, 0),
-    ...Object.fromEntries(['hitPlus2','brokeMinus2','winAtOpen','winAtClose'].map(field => [field, (coverage[field].value ?? 0) * coverage[field].validCount])),
-    ...Object.fromEntries(['avgOpenReturn','avgCloseReturn','avgOpenReturnNet','avgCloseReturnNet'].map(field => [field, coverage[field].value])),
+    ...Object.fromEntries(['hitPlus2','brokeMinus2','winAtOpen','winAtClose','winAtOpenEntry'].map(field => [field, (coverage[field].value ?? 0) * coverage[field].validCount])),
+    ...Object.fromEntries(['avgOpenReturn','avgCloseReturn','avgOpenReturnNet','avgCloseReturnNet','avgOpenEntryReturn','avgOpenEntryReturnNet'].map(field => [field, coverage[field].value])),
     metricCoverage: coverage, minDays: OVERNIGHT_MIN_DAYS,
-    ci: Object.fromEntries(['hitPlus2','winAtOpen','winAtClose'].map(field => [field, ci(field)])) };
+    ci: Object.fromEntries(['hitPlus2','winAtOpen','winAtClose','winAtOpenEntry'].map(field => [field, ci(field)])),
+    openEntry: openEntryDays.length
+      ? { days: openEntryDays.length, profitFactorNet: loss > 0 ? roundTo(gain / loss) : null, profitFactorReason: loss > 0 ? null : 'no-losing-day',
+          maxConsecutiveLossDays: longest, worstDay: worst }
+      : null };
 }
 
 function overnightSnapshotFormulaVersion(snapshot) {
@@ -10227,13 +10280,18 @@ function taiexRegime(history, asOf) {
 function taiexPeriodBenchmark(history, records) {
   const closes = new Map((history || []).filter((row) => row?.date && Number.isFinite(row.close) && row.close > 0).map((row) => [String(row.date), Number(row.close)]));
   const returns = [];
+  const strategyReturns = [];
   for (const record of records || []) {
     const from = closes.get(toCompactDate(record.asOf));
     const to = closes.get(toCompactDate(record.observationDate));
-    if (from > 0 && to > 0) returns.push((to / from - 1) * 100);
+    if (!(from > 0 && to > 0)) continue;
+    returns.push((to / from - 1) * 100);
+    // 同一批日子、同一段期間（訊號日收盤→觀察日收盤）、同樣日等權、同樣不扣成本：這樣並列才是同口徑。
+    if (Number.isFinite(record.avgCloseReturn)) strategyReturns.push(record.avgCloseReturn);
   }
   if (!returns.length) return null;
-  return { source: "taiex-close-to-close", days: returns.length, missingDays: (records || []).length - returns.length, avgReturn: roundTo(average(returns), 2) };
+  return { source: "taiex-close-to-close", basis: "day-equal-weight-gross-close-to-close", days: returns.length, missingDays: (records || []).length - returns.length,
+    avgReturn: roundTo(average(returns), 2), strategyAvgReturn: strategyReturns.length ? roundTo(average(strategyReturns), 2) : null };
 }
 
 // 成績單分層鍵：有距離就看距離——|收盤／MA60 − 1| ≤ 1% 歸「季線附近」（nearMa60），不硬塞上或下：
@@ -10691,6 +10749,12 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
     const lowReturn = pct((bar.low ?? NaN) - base, base);
     const closeValue = evidence.phase === "intraday" ? bar.current : bar.close;
     const currentReturn = pct((closeValue ?? NaN) - base, base);
+    // 可執行口徑：次日開盤買、當日收盤賣。訊號要等 13:30 後整批收盤資料才算得出來，訊號日收盤是買不到的，
+    // 「開盤觀察／收盤觀察」只是價格觀察；這一欄才是散戶真的做得到的交易。
+    // 觀察日一價漲停鎖死（整天只有漲停一個成交價）＝開盤就買不到：記 openEntrySkipped、不進這一欄的分母，其他觀察口徑照舊。
+    const openEntryLocked = isLimitUpLockedBar({ high: bar.high, low: bar.low, close: bar.close }, { close: base });
+    const openEntryReturn = !openEntryLocked && Number.isFinite(bar.open) && bar.open > 0 && Number.isFinite(closeValue)
+      ? roundTo(pct(closeValue - bar.open, bar.open), 4) : null;
     let holdingOutcomes;
     if (isHoldingIdentity(snapshot)) {
       const exchange = pick.exchange || reference.byCode.get(pick.code)?.exchange;
@@ -10722,6 +10786,10 @@ async function observeSignalSnapshot(snapshot, { allowIntraday = false, referenc
       currentReturnNet: netReturnPct(currentReturn),
       winAtOpen: openReturn !== null && netReturnPct(openReturn) > 0,
       winAtClose: currentReturn !== null && netReturnPct(currentReturn) > 0,
+      openEntryReturn,
+      openEntryReturnNet: netReturnPct(openEntryReturn),
+      winAtOpenEntry: openEntryReturn !== null && netReturnPct(openEntryReturn) > 0,
+      ...(openEntryLocked ? { openEntrySkipped: "limit-up-locked" } : {}),
       observationSource: evidence.source,
       observationPhase: evidence.phase || "final",
       ...(corporateActionAdjusted
@@ -10843,7 +10911,7 @@ async function persistFinalObservations(entries) {
     openReturn: Number.isFinite(row.openReturn) ? row.openReturn : null,
     highReturn: Number.isFinite(row.highReturn) ? row.highReturn : null,
     currentReturn: Number.isFinite(row.currentReturn) ? row.currentReturn : null,
-    ...Object.fromEntries(['currentPrice', 'lowReturn', 'openReturnNet', 'currentReturnNet', 'observationPhase', 'adjustedBase', 'signalClose', 'holdingOutcomes', 'priceObservationIdentity']
+    ...Object.fromEntries(['currentPrice', 'lowReturn', 'openReturnNet', 'currentReturnNet', 'openEntryReturn', 'openEntryReturnNet', 'winAtOpenEntry', 'openEntrySkipped', 'observationPhase', 'adjustedBase', 'signalClose', 'holdingOutcomes', 'priceObservationIdentity']
       .filter(key => key in row).map(key => [key, row[key]])),
     observationSource: row.observationSource || "",
     ...(row.corporateActionAdjusted ? { corporateActionAdjusted: true } : {}),
@@ -10946,9 +11014,12 @@ async function buildVerificationHistory() {
   const cohort = summarizeMatureVerification(db, 'overnight', { asOf: toTaipeiCompactDate(), population: measurement.population });
   const records = observations.map((observed, index) => {
     const snapshot = snapshots[index];
-    const perfs = observed.rows.filter((row) => row.verified);
-    const metricCoverage = overnightMetricCoverage(perfs.map(row => ({ ...row, observationDate: observed.observationDate })),
-      knownPriceCost(observed.identity || snapshot), isHoldingIdentity(observed.identity || snapshot));
+    // 長期分母以「檔」為單位去重（與單日摘要一致）：同一檔同日進兩群會貢獻兩筆完全相同的漲跌，樣本虛胖、變異被壓低。
+    const perfsAll = observed.rows.filter((row) => row.verified);
+    const perfs = dedupeRowsByCode(perfsAll);
+    const rowKnownCost = knownPriceCost(observed.identity || snapshot);
+    const rowHolding = isHoldingIdentity(observed.identity || snapshot);
+    const metricCoverage = overnightMetricCoverage(perfs.map(row => ({ ...row, observationDate: observed.observationDate })), rowKnownCost, rowHolding);
     const count = field => (metricCoverage[field].value ?? 0) * metricCoverage[field].validCount;
     return {
       asOf: snapshot.asOf,
@@ -10962,7 +11033,10 @@ async function buildVerificationHistory() {
       status: observed.status,
       signals: snapshot.picks.length,
       verified: perfs.length,
-      unverified: Math.max(0, snapshot.picks.length - perfs.length),
+      duplicatedSignals: perfsAll.length - perfs.length,
+      unverified: Math.max(0, snapshot.picks.length - perfsAll.length),
+      openEntrySkipped: perfs.filter((row) => row.openEntrySkipped).length,
+      openEntryNet: openEntryNetSummary(perfs, rowKnownCost || rowHolding),
       complete: observed.status === "final" && observed.complete,
       pending: observed.status !== "final",
       hitPlus2: count('hitPlus2'), brokeMinus2: count('brokeMinus2'),
@@ -11080,6 +11154,12 @@ async function buildSignalVerification() {
     brokeMinus2: items.filter((row) => row.brokeMinus2).length,
     winAtOpen: items.filter((row) => row.winAtOpen).length,
     winAtClose: items.filter((row) => row.winAtClose).length,
+    // 可執行口徑：次日開盤買→當日收盤（盤中為現價）賣；一價漲停鎖死的列不進分母。
+    openEntryTotal: items.filter((row) => openEntryReturnOf(row) !== null).length,
+    openEntrySkipped: items.filter((row) => row.openEntrySkipped).length,
+    winAtOpenEntry: items.filter((row) => Number.isFinite(observationNet(openEntryReturnOf(row))) && observationNet(openEntryReturnOf(row)) > 0).length,
+    avgOpenEntryReturn: average(items.map((row) => openEntryReturnOf(row))),
+    avgOpenEntryReturnNet: observationNet(average(items.map((row) => openEntryReturnOf(row)))),
     avgOpenReturn: average(items.map((row) => row.openReturn)),
     avgOpenReturnNet: observationNet(average(items.map((row) => row.openReturn))),
     avgCurrentReturn: average(items.map((row) => row.currentReturn)),
@@ -11096,15 +11176,7 @@ async function buildSignalVerification() {
   // 所以溫和上漲的紅 K 必定同時進兩群，同一檔會出現兩筆、貢獻完全相同的漲跌結果。
   // 分群統計（summaryByGroup）以 pick 為單位是對的，但整體 summary 的分母必須以「檔」為單位
   // 去重，否則樣本數虛胖、變異數被人為壓低。同檔取分數最高的那筆代表。
-  const dedupeByCode = (items) => {
-    const best = new Map();
-    for (const row of items) {
-      const current = best.get(row.code);
-      if (!current || (Number(row.score) || 0) > (Number(current.score) || 0)) best.set(row.code, row);
-    }
-    return [...best.values()];
-  };
-  const uniqueVerifiedRows = dedupeByCode(verifiedRows);
+  const uniqueVerifiedRows = dedupeRowsByCode(verifiedRows);
   const groups = {};
   for (const row of verifiedRows) {
     groups[row.group] ||= { groupName: row.groupName, rows: [] };
@@ -12968,7 +13040,9 @@ function advanceSwingVerificationEntry(entry, dayQuote, previousQuote = null) {
     resolve("loss", slipped);
     return true;
   }
-  if (high >= entry.target) {
+  // 目標是掛在目標價的限價賣單：日 K 最高價剛好等於目標只代表那個價位有人成交過、你的單可能還在排隊；
+  // 要求最高價「穿越」目標才算成交。停損端扣一檔滑價、目標端要求穿越，兩邊都往保守方向。
+  if (high > entry.target) {
     resolve("win", Number.isFinite(open) && open > entry.target ? open : entry.target);
     return true;
   }
@@ -16701,7 +16775,7 @@ export {
   OVERNIGHT_FORMULA_VERSION, OVERNIGHT_SNAPSHOT_LIMIT, OVERNIGHT_MIN_DAYS, dayClusterCi, tQuantile975, overnightSnapshotFormulaVersion,
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
-  parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime, taiexPeriodBenchmark, REGIME_NEAR_MA60_BAND,
+  parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime, taiexPeriodBenchmark, REGIME_NEAR_MA60_BAND, openEntryReturnOf, dedupeRowsByCode, openEntryNetSummary, overnightMetricCoverage, aggregateOvernightRecords,
   parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureOutcomes, publicSignalsView,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,

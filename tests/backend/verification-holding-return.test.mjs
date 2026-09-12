@@ -90,7 +90,8 @@ test('公司行動調整只移價格；新模型原始風險與現金股利不�
     holdingEvents:[cash], holdingCoverage:[{ date:D1, status:'complete' }] };
   mod.applySwingCorporateAction(e,0.95,D1); mod.applySwingCorporateAction(e,0.95,D1);
   assert.equal(e.entry,95);
-  mod.advanceSwingVerificationEntry(e,{ rawDate:D1, open:100, high:104.5, low:99, price:104.5 });
+  // 目標 104.5 是限價單，最高價要「穿越」才算成交（剛好等於只是排隊）；出場價仍是目標價
+  mod.advanceSwingVerificationEntry(e,{ rawDate:D1, open:100, high:104.6, low:99, price:104.5 });
   assert.equal(e.resultPct,10); assert.equal(e.exit.price,104.5);
   assert.equal(e.holdingOutcome.netPnl,9.029); assert.equal(e.holdingOutcome.evidence.originalRiskMoney,5);
 });

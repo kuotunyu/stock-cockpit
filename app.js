@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v56";
+const APP_SHELL_VERSION = "stock1-shell-v57";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -6546,7 +6546,7 @@ function renderOvernightGroups() {
                     </span>
                     <span class="pick-risks">
                       <em>風險</em>
-                      ${renderRiskChips(pick.riskTags)}
+                      ${renderRiskChips(pick.riskTags)}${pick.fillRisk === "limit-up-locked" ? `<span class="pick-chip is-risk is-alert" title="訊號日整天只有漲停一個成交價：盤後追不到，次日開盤能不能買要看開盤；成績單的開盤進場口徑在觀察日也鎖死時會把它排除">漲停鎖死・買不到</span>` : ""}
                     </span>
                     <span class="pick-backtest">
                       <em>回測</em>
@@ -6679,10 +6679,12 @@ function renderSignalVerification() {
         </div>
         <div class="verify-stats">
           ${coverageLabel ? `<span>${escapeHtml(coverageLabel)}</span>` : ""}
-          <span class="${rateTone(summary.winAtOpen, summary.total)}" title="訊號收盤至觀察日開盤的價格觀察、扣一買一賣模型費稅後淨報酬 > 0 的檔數；不是可成交保證">開盤賣勝率 ${summary.winAtOpen ?? 0}/${summary.total ?? 0}</span>
+          <span class="${rateTone(summary.winAtOpenEntry, summary.openEntryTotal)}" title="次日開盤買、${isIntraday ? "現價" : "當日收盤"}賣，扣一買一賣模型費稅後淨報酬 > 0 的檔數——唯一實際做得到的口徑；一價漲停鎖死（開盤買不到）的檔不進分母">${glossLink('開盤進場勝率', '次日開盤進場')} ${summary.winAtOpenEntry ?? 0}/${summary.openEntryTotal ?? 0}</span>
+          <span class="${rateTone(summary.winAtOpen, summary.total)}" title="訊號日收盤買的價格觀察（訊號算出來時已收盤，實際買不到）。訊號收盤至觀察日開盤的價格觀察、扣一買一賣模型費稅後淨報酬 > 0 的檔數；不是可成交保證">開盤賣勝率 ${summary.winAtOpen ?? 0}/${summary.total ?? 0}</span>
           <span class="${rateTone(summary.winAtClose, summary.total)}" title="${isIntraday ? "以現價賣出" : "觀察日收盤價賣出"}、扣費稅後淨報酬 > 0 的檔數">${isIntraday ? "現價賣勝率" : "收盤賣勝率"} ${summary.winAtClose ?? 0}/${summary.total ?? 0}</span>
           <span title="觀察日最高價曾碰到 +2%——盤中曾觸及，不是可實現損益；要在最高價出場得預掛限價單，觸及也不保證成交">盤中曾達 +2%：${summary.hitPlus2 ?? 0}/${summary.total ?? 0}</span>
           <span title="觀察日最低價曾碰到 −2%——與「曾達」可同時成立，高振幅的日子兩者常一起出現">盤中曾破 −2%：${summary.brokeMinus2 ?? 0}/${summary.total ?? 0}</span>
+          <span>平均開盤進場 ${formatGrossWithNet(summary.avgOpenEntryReturn, summary.avgOpenEntryReturnNet)}</span>
           <span>平均開盤 ${formatGrossWithNet(summary.avgOpenReturn, summary.avgOpenReturnNet)}</span>
           <span>${isIntraday ? "平均現價" : "平均收盤"} ${formatGrossWithNet(summary.avgCurrentReturn, summary.avgCurrentReturnNet)}</span>
         </div>
@@ -6730,9 +6732,12 @@ function renderVerifyRegimeLine(totals) {
     if (!bucket?.days) return `${label} 0 天`;
     const minDays = Number(bucket.minDays) || 20;
     if (bucket.metricCoverage) {
-      const open = bucket.metricCoverage.winAtOpen;
+      const entry = bucket.metricCoverage.winAtOpenEntry;
+      const open = entry || bucket.metricCoverage.winAtOpen;
+      const openLabel = entry ? "開盤進場" : "開盤觀察";
+      const openHits = entry ? bucket.winAtOpenEntry : bucket.winAtOpen;
       const close = bucket.metricCoverage.winAtClose;
-      return `${label}：開盤觀察 ${open?.validDays >= minDays ? rate(bucket.winAtOpen, open.validCount) : `累積中 ${open?.validDays || 0}/${minDays} 日`}・收盤觀察 ${close?.validDays >= minDays ? rate(bucket.winAtClose, close.validCount) : `累積中 ${close?.validDays || 0}/${minDays} 日`}`;
+      return `${label}：${openLabel} ${open?.validDays >= minDays ? rate(openHits, open.validCount) : `累積中 ${open?.validDays || 0}/${minDays} 日`}・收盤觀察 ${close?.validDays >= minDays ? rate(bucket.winAtClose, close.validCount) : `累積中 ${close?.validDays || 0}/${minDays} 日`}`;
     }
     if (bucket.days < minDays) return `${label} ${bucket.days} 天（累積中 ${bucket.days}/${minDays}）`;
     const ci = bucket.ci?.winAtOpen;
@@ -6887,7 +6892,8 @@ function renderVerifyHistory() {
         <div class="verify-history-row">
           <span data-col="訊號→觀察">${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
           <span data-col="驗證檔數">${record.verified} 檔</span>
-          <span data-col="開盤賣勝率">${rate(record.winAtOpen, record.metricCoverage?.winAtOpen?.validCount ?? record.verified)}</span>
+          <span data-col="開盤進場">${rate(record.winAtOpenEntry, record.metricCoverage?.winAtOpenEntry?.validCount ?? record.verified)}</span>
+          <span data-col="開盤觀察">${rate(record.winAtOpen, record.metricCoverage?.winAtOpen?.validCount ?? record.verified)}</span>
           <span data-col="曾達+2%">${rate(record.hitPlus2, record.metricCoverage?.hitPlus2?.validCount ?? record.verified)}</span>
           <span data-col="曾破−2%">${rate(record.brokeMinus2, record.metricCoverage?.brokeMinus2?.validCount ?? record.verified)}</span>
           <span data-col="平均開盤">${formatSignedPercent(record.avgOpenReturn)}</span>
@@ -6914,7 +6920,13 @@ function renderVerifyHistory() {
     if (ci.high < 0.5) return "is-warn";
     return "";
   };
-  // 第一層只留三個數字（累計、開盤淨獲利率、平均開盤）；其餘口徑收進「更多口徑」，手機預設收合、桌機展開。
+  // 淨期望值：夠天數才染色；正＝值得做（positive 是漲色），負＝琥珀提醒。
+  const expectancyTone = (value, field) => {
+    if (data.cohort || !sufficient(field) || !Number.isFinite(value)) return "";
+    return value > 0 ? "positive" : value < 0 ? "is-warn" : "";
+  };
+  // 第一層只留三個數字（累計、開盤進場淨獲利率、淨期望值）；訊號日收盤買的觀察口徑、曾達／曾破、獲利因子、同期大盤
+  // 全部收進「更多口徑」，手機預設收合、桌機展開。
   const verifyMoreOpen = !(typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches);
   const denom = field => totals?.metricCoverage?.[field]?.validCount ?? totals?.signals;
   const mainRate = field => {
@@ -6927,20 +6939,23 @@ function renderVerifyHistory() {
       <header>
         <div>
           <strong>${holding ? '假設含息持有與價格觀察紀錄' : '訊號價格觀察紀錄'}</strong>
-          <span>每筆訊號只用官方認定的實際下一交易日對答案；部分資料不進累計。${holding ? '淨獲利率按完整模型含息淨損益是否為正計算' : '淨獲利率是開盤／收盤價格觀察扣模型費稅後為正的比例'}；「曾達／曾破」只是盤中曾觸及。各欄有效觀察未滿 ${minDays} 天不當結論。</span>
+          <span><strong>開盤進場</strong>＝次日開盤買、當日收盤賣，是唯一實際做得到的口徑；「開盤／收盤觀察」是訊號日收盤買的價格觀察——訊號算出來時已經收盤，實際買不到。每筆訊號只用官方認定的實際下一交易日對答案；部分資料不進累計。${holding ? '淨獲利率按完整模型含息淨損益是否為正計算' : '淨獲利率是開盤／收盤價格觀察扣模型費稅後為正的比例'}；「曾達／曾破」只是盤中曾觸及。各欄有效觀察未滿 ${minDays} 天不當結論。</span>
         </div>
         ${totals ? `
           <div class="verify-stats">
             <span>累計 ${totals.days} 天 / ${totals.signals} 檔${enoughDays ? "" : `・累積中 ${totals.days}/${minDays} 天`}</span>
-            <span class="${ciTone(totals.ci?.winAtOpen,'winAtOpen')}" title="${verificationMetricNote(totals.metricCoverage?.winAtOpen)}">${glossLink(holding ? '開盤含息淨獲利率' : '開盤觀察淨獲利率',holding ? '假設含息持有' : '開盤賣勝率')} ${mainRate('winAtOpen')}${ciText(totals.ci?.winAtOpen,'winAtOpen')}</span>
-            <span>平均開盤 ${holding ? `價格 ${formatSignedPercent(totals.avgOpenReturn)}；含息淨 ${formatSignedPercent(totals.avgOpenReturnNet)}` : formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
+            <span class="${ciTone(totals.ci?.winAtOpenEntry,'winAtOpenEntry')}" title="次日開盤買、當日收盤賣，扣模型費稅後淨報酬 > 0 的比例；觀察日一價漲停鎖死（開盤買不到）不進分母。${verificationMetricNote(totals.metricCoverage?.winAtOpenEntry)}">${glossLink('開盤進場淨獲利率', '次日開盤進場')} ${mainRate('winAtOpenEntry')}${ciText(totals.ci?.winAtOpenEntry,'winAtOpenEntry')}</span>
+            <span class="${expectancyTone(totals.avgOpenEntryReturnNet, 'winAtOpenEntry')}" title="每筆「次日開盤買→當日收盤賣」扣模型費稅後的平均報酬：正才值得做，數字就是每做一筆平均賺賠多少個百分點；未計每筆最低手續費與滑價">${glossLink('淨期望值')} ${!sufficient('winAtOpenEntry') ? `累積中 ${totals?.metricCoverage?.winAtOpenEntry?.validDays ?? totals?.days ?? 0}/${minDays} 天` : Number.isFinite(totals.avgOpenEntryReturnNet) ? formatSignedPercent(totals.avgOpenEntryReturnNet) : '--'}</span>
             <details class="verify-more"${verifyMoreOpen ? " open" : ""}>
-              <summary>更多口徑：收盤、盤中曾達／曾破、平均隔日收</summary>
+              <summary>更多口徑：訊號日收盤買的觀察（開盤／收盤）、曾達／曾破、獲利因子與連虧、同期大盤</summary>
+              <span class="${ciTone(totals.ci?.winAtOpen,'winAtOpen')}" title="${verificationMetricNote(totals.metricCoverage?.winAtOpen)}">${glossLink(holding ? '開盤含息淨獲利率' : '開盤觀察淨獲利率',holding ? '假設含息持有' : '開盤賣勝率')} ${mainRate('winAtOpen')}${ciText(totals.ci?.winAtOpen,'winAtOpen')}</span>
+              <span>平均開盤 ${holding ? `價格 ${formatSignedPercent(totals.avgOpenReturn)}；含息淨 ${formatSignedPercent(totals.avgOpenReturnNet)}` : formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
               <span class="${ciTone(totals.ci?.winAtClose,'winAtClose')}" title="${verificationMetricNote(totals.metricCoverage?.winAtClose)}">${glossLink(holding ? '收盤含息淨獲利率' : '收盤觀察淨獲利率',holding ? '假設含息持有' : '收盤賣勝率')} ${mainRate('winAtClose')}${ciText(totals.ci?.winAtClose,'winAtClose')}</span>
               <span class="${ciTone(totals.ci?.hitPlus2,'hitPlus2')}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">${glossLink('曾達+2%', '盤中曾達／曾破')} ${mainRate('hitPlus2')}${ciText(totals.ci?.hitPlus2,'hitPlus2')}</span>
               <span title="觀察日最低價曾碰到 −2%">${glossLink('曾破−2%', '盤中曾達／曾破')} ${mainRate('brokeMinus2')}</span>
               <span>平均隔日收 ${holding ? `價格 ${formatSignedPercent(totals.avgCloseReturn)}；含息淨 ${formatSignedPercent(totals.avgCloseReturnNet)}` : formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
-              ${Number.isFinite(totals?.indexBenchmark?.avgReturn) ? `<span title="同期加權指數：每個完成觀察日「訊號日收盤→觀察日收盤」的指數報酬，日等權平均（${totals.indexBenchmark.days} 天${totals.indexBenchmark.missingDays ? `，${totals.indexBenchmark.missingDays} 天指數缺值` : ""}）；與「平均隔日收」同一段期間，兩邊都是價格觀察、不是可成交回測">${glossLink("同期大盤")} ${formatSignedPercent(totals.indexBenchmark.avgReturn)}</span>` : ""}
+              ${totals.openEntry ? `<span title="開盤進場淨口徑：獲利總和 ÷ 虧損總和；最長連虧與最差單日都以「觀察日」為單位（${totals.openEntry.days} 天）">${glossLink('獲利因子')} ${totals.openEntry.profitFactorNet != null ? `淨 ${totals.openEntry.profitFactorNet}` : '--'}・${glossLink('最長連虧', '中位數與最長連虧')} ${totals.openEntry.maxConsecutiveLossDays} 天${totals.openEntry.worstDay ? `・最差 ${escapeHtml(compactDateLabel(totals.openEntry.worstDay.day))} ${formatSignedPercent(totals.openEntry.worstDay.avgNet)}` : ''}</span>` : ''}
+              ${Number.isFinite(totals?.indexBenchmark?.avgReturn) ? `<span title="同一批完成觀察日、同一段期間（訊號日收盤→觀察日收盤）、同樣日等權、同樣不扣成本：左邊是加權指數，右邊是訊號逐日平均隔日收（${totals.indexBenchmark.days} 天${totals.indexBenchmark.missingDays ? `，${totals.indexBenchmark.missingDays} 天指數缺值` : ""}）；兩邊都是價格觀察、不是可成交回測">${glossLink("同期大盤")} ${formatSignedPercent(totals.indexBenchmark.avgReturn)}${Number.isFinite(totals.indexBenchmark.strategyAvgReturn) ? `・訊號同口徑 ${formatSignedPercent(totals.indexBenchmark.strategyAvgReturn)}` : ""}</span>` : ""}
             </details>
           </div>
         ` : ""}
@@ -6951,7 +6966,8 @@ function renderVerifyHistory() {
       <div class="verify-history-row is-head">
         <span>訊號→觀察</span>
         <span>驗證檔數</span>
-        <span>開盤賣勝率</span>
+        <span>開盤進場</span>
+        <span>開盤觀察</span>
         <span>曾達+2%</span>
         <span>曾破−2%</span>
         <span>平均開盤</span>
@@ -7399,7 +7415,7 @@ function renderSwingCard(pick) {
         <div class="swing-stat swing-stat-entry" title="建議進場價，預設＝當日收盤價，所以和右上角的收盤是同一個數字"><span>${glossLink("進場")}</span><strong>${formatNumber(pick.plan?.entry)}</strong></div>
         <div class="swing-stat" title="初始停損：進場後先設在收盤 −5%"><span>${glossLink("建議停損")} <i class="swing-stat-hint">−5%</i></span><strong>${formatNumber(pick.plan?.initialStop)}</strong></div>
         <div class="swing-stat" title="依支撐（擺動低點／布林下軌／月線）設的較大停損；盈虧比就是用它算的"><span>${glossLink("結構停損")}</span><strong>${formatNumber(pick.plan?.structuralStop)}</strong></div>
-        <div class="swing-stat swing-stat-sub" title="進階：股價漲到此價（收盤 +5%）後，改用移動停利往上跟、鎖住獲利"><span>${glossLink("啟動移停")} <i class="swing-stat-hint">+5%</i></span><strong>${formatNumber(pick.plan?.trailingTrigger)}</strong></div>
+        <div class="swing-stat swing-stat-sub" title="進階：股價漲到此價（收盤 +5%）後，改用移動停利往上跟、鎖住獲利。這只是提醒價：成績單的驗證不模擬移停，結案只看停損、目標與 15 日"><span>${glossLink("啟動移停")} <i class="swing-stat-hint">+5%</i></span><strong>${formatNumber(pick.plan?.trailingTrigger)}</strong></div>
         <div class="swing-stat" title="上方壓力或波段量測幅度推估的目標價${Number.isFinite(pick.plan?.nearestResistance)
           ? `。⚠ 上方 ${formatNumber(pick.plan.nearestResistance)} 還有一個更近的擺動高點，它太貼近收盤價（2% 內）所以不當目標用，但路上會先遇到它。`
           : ""}"><span>${glossLink("目標")}</span><strong>${formatNumber(pick.plan?.target)}</strong>${
@@ -13974,7 +13990,7 @@ const GLOSSARY = [
   { term: "進場", cat: "策略雷達（波段）", def: "建議進場價，預設<strong>＝當日收盤價</strong>（所以常和右上角「收盤」是同一個數字）。" },
   { term: "建議停損（−5%）", aliases: ["建議停損", "初始停損"], cat: "策略雷達（波段）", def: "進場後的<strong>初始停損</strong>，固定設在收盤 −5%，控制單筆最大虧損。" },
   { term: "結構停損", cat: "策略雷達（波段）", def: "依下方<strong>支撐</strong>（擺動低點／布林下軌／月線）設的較大停損，是盈虧比計算用的防守價。" },
-  { term: "啟動移停（+5%）", aliases: ["啟動移停", "移動停利"], cat: "策略雷達（波段）", def: "進階——股價漲到收盤 +5% 後，改用「<strong>移動停利</strong>」往上跟，鎖住已有獲利。" },
+  { term: "啟動移停（+5%）", aliases: ["啟動移停", "移動停利"], cat: "策略雷達（波段）", def: "進階——股價漲到收盤 +5% 後，改用「<strong>移動停利</strong>」往上跟，鎖住已有獲利。這只是一個提醒價：<strong>成績單的驗證不模擬移停</strong>，結案只看結構停損、目標與 15 日超時，所以畫面上的勝率與獲利因子都是「不移停」的結果。" },
   { term: "目標", cat: "策略雷達（波段）", def: "推估的目標價，取上方壓力或波段量測幅度（本波回檔前的高低差往上投射）。" },
   { term: "盈虧比", aliases: ["風險報酬比", "RR"], cat: "策略雷達（波段）", def: "＝（目標 − 進場）÷（進場 − 結構停損），也就是「<strong>賺的空間 ÷ 賠的風險</strong>」，越大越划算；小於 1（風險大於報酬）的設定 App 會<strong>直接濾掉</strong>。卡片底部色條：綠＝到停損的風險、紅＝到目標的空間。" },
 
@@ -14003,7 +14019,8 @@ const GLOSSARY = [
   { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
   { term: "盤中曾達／曾破", aliases: ["曾達", "曾破", "曾達+2%", "曾破−2%", "盤中曾達"], cat: "成績單與決策", def: "觀察日的<strong>最高價曾碰到 +2%</strong>／<strong>最低價曾碰到 −2%</strong>——只是盤中曾觸及的價位（最大有利／不利幅度），<strong>不是可實現損益</strong>，兩者同一天可以同時成立。要在最高價出場是事後才知道的；真正能執行的是開盤賣或收盤賣的淨獲利率。" },
   { term: "同期大盤", aliases: ["同期大盤", "同期加權指數", "指數基準"], cat: "成績單與決策", def: "隔日沖成績單的對照組：每個完成觀察日「訊號日收盤→觀察日收盤」的<strong>加權指數</strong>報酬，日等權平均，與「平均隔日收」看同一段期間。訊號的平均隔日收若長期<strong>低於同期大盤</strong>，表示選出來的股票沒有比直接抱指數好；高於才有超額。兩邊都是價格觀察，不是可成交回測，也不含費稅。" },
-  { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "跳空略過"], cat: "成績單與決策", def: "波段驗證的另一個口徑：同一批驗證單改以<strong>第一個交易日的開盤價</strong>當進場價重算。訊號要等收盤後的整批資料才算得出來，真實進場多半是次日開盤，所以並陳。開盤已經在停損下方或目標上方的單，這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
+  { term: "淨期望值", aliases: ["期望值", "淨期望", "每筆平均淨報酬"], cat: "成績單與決策", def: "每做一筆平均賺賠多少：把每筆的<strong>淨報酬</strong>（扣一買一賣的模型費稅）平均起來。勝率高不代表賺錢——十筆贏九筆各賺 0.3%、輸一筆賠 4%，期望值還是負的；反過來也成立。隔日沖成績單的淨期望值用「次日開盤買、當日收盤賣」這個做得到的口徑算，正才值得做；未計每筆最低手續費與滑價，小額部位實際會更差一點。" },
+  { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "開盤進場淨獲利率", "開盤進場勝率", "跳空略過"], cat: "成績單與決策", def: "唯一實際做得到的進場口徑：訊號要等 13:30 收盤後的整批資料才算得出來，訊號日收盤已經買不到，真實進場是<strong>次日開盤</strong>。隔日沖成績單的「開盤進場」＝次日開盤買、當日收盤賣，扣模型費稅後淨報酬 > 0 算贏；觀察日整天只有漲停一個成交價（一價鎖死）代表開盤買不到，不進分母。波段驗證則是同一批驗證單改以第一個交易日的開盤價當進場價重算並陳；開盤已經在停損下方或目標上方的單這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];
 const glossaryState = { cat: "", q: "", screenQuery: false };
 

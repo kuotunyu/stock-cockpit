@@ -20,7 +20,7 @@ test('I1：20個完整日不能替開盤1日與觸及19日通過門檻，達門�
         metricCoverage:{winAtOpen:m(${openingWins},1,1),winAtClose:m(0,20,20),hitPlus2:m(0,19,19),brokeMinus2:m(null,0,0)}};
       verifyHistoryState.data={records:[{status:'final',complete:true,verified:1,signals:1}],cohort:{headline,models:[]}};
       return renderVerifyHistory(); })()`);
-    const chips=[...host.querySelector('.verify-stats').children].map(n=>n.textContent);
+    const chips=[...host.querySelectorAll('.verify-stats span')].map(n=>n.textContent);
     assert.match(chips.find(t=>t.includes('開盤觀察淨獲利率')),/累積中 1\/20 天/);
     assert.doesNotMatch(chips.find(t=>t.includes('開盤觀察淨獲利率')),/\d%/);
     assert.match(chips.find(t=>t.includes('收盤觀察淨獲利率')),/0%/);
@@ -130,7 +130,7 @@ test("單日驗證：勝率改成可執行口徑（開盤賣／收盤賣），�
     verifyState.data = {
       ok: true, available: true, signalDate: "2026-07-10", observationDate: "2026-07-13", observationPhase: "final",
       expectedSignals: 4, verifiedSignals: 4,
-      summary: { total: 4, hitPlus2: 1, brokeMinus2: 2, winAtOpen: 3, winAtClose: 1, avgOpenReturn: 0.8, avgOpenReturnNet: 0.33, avgCurrentReturn: -0.2 },
+      summary: { total: 4, hitPlus2: 1, brokeMinus2: 2, winAtOpen: 3, winAtClose: 1, winAtOpenEntry: 2, openEntryTotal: 3, avgOpenEntryReturn: 0.4, avgOpenEntryReturnNet: -0.07, avgOpenReturn: 0.8, avgOpenReturnNet: 0.33, avgCurrentReturn: -0.2 },
       rows: [],
     };
     verifyState.loading = false;
@@ -138,6 +138,9 @@ test("單日驗證：勝率改成可執行口徑（開盤賣／收盤賣），�
     return renderSignalVerification();
   })()`));
   assert.match(html, /開盤賣勝率 3\/4/);
+  assert.match(html.replace(/<[^>]+>/g, ""), /開盤進場勝率 2\/3/, "可執行口徑：一價鎖死的檔不進分母，所以是 /3");
+  assert.match(html, /平均開盤進場/);
+  assert.match(html, /data-glossary-term="次日開盤進場"/);
   assert.match(html, /收盤賣勝率 1\/4/);
   assert.match(html, /盤中曾達 \+2%：1\/4/);
   assert.match(html, /盤中曾破 −2%：2\/4/);
@@ -181,7 +184,7 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   const chips = [...host.querySelectorAll(".verify-stats span")];
   assert.ok(chips.find((c) => c.textContent.includes("開盤觀察淨獲利率")).classList.contains("positive"), "下界 60% ≥ 50% 染色");
   assert.equal(chips.find((c) => c.textContent.includes("曾達+2%")).classList.contains("positive"), false, "點估計 67% 但下界 45% 不染");
-  assert.match(enough, /開盤賣勝率.*曾達\+2%.*曾破−2%.*平均開盤.*平均收盤/, "表頭七欄");
+  assert.match(enough, /開盤進場.*開盤觀察.*曾達\+2%.*曾破−2%.*平均開盤.*平均收盤/, "表頭八欄：開盤進場（可執行）在前、開盤觀察在後");
   assert.match(enough, /100%/, "該日 winAtOpen 2/2");
   // 第一層只留三個數字（累計、開盤淨獲利率、平均開盤）；收盤、曾達／曾破、平均隔日收收進「更多口徑」，桌機預設展開
   const firstLayer = [...host.querySelectorAll(".verify-stats > span")].map((c) => c.textContent.trim().slice(0, 6));
@@ -193,7 +196,7 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   assert.match(more.textContent, /曾達\+2%/);
   assert.match(more.textContent, /平均隔日收/);
   assert.match(enough, /data-glossary-term="盤中曾達／曾破"/, "曾達／曾破也要連到名詞解釋");
-  assert.doesNotMatch(enough, /同期大盤/, "沒有指數基準就不印，不用 -- 佔位");
+  assert.equal([...host.querySelectorAll("details.verify-more span")].some((c) => c.textContent.includes("同期大盤")), false, "沒有指數基準就不印膠囊，不用 -- 佔位");
   // 同期加權指數：放在「更多口徑」裡、與平均隔日收並列，抓不到指數缺值天數要講
   const withIndex = render({ days: 25, signals: 300, hitPlus2: 100, brokeMinus2: 50, winAtOpen: 150, winAtClose: 120, avgOpenReturn: 0.2, avgCloseReturn: 0.31, minDays: 20,
     ci: { hitPlus2: null, winAtOpen: null, winAtClose: null }, indexBenchmark: { source: "taiex-close-to-close", days: 24, missingDays: 1, avgReturn: 0.45 } });
@@ -212,6 +215,33 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   const weakChip = [...host.querySelectorAll(".verify-stats span")].find((c) => c.textContent.includes("開盤觀察淨獲利率"));
   assert.ok(weakChip.classList.contains("is-warn"), weakChip.className);
   assert.ok(!weakChip.classList.contains("negative"), "不可用綠色（綠＝跌）");
+  // 開盤進場口徑：第一層主數字＋淨期望值；獲利因子／連虧／最差單日與「訊號同口徑」在更多口徑
+  const entry = render({ days: 25, signals: 300, hitPlus2: 100, brokeMinus2: 50, winAtOpen: 150, winAtClose: 120, winAtOpenEntry: 180, avgOpenReturn: 0.2, avgCloseReturn: 0.31, avgOpenEntryReturnNet: 0.12, minDays: 20,
+    metricCoverage: { winAtOpenEntry: { value: 60, validCount: 300, totalCount: 300, missingCount: 0, validDays: 25 } },
+    ci: { hitPlus2: null, winAtOpen: null, winAtClose: null, winAtOpenEntry: { n: 25, mean: 0.6, low: 0.55, high: 0.7 } },
+    openEntry: { days: 25, profitFactorNet: 1.4, maxConsecutiveLossDays: 3, worstDay: { day: "2026-08-25", avgNet: -1.2, count: 10 } },
+    indexBenchmark: { source: "taiex-close-to-close", days: 25, missingDays: 0, avgReturn: 0.45, strategyAvgReturn: 0.3 } });
+  host = app.doc.createElement("div");
+  host.innerHTML = entry;
+  const entrySpans = [...host.querySelectorAll(".verify-stats > span")];
+  const entryFirst = entrySpans.map((c) => c.textContent.replace(/\s+/g, " ").trim());
+  assert.match(entryFirst[1], /^開盤進場淨獲利率 60%（區間 55～70%）$/, entryFirst.join(" | "));
+  assert.match(entryFirst[2], /^淨期望值 ▲0\.12%$/, entryFirst.join(" | "));
+  assert.ok(entrySpans[1].classList.contains("positive"), "下界 55% ≥ 50% 染色");
+  assert.ok(entrySpans[2].classList.contains("positive"), "淨期望值為正染色");
+  const moreText = host.querySelector("details.verify-more").textContent.replace(/\s+/g, " ");
+  assert.match(moreText, /獲利因子 淨 1\.4・最長連虧 3 天・最差 08\/25 ▼1\.20%/);
+  assert.match(moreText, /同期大盤 ▲0\.45%・訊號同口徑 ▲0\.30%/);
+  assert.match(moreText, /開盤觀察淨獲利率/, "訊號日收盤買的觀察口徑搬進更多口徑");
+  assert.match(entry, /data-glossary-term="次日開盤進場"/);
+  assert.match(entry, /data-glossary-term="淨期望值"/);
+  // 未滿天數：淨期望值也顯示累積中、不染色
+  const young = render({ days: 5, signals: 60, winAtOpenEntry: 40, avgOpenEntryReturnNet: 0.5, minDays: 20, ci: {} });
+  host = app.doc.createElement("div");
+  host.innerHTML = young;
+  const youngExpect = [...host.querySelectorAll(".verify-stats > span")][2];
+  assert.match(youngExpect.textContent, /淨期望值 累積中 5\/20 天/);
+  assert.equal(youngExpect.classList.contains("positive"), false);
 });
 
 test("策略表現面板：明講 look-ahead 取樣與偏誤量級，卡片回測門檻 10 次", () => {

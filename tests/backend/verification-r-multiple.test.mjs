@@ -28,7 +28,8 @@ test('真公司行動與退出接線：分母原始 5 元不加成本，JSON 重
     holdingPosition:{date:d0,price:100,shares:1,originalStop:95,originalRiskMoney:5,source:'frozen-signal-price'},
     holdingEvents:[{id:'dividend',kind:'cash-dividend',exDate:d1,cashDividend:5,source:'fixture'}],holdingCoverage:[{date:d1,status:'complete'}]};
   mod.applySwingCorporateAction(e,0.95,d1);
-  mod.advanceSwingVerificationEntry(e,{rawDate:d1,open:100,high:104.5,low:99,price:104.5});
+  // 目標 104.5 是限價單，最高價要穿越才算成交（剛好等於只是排隊）；出場價仍是目標價
+  mod.advanceSwingVerificationEntry(e,{rawDate:d1,open:100,high:104.6,low:99,price:104.5});
   assert.equal(e.holdingOutcome.netPnl,9.029);
   e.stop=103; // 移停與當前 entry 都不是分母證據。
   const population={models:[{identity,rows:[{signalId:'one',captureId:'cash',tradeDate:d0,status:'resolved',scenario:'case'}]}]};
