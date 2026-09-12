@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v62";
+const APP_SHELL_VERSION = "stock1-shell-v63";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -4504,6 +4504,8 @@ function getSelectedStock() {
 // 個股詳情在桌機是常駐 aside；1040px 以下則是 modal sheet（須與 styles.css 桌機三欄斷點一致）。
 // 行動版關閉時不能只用 transform 移出畫面，否則裡面的按鈕仍會出現在 Tab 順序。
 const detailDesktopMedia = window.matchMedia("(min-width: 1040px)");
+// 手機明細 sheet 的狀態（M3）：full＝把手拉滿 92%（預設半屏 58%）；alertHelpOpen＝到價提醒的 ⓘ 說明是否展開。
+const detailSheetState = { full: false, alertHelpOpen: false };
 
 function isDesktopDetailLayout() {
   return detailDesktopMedia.matches;
@@ -4561,6 +4563,8 @@ function syncDetailPanelLayout() {
     el.detailPanel.removeAttribute("aria-modal");
     el.detailPanel.removeAttribute("aria-hidden");
     el.detailPanel.removeAttribute("inert");
+    setDetailSheetFull(false);
+    el.detailPanel.style.transform = "";
     return;
   }
 
@@ -4584,6 +4588,9 @@ function openDetailPanel(trigger = document.activeElement) {
   if (el.detailPanel.classList.contains("is-open")) return;
   el.detailPanel.classList.add("is-open");
   if (!isDesktopDetailLayout()) {
+    // 每次開都從半屏＋頂端開始：上一檔拉滿或捲到底的狀態不帶到下一檔
+    setDetailSheetFull(false);
+    el.detailPanel.scrollTop = 0;
     el.detailPanel.removeAttribute("aria-hidden");
     el.detailPanel.removeAttribute("inert");
     openDialogLayer(el.detailPanel, {
@@ -11603,6 +11610,7 @@ function renderPriceAlertBox(stock) {
   }
   if (box.contains(document.activeElement)) return;
   box.hidden = false;
+  box.classList.toggle("is-help-open", detailSheetState.alertHelpOpen);
   const alerts = alertsForCode(stock.code);
   const rows = alerts
     .map((alert) => `
@@ -11629,6 +11637,7 @@ function renderPriceAlertBox(stock) {
   box.innerHTML = `
     <div class="alert-head">
       <strong>到價提醒</strong>
+      <button type="button" class="alert-help-toggle" data-alert-help aria-expanded="${detailSheetState.alertHelpOpen ? "true" : "false"}" aria-label="到價提醒怎麼運作">ⓘ</button>
       <small>${authState.user ? `${runtimeHint}（跳提示＋音效，觸發一次即停）` : "登入後可建立到價提醒；提醒依帳號保存"}</small>
     </div>
     ${rows}
@@ -11734,7 +11743,10 @@ function renderDetail() {
   // 「最後成交 07/24」已經是判讀過的結論，後面再接一次完整時戳「2026/07/24 13:30:00」
   // 等於同一個日期講兩次，格式還不一致，而且在 430px 的欄寬剛好把副標擠成兩行。
   // 結論已含那個日期時只補時間；沒含時保留原樣。完整時戳移到 title。
-  const asOfText = String(stock.asOf || "");
+  // 官方報價的 asOf 是「2026/07/24 13:30:00」；fixture／其他來源可能給 ISO，先轉成本地「MM/DD HH:mm:ss」，
+  // 不把「2026-09-07T02:00:00.000Z」這種 UTC 字串印給使用者（手機標題列還會因此折成兩行）。
+  const asOfRaw = String(stock.asOf || "");
+  const asOfText = /^\d{4}-\d{2}-\d{2}T/.test(asOfRaw) ? formatLocalTime(asOfRaw) : asOfRaw;
   const asOfDateMatch = asOfText.match(/(\d{4})\/(\d{2})\/(\d{2})/);
   const asOfMonthDay = asOfDateMatch ? `${asOfDateMatch[2]}/${asOfDateMatch[3]}` : "";
   const asOfTime = (asOfText.match(/\d{2}:\d{2}/) || [""])[0];
@@ -13228,6 +13240,14 @@ document.addEventListener("input", (event) => {
 
 // 到價提醒的刪除（detail 面板與「更多 → 訊號提醒」兩處共用同一個 data 屬性）。
 document.addEventListener("click", (event) => {
+  // 手機的到價提醒說明摺在 ⓘ 後面（桌機 CSS 不顯示這顆鈕）
+  const helpToggle = event.target.closest("[data-alert-help]");
+  if (helpToggle) {
+    detailSheetState.alertHelpOpen = !detailSheetState.alertHelpOpen;
+    helpToggle.setAttribute("aria-expanded", detailSheetState.alertHelpOpen ? "true" : "false");
+    helpToggle.closest(".price-alert-box")?.classList.toggle("is-help-open", detailSheetState.alertHelpOpen);
+    return;
+  }
   const removeBtn = event.target.closest("[data-alert-remove]");
   if (!removeBtn) return;
   removePriceAlert(removeBtn.dataset.alertRemove);
@@ -13970,6 +13990,54 @@ document.getElementById("filterApply").addEventListener("click", () => {
 document.getElementById("detailClose").addEventListener("click", () => {
   closeDetailPanel();
 });
+
+// 手機明細 sheet 的把手手勢（M3）：在標題列按住拖曳——往上拉 60px 拉滿、往下拉 80px 關閉、
+// 拉滿時往下 40px 回半屏、原地點一下切換半屏／全屏。桌機（≥1040px）是常駐 aside，整段不作用。
+function resolveDetailSheetGesture({ dy, moved, full }) {
+  if (!moved) return "toggle";
+  if (dy >= 80) return "close";
+  if (dy <= -60) return full ? "none" : "expand";
+  if (dy >= 40 && full) return "collapse";
+  return "none";
+}
+
+function setDetailSheetFull(full) {
+  detailSheetState.full = Boolean(full);
+  el.detailPanel.classList.toggle("is-full", detailSheetState.full);
+}
+
+(() => {
+  const header = el.detailPanel.querySelector(".detail-top");
+  if (!header) return;
+  let drag = null;
+  header.addEventListener("pointerdown", (event) => {
+    if (isDesktopDetailLayout() || event.target.closest("button, a, input, select, textarea")) return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    drag = { id: event.pointerId, startY: event.clientY, dy: 0, moved: false };
+    try { header.setPointerCapture(event.pointerId); } catch { /* 舊瀏覽器沒有 pointer capture 也能用 */ }
+    el.detailPanel.classList.add("is-dragging");
+  });
+  header.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.id) return;
+    drag.dy = event.clientY - drag.startY;
+    if (Math.abs(drag.dy) > 8) drag.moved = true;
+    // 往下拖跟著手指走；往上拖放手時才決定要不要拉滿
+    el.detailPanel.style.transform = drag.dy > 0 ? `translateY(${drag.dy}px)` : "";
+  });
+  const finish = (event) => {
+    if (!drag || event.pointerId !== drag.id) return;
+    const gesture = resolveDetailSheetGesture({ dy: drag.dy, moved: drag.moved, full: detailSheetState.full });
+    drag = null;
+    el.detailPanel.classList.remove("is-dragging");
+    el.detailPanel.style.transform = "";
+    if (gesture === "close") closeDetailPanel();
+    else if (gesture === "expand") setDetailSheetFull(true);
+    else if (gesture === "collapse") setDetailSheetFull(false);
+    else if (gesture === "toggle") setDetailSheetFull(!detailSheetState.full);
+  };
+  header.addEventListener("pointerup", finish);
+  header.addEventListener("pointercancel", finish);
+})();
 
 document.getElementById("watchToggle").addEventListener("click", () => {
   const stock = getSelectedStock();

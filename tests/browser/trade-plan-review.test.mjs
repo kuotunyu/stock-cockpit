@@ -21,7 +21,7 @@ test('T11 navigation labels remain distinct at 375px and 200% text', {timeout:90
 test('T11 quote header semantics and displayed OHLC stay aligned with zoom and period', {timeout:60000},async()=>{
  const f=await createBrowserFixture({scenario:'populated'});try{
   const {page}=f;await page.setViewportSize({width:375,height:1000});await visibleNav(page,'screener').click();
-  const header=page.locator('[data-screen-panel=screener] [role=columnheader]').filter({has:page.locator('[data-sort=price]')});await header.locator('button').click();assert.equal(await header.getAttribute('aria-sort'),'descending');
+  const header=page.locator('[data-screen-panel=screener] [role=columnheader]').filter({has:page.locator('[data-sort=price]')});/* M2：375px 表頭視覺隱藏，排序走 .mobile-sort 選單；aria-sort 仍落在 columnheader 上 */await page.selectOption('[data-screen-panel=screener] [data-mobile-sort]','price');assert.equal(await header.getAttribute('aria-sort'),'descending');
   const table=page.locator('[data-screen-panel=screener] [role=table]');assert.ok(await table.locator('[role=row] [role=cell]').count()>0);assert.match(await table.ariaSnapshot(),/columnheader/);
   const candles=Array.from({length:40},(_,i)=>({date:new Date(Date.now()-(40-i)*86400000).toISOString().slice(0,10).replaceAll('-',''),open:100+i,high:103+i,low:99+i,close:102+i,volume:1000,volumeLots:1000,maShort:100,maMid:100,macd:{dif:1,dea:1,histogram:0}}));
   await page.route('**/api/technical-analysis?**',route=>{const period=new URL(route.request().url()).searchParams.get('period');return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:true,code:'2330',name:'台積電',period,candles:period==='week'?candles.slice(-24):candles,signals:{checks:{},risks:[]},trendLines:{},fibonacci:{active:false},corporateActions:{events:[],notes:[]}})});});
@@ -99,7 +99,7 @@ test('T11 quote buttons reopen after Escape and retain identity through real pol
    const close=async()=>{await page.keyboard.press('Escape');await page.locator('#detailPanel.is-open').waitFor({state:'detached'});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));assert.equal(await button.evaluate(n=>n===document.activeElement),true,JSON.stringify(await page.evaluate(()=>({tag:document.activeElement.tagName,role:document.activeElement.getAttribute('role'),code:document.activeElement.dataset.code}))));};
    await open();await close();await open();
    await page.evaluate(selector=>window.__quoteOpenerBeforePoll=document.querySelector(selector),`[data-screen-panel=${screen}] .quote-stock-open[data-code="${code}"]`);await f.advancePollingCycle();assert.equal(await page.evaluate(()=>window.__quoteOpenerBeforePoll.isConnected),false);await close();
-   await button.locator('xpath=ancestor::*[@role="row"]').locator('.stock-cell').last().click();await page.locator('#detailPanel.is-open').waitFor({state:'visible'});await close();
+   await button.locator('xpath=ancestor::*[@role="row"]').locator('.stock-cell:not(.spark-cell)').last().click();/* M2：走勢圖格在手機藏起來，整列點擊改點最後一個看得見的格 */await page.locator('#detailPanel.is-open').waitFor({state:'visible'});await close();
   }
  }catch(e){await f.captureFailure('t11-fix1-quote-focus');throw e;}finally{await f.close();}
 });

@@ -10232,7 +10232,20 @@ details[data-overnight-warnings-fold] > .overnight-warning {
   .table-scroller, .watch-table-scroller { overflow-x: hidden; }
   .table-grid, .stock-row, .watch-row-select,
   .screener-screen .table-grid, .screener-screen .stock-row { min-width: 0; }
-  .table-head, .watch-table-head, .screener-screen .table-head { display: none; }
+  /* 表頭視覺上藏起來，但留在無障礙樹（role=columnheader／aria-sort 仍給讀屏與測試用）；排序入口改 .mobile-sort */
+  .table-head, .watch-table-head, .screener-screen .table-head {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .stock-row, .screener-screen .stock-row, .watch-row-select {
     grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
@@ -10294,4 +10307,87 @@ details[data-overnight-warnings-fold] > .overnight-warning {
   /* 自選股摘要「最新最強 股名 漲跌」桌機一行 nowrap；手機讓它換行，股名不截斷 */
   .watch-brief-stats .wb-stat { white-space: normal; flex-wrap: wrap; min-width: 0; max-width: 100%; }
   .watch-brief-stats .wb-stat strong { min-width: 0; overflow-wrap: anywhere; }
+}
+
+/* ===== 手機明細抽屜（M3，2026-09-13）===== */
+/* 到價提醒的 ⓘ：桌機不顯示（說明直接印在標題旁），≤760px 才出現並把長說明摺起來。
+   基底規則要放在 media 區塊之前，否則同特異性的 display:none 會蓋掉手機的 inline-flex。 */
+.alert-help-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: -12px 0 -12px auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 20px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.alert-help-toggle[aria-expanded="true"] { color: var(--orange-2); }
+
+/* 到價提醒表單：type=number 的固有寬會把 grid item 的 min-content 撐到 403px（375px 手機被裁掉「新增」）；
+   width:0 讓 input 只靠 flex:1 分配寬度。 */
+.alert-form { min-width: 0; }
+.alert-form input { width: 0; }
+
+/* ≤1039px 的個股明細是底部 sheet：預設半屏（58%），把手往上拉滿（92%）、往下拉關、原地點一下切換；
+   桌機（≥1040px）是常駐 aside，這整段不作用。 */
+@media (max-width: 1039px) {
+  .detail-panel {
+    height: 58vh;
+    height: 58dvh;
+    max-height: none;
+    overscroll-behavior: contain;
+  }
+  .detail-panel.is-full {
+    height: 92vh;
+    height: 92dvh;
+  }
+  .detail-panel.is-dragging { transition: none; }
+  /* 把手從面板頂端搬到 sticky 標題列上：內容捲動時仍看得到，也是拖曳區 */
+  .detail-panel::before { display: none; }
+  .detail-top { padding-top: 16px; touch-action: none; cursor: grab; }
+  .detail-top::before {
+    content: "";
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    width: 40px;
+    height: 4px;
+    transform: translateX(-50%);
+    border-radius: 999px;
+    background: var(--muted);
+  }
+}
+
+@media (max-width: 760px) {
+  /* 標題列：長名稱折兩行也控制在 100px 內（以前 24px 名稱＋兩行副標 130px） */
+  .detail-top { min-height: 0; }
+  .detail-top h2 { font-size: 20px; }
+  .detail-top p { font-size: var(--fs-note); }
+  /* 價格主列：一行「現價 ＋ 漲跌」，方向改用文字色，不再整塊紅／綠底 */
+  .price-hero { margin: 0 10px 6px; border: 0; background: transparent; }
+  .price-hero-main { padding: 6px 4px; gap: 12px; }
+  .price-hero.is-up .price-hero-main,
+  .price-hero.is-down .price-hero-main,
+  .price-hero.is-flat .price-hero-main { background: transparent; }
+  .price-hero.is-up .price-hero-main { color: var(--up-text); }
+  .price-hero.is-down .price-hero-main { color: var(--down-text); }
+  .price-hero.is-flat .price-hero-main { color: var(--flat-text); }
+  .price-hero.is-stale { border: 0; border-left: 3px solid rgba(255, 163, 26, 0.72); }
+  .price-hero strong { font-size: 40px; }
+  .price-hero span { font-size: 18px; }
+  /* 開／高／低／單量 一列四格；第五格（總量）沿用既有 :last-child 規則吃滿一列 */
+  .chart-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .chart-metric { min-height: 52px; padding: 6px; gap: 3px; }
+  .chart-metric em { font-size: 14px; }
+  .chart-metric strong { font-size: 17px; }
+  .detail-panel > .watch-secondary-action { margin: 0 10px 8px; min-height: 44px; }
+  /* 到價提醒的長說明摺進 ⓘ */
+  .alert-help-toggle { display: inline-flex; }
+  .alert-head small { display: none; }
+  .price-alert-box.is-help-open .alert-head small { display: block; flex-basis: 100%; }
 }

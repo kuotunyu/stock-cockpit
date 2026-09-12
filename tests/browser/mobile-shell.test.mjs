@@ -111,14 +111,14 @@ test("375px 清單改列（M2）：重點卡單欄、分群卡三欄一列且 ch
         const head = panel.querySelector(".table-head");
         const sort = panel.querySelector(".mobile-sort");
         return { overflow: scroller ? scroller.scrollWidth - scroller.clientWidth : null, rowCols: row ? getComputedStyle(row).gridTemplateColumns.trim().split(/\s+/).length : null,
-          rowHeight: row ? Math.round(row.getBoundingClientRect().height) : null, headHidden: head ? getComputedStyle(head).display === "none" : null,
+          rowHeight: row ? Math.round(row.getBoundingClientRect().height) : null, headHidden: head ? head.getBoundingClientRect().height <= 1 : null,
           sortVisible: sort ? sort.getBoundingClientRect().height > 0 : false, bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth };
       }, screen);
       assert.equal(table.bodyFits, true, `${screen} body 不橫溢`);
       assert.ok(table.overflow !== null && table.overflow <= 0, `${screen} 行情表不可橫向捲動（超出 ${table.overflow}px）`);
       assert.equal(table.rowCols, 3, `${screen} 列是三欄兩行`);
       assert.ok(table.rowHeight !== null && table.rowHeight <= 150, `${screen} 列高 ${table.rowHeight}px（以前 94px 高但要橫向捲；fixture 的 16 字名稱折兩行＋處置標籤約 140px）`);
-      assert.equal(table.headHidden, true, `${screen} 表頭在手機藏起來`);
+      assert.equal(table.headHidden, true, `${screen} 表頭在手機視覺上藏起來（仍留在無障礙樹）`);
       assert.equal(table.sortVisible, true, `${screen} 要有排序選單`);
     }
     // 自選股列的處置標籤不可被拉成整行寬；底部「重新整理」不可折成兩行
@@ -133,6 +133,62 @@ test("375px 清單改列（M2）：重點卡單欄、分群卡三欄一列且 ch
     assert.ok(extras.briefClipped !== null && extras.briefClipped <= 0, `摘要條「最新最強 股名」不可被裁切（超出 ${extras.briefClipped}px）`);
     assert.ok(extras.tagWidth !== null && extras.tagWidth <= 120, `處置標籤是小藥丸不是整行：${extras.tagWidth}px`);
     assert.ok(extras.refreshWidth >= 60 && extras.refreshHeight <= 48, `「重新整理」單行：${JSON.stringify(extras)}`);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("375px 明細抽屜（M3）：半屏 sheet 有把手、價格一行無色塊、開高低量一列四格、拖上拉滿、拖下關閉", { timeout: 120_000 }, async () => {
+  const fixture = await createBrowserFixture({ scenario: "populated" });
+  try {
+    const { page } = fixture;
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.locator('.bottom-nav .nav-action[data-screen="watchlist"]').click();
+    await page.locator('[data-screen-panel="watchlist"] .quote-stock-open').first().click();
+    await page.locator("#detailPanel.is-open").waitFor({ state: "visible" });
+    await page.waitForTimeout(450);
+    const sheet = await page.evaluate(() => {
+      const panel = document.querySelector("#detailPanel");
+      const header = panel.querySelector(".detail-top");
+      const hero = panel.querySelector(".price-hero-main");
+      const metrics = panel.querySelector(".chart-metrics");
+      const plan = panel.querySelector("[data-trade-plan-open]");
+      const help = panel.querySelector(".alert-help-toggle");
+      const small = panel.querySelector(".alert-head small");
+      const h = (n) => (n ? Math.round(n.getBoundingClientRect().height) : null);
+      return { height: h(panel), full: panel.classList.contains("is-full"), handle: getComputedStyle(header, "::before").height,
+        heroHeight: h(hero), heroBg: getComputedStyle(hero).backgroundColor,
+        metricCols: metrics ? getComputedStyle(metrics).gridTemplateColumns.trim().split(/\s+/).length : null,
+        planHeight: h(plan), helpVisible: help ? help.getBoundingClientRect().height > 0 : false,
+        smallHidden: small ? getComputedStyle(small).display === "none" : null };
+    });
+    assert.ok(sheet.height >= 812 * 0.55 && sheet.height <= 812 * 0.62, `半屏 sheet 高度 ${sheet.height}px（應約 58% ≈ 471px；以前 92%）`);
+    assert.equal(sheet.full, false);
+    assert.equal(sheet.handle, "4px", "標題列上要有把手");
+    assert.ok(sheet.heroHeight !== null && sheet.heroHeight <= 64, `價格主列一行：${sheet.heroHeight}px`);
+    assert.equal(sheet.heroBg, "rgba(0, 0, 0, 0)", "價格主列不再整塊紅／綠底");
+    assert.equal(sheet.metricCols, 4, "開高低量一列四格");
+    assert.ok(sheet.planHeight >= 44, `建立計畫鈕 ${sheet.planHeight}px`);
+    assert.equal(sheet.helpVisible, true, "到價提醒說明摺進 ⓘ");
+    assert.equal(sheet.smallHidden, true, "長說明預設收起");
+    // 把手往上拖 → 拉滿
+    const header = await rectOf(page, "#detailPanel .detail-top");
+    const x = header.left + header.width / 2;
+    await page.mouse.move(x, header.top + 8);
+    await page.mouse.down();
+    await page.mouse.move(x, header.top + 8 - 120, { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(350);
+    const full = await page.evaluate(() => { const p = document.querySelector("#detailPanel"); return { full: p.classList.contains("is-full"), height: Math.round(p.getBoundingClientRect().height) }; });
+    assert.equal(full.full, true, "往上拖要拉滿");
+    assert.ok(full.height >= 812 * 0.9, `拉滿高度 ${full.height}px`);
+    // 把手往下拖 → 關閉
+    const header2 = await rectOf(page, "#detailPanel .detail-top");
+    await page.mouse.move(x, header2.top + 8);
+    await page.mouse.down();
+    await page.mouse.move(x, header2.top + 8 + 160, { steps: 6 });
+    await page.mouse.up();
+    await page.locator("#detailPanel.is-open").waitFor({ state: "detached", timeout: 5000 });
   } finally {
     await fixture.close();
   }
