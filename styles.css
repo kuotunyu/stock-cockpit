@@ -9452,6 +9452,15 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 .hold-scorecard-months .is-up { color: var(--up-text); }
 .hold-scorecard-months .is-down { color: var(--down-text); }
 .trade-list-export { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+/* 紀律提醒：你自己設的停手線，跌色底、不收合；隔日沖總覽用 inline 版。設定表單沿用計畫風險表單。 */
+.hold-discipline { margin: 8px 0 0; padding: 8px 12px; border: 1px solid rgba(38, 166, 91, 0.55); border-radius: 8px; background: rgba(38, 166, 91, 0.1); color: var(--down-text); font-size: var(--fs-note); line-height: 1.5; overflow-wrap: anywhere; }
+.hold-discipline strong { margin-right: 6px; }
+.hold-discipline.is-inline { margin: 6px 0 0; }
+.hold-discipline-settings { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; margin-top: 8px; }
+.hold-discipline-settings label { display: grid; gap: 4px; font-size: var(--fs-note); color: var(--muted-2); }
+.hold-discipline-settings input { width: 12ch; min-height: 40px; }
+.hold-discipline-settings small { flex-basis: 100%; color: var(--muted-2); font-size: var(--fs-note); }
+.hold-tax-estimate { border-top: 1px dashed var(--line); padding-top: 6px; }
 @media (max-width: 760px) {
   .hold-scorecard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hold-scorecard-grid > div + div { border-left: 0; }

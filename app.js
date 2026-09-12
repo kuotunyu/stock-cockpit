@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v58";
+const APP_SHELL_VERSION = "stock1-shell-v59";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -3704,6 +3704,10 @@ async function addTradeRecord(fields) {
     await putTradesWithRetry(() => ({ settings: tradesState.settings, records: tradesState.records.some(item => item.id === record.id) ? tradesState.records : [...tradesState.records, record] }), `add:${fingerprint}`);
     pendingTradeAddition = null;
     showToast(`已記一筆：${fields.side === "sell" ? "賣出" : fields.side === "dividend" ? "股利" : "買進"} ${fields.code}`);
+    if (fields.side === "sell") {
+      const { breaches } = evaluateDiscipline();
+      if (breaches.length) showToast(`紀律提醒：${breaches[0].text}`, 9000);
+    }
     return true;
   } catch (error) {
     if (!isCurrentAuthScope(mutationScope)) return false;
@@ -3934,9 +3938,10 @@ function renderSettlementLine() {
 }
 
 function renderPersonalScorecard(open = false) {
-  const settlement = renderSettlementLine();
+  const settlement = renderDisciplineBanner() + renderSettlementLine();
   const card = tradesState.scorecard;
   if (!card?.overall || !tradesState.records.length) return settlement;
+  const { streak } = evaluateDiscipline(card);
   const o = card.overall;
   const today = taipeiTodayCompact();
   const month = (card.months || []).find((item) => item.key === today.slice(0, 6));
@@ -3959,7 +3964,14 @@ function renderPersonalScorecard(open = false) {
         <div title="今年到目前為止的買賣手續費與證交稅合計"><span>今年費稅</span><strong>${formatMoney((year?.fees || 0) + (year?.taxes || 0))}</strong></div>
         <div title="今年已入帳的股利淨額（不含待入帳）"><span>今年股利入帳</span><strong>${formatMoney(year?.dividendsNet || 0)}</strong></div>
       </div>
+      <form class="hold-risk-settings hold-discipline-settings" data-discipline-settings>
+        <label>本月虧損上限（元）<input name="monthLossLimit" type="number" min="1" step="100" inputmode="numeric" value="${disciplineState.monthLossLimit ?? ""}" placeholder="例如 20000" /></label>
+        <label>連虧停手（筆）<input name="maxConsecutiveLosses" type="number" min="1" step="1" inputmode="numeric" value="${disciplineState.maxConsecutiveLosses ?? ""}" placeholder="例如 3" /></label>
+        <button type="submit" class="watch-secondary-action">儲存提醒</button>
+        <small>存在這台裝置；達到就在這裡與隔日沖總覽提醒，記完賣出也會提醒。目前連虧 ${streak} 筆。</small>
+      </form>
       ${monthRows ? `<div class="hold-scorecard-table" tabindex="0" role="region" aria-label="逐月已實現，可左右捲動"><table class="hold-scorecard-months"><thead><tr><th>月份</th><th>已實現</th><th>筆數</th><th>勝率</th><th>費稅</th><th>股利入帳</th></tr></thead><tbody>${monthRows}</tbody></table></div>` : ""}
+      ${year?.dividendTax ? `<p class="hold-hint hold-tax-estimate" title="皆為估算、非申報依據：二代健保補充保費對單筆 ≥ ${formatMoney(year.dividendTax.rates.nhiThreshold)} 的股利給付按 ${(year.dividendTax.rates.nhiRate * 100).toFixed(2)}% 扣；股利所得可選合併計稅（${(year.dividendTax.rates.creditRate * 100).toFixed(1)}% 可抵減、每戶上限 ${formatMoney(year.dividendTax.rates.creditCap)}）或 ${Math.round(year.dividendTax.rates.separateRate * 100)}% 分離課稅，哪種划算看你的綜所稅率"><strong>${glossLink("今年稅務估算", "我的成績單")}</strong> 股利總額 ${formatMoney(year.dividendTax.dividendGross)}（${year.dividendTax.payments} 筆，其中 ${year.dividendTax.nhiQualifyingCount} 筆 ≥ 2 萬需扣二代健保約 ${formatMoney(year.dividendTax.nhiPremiumEstimate)}）；合併計稅可抵減約 ${formatMoney(year.dividendTax.creditableEstimate)}、分離課稅約 ${formatMoney(year.dividendTax.separateTaxEstimate)}；證交稅 ${formatMoney(year.taxes)}、手續費 ${formatMoney(year.fees)}。皆為估算，非申報依據。</p>` : ""}
       <p class="hold-hint">口徑：已實現＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費），和上方「已實現累計」同一個數；不含未實現、不含股利（股利另列）；勝率與連虧以每筆賣出為單位，同一檔分批賣算多筆。${o.best ? `最佳一筆 ${escapeHtml(o.best.code)} ${money(o.best.pnl)}，最差一筆 ${escapeHtml(o.worst.code)} ${money(o.worst.pnl)}。` : ""}</p>
     </details>`;
 }
@@ -4086,6 +4098,16 @@ async function loadHoldingsRiskPlans() {
   catch (error) { if (isCurrentAuthScope(scope) && !handleAuthRequired(error)) holdingsPlanRiskState.error = error.message; }
   finally { if (isCurrentAuthScope(scope)) { holdingsPlanRiskState.loading = false; renderLiveDataUpdate(); } }
 }
+document.addEventListener('submit', event => {
+  const form = event.target instanceof Element ? event.target.closest('[data-discipline-settings]') : null;
+  if (!form) return;
+  event.preventDefault();
+  saveDiscipline({ monthLossLimit: form.elements.monthLossLimit.value, maxConsecutiveLosses: form.elements.maxConsecutiveLosses.value });
+  document.activeElement?.blur?.();
+  renderHoldingsPanel();
+  showToast(disciplineState.monthLossLimit || disciplineState.maxConsecutiveLosses ? "紀律提醒已儲存在這台裝置" : "紀律提醒已關閉");
+  el.holdingsPanel.querySelector('[data-discipline-settings] button')?.focus();
+});
 document.addEventListener('submit', event => {
   const form = event.target instanceof Element ? event.target.closest('[data-holding-risk-settings]') : null;
   if (!form) return;
@@ -6690,7 +6712,7 @@ function renderOvernightGroups() {
         <span><b>來源</b><span class="provenance-badge" data-kind="official">${escapeHtml(overnightState.source)}</span></span>
         <span><b>注意／處置</b>${state.showSurveillance ? `標示中 ${overnightState.surveillanceCount} 檔` : "目前隱藏"}</span>
         <span><b>週轉率</b>依官方發行股數</span>
-        ${state.overnightView === "overview" ? renderMarketStanceLine() : ""}
+        ${state.overnightView === "overview" ? renderMarketStanceLine() + renderDisciplineBanner("inline") : ""}
         ${state.overnightView !== "overview" ? `<span>${activeGroup?.[2] || ""}</span>` : ""}
       </div>
       ${warnings ? `<div class="overnight-summary-warnings">${warnings}</div>` : ""}
@@ -7187,6 +7209,47 @@ try {
 } catch {
   // localStorage 不可用時用預設。
 }
+// ===== 紀律提醒（本機偏好）=====
+// 散戶最需要的不是下一個訊號，是「今天不該再做」的提醒：本月虧損上限（元）與連虧停手（筆）。
+// 存在這台裝置、不進帳本；達到就在庫存頁與隔日沖總覽顯示橫幅，記完賣出也 toast。
+const DISCIPLINE_KEY = "stock1.discipline.v1";
+const disciplineState = { monthLossLimit: null, maxConsecutiveLosses: null };
+try {
+  const saved = JSON.parse(localStorage.getItem(DISCIPLINE_KEY) || "{}");
+  if (Number(saved.monthLossLimit) > 0) disciplineState.monthLossLimit = Math.round(Number(saved.monthLossLimit));
+  if (Number(saved.maxConsecutiveLosses) > 0) disciplineState.maxConsecutiveLosses = Math.floor(Number(saved.maxConsecutiveLosses));
+} catch {
+  // 本機偏好不可用時用預設（不提醒）。
+}
+function saveDiscipline({ monthLossLimit, maxConsecutiveLosses }) {
+  disciplineState.monthLossLimit = Number(monthLossLimit) > 0 ? Math.round(Number(monthLossLimit)) : null;
+  disciplineState.maxConsecutiveLosses = Number(maxConsecutiveLosses) > 0 ? Math.floor(Number(maxConsecutiveLosses)) : null;
+  try {
+    localStorage.setItem(DISCIPLINE_KEY, JSON.stringify(disciplineState));
+  } catch {
+    // 不影響顯示。
+  }
+}
+function evaluateDiscipline(card = tradesState.scorecard) {
+  if (!card?.overall) return { breaches: [], month: null, streak: 0 };
+  const today = taipeiTodayCompact();
+  const month = (card.months || []).find((item) => item.key === today.slice(0, 6)) || null;
+  const streak = Number(card.overall.currentLossStreak) || 0;
+  const breaches = [];
+  if (disciplineState.monthLossLimit > 0 && month && month.realizedPnl <= -disciplineState.monthLossLimit) {
+    breaches.push({ kind: "monthLoss", text: `本月已實現 ${formatMoney(month.realizedPnl, { signed: true })}，已到你設的本月虧損上限 ${formatMoney(disciplineState.monthLossLimit)}：這個月不再開新倉` });
+  }
+  if (disciplineState.maxConsecutiveLosses > 0 && streak >= disciplineState.maxConsecutiveLosses) {
+    breaches.push({ kind: "streak", text: `已連虧 ${streak} 筆，達到你設的停手線 ${disciplineState.maxConsecutiveLosses} 筆：先停一天，回頭看檢討再進場` });
+  }
+  return { breaches, month, streak };
+}
+function renderDisciplineBanner(variant = "panel") {
+  const { breaches } = evaluateDiscipline();
+  if (!breaches.length) return "";
+  return `<p class="hold-discipline${variant === "inline" ? " is-inline" : ""}" role="status"><strong>${glossLink("紀律提醒")}</strong> ${breaches.map((item) => escapeHtml(item.text)).join("；")}</p>`;
+}
+
 // 與 server.mjs 的 VERIFY_ROUND_TRIP_COST_PCT 同一個數：手續費 0.0855% × 2 ＋ 證交稅 0.3%。
 const ROUND_TRIP_COST_PCT = 0.471;
 function positionSizeLots(capital, riskPct, entry, stop) {
@@ -14120,7 +14183,8 @@ const GLOSSARY = [
   { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
   { term: "盤中曾達／曾破", aliases: ["曾達", "曾破", "曾達+2%", "曾破−2%", "盤中曾達"], cat: "成績單與決策", def: "觀察日的<strong>最高價曾碰到 +2%</strong>／<strong>最低價曾碰到 −2%</strong>——只是盤中曾觸及的價位（最大有利／不利幅度），<strong>不是可實現損益</strong>，兩者同一天可以同時成立。要在最高價出場是事後才知道的；真正能執行的是開盤賣或收盤賣的淨獲利率。" },
   { term: "同期大盤", aliases: ["同期大盤", "同期加權指數", "指數基準"], cat: "成績單與決策", def: "隔日沖成績單的對照組：每個完成觀察日「訊號日收盤→觀察日收盤」的<strong>加權指數</strong>報酬，日等權平均，與「平均隔日收」看同一段期間。訊號的平均隔日收若長期<strong>低於同期大盤</strong>，表示選出來的股票沒有比直接抱指數好；高於才有超額。兩邊都是價格觀察，不是可成交回測，也不含費稅。" },
-  { term: "我的成績單", aliases: ["我的成績單", "帳本成績單", "交割款"], cat: "成績單與決策", def: "庫存損益頁裡量<strong>你自己</strong>成交的成績，和策略成績單（量系統訊號）是兩回事。已實現＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費）；勝率、獲利因子、每筆平均、最長連虧都以「每筆賣出」為單位，未滿 20 筆不當結論。「交割款」是 T+2：成交日後第 2 個交易日，買進要付價金＋手續費、賣出收價金−費稅，開休市表沒載入時只跳週末。" },
+  { term: "紀律提醒", aliases: ["紀律提醒", "本月虧損上限", "連虧停手"], cat: "成績單與決策", def: "你自己設的兩條停手線：<strong>本月虧損上限</strong>（元，看本月已實現）與<strong>連虧停手</strong>（筆，看最新一筆往前數的連續虧損）。達到就在庫存損益頁與隔日沖總覽顯示橫幅，記完賣出也會提醒。它不會擋你下單，只是把「今天不該再做」講出來；存在這台裝置，不進帳本。" },
+  { term: "我的成績單", aliases: ["我的成績單", "帳本成績單", "交割款", "今年稅務估算"], cat: "成績單與決策", def: "庫存損益頁裡量<strong>你自己</strong>成交的成績，和策略成績單（量系統訊號）是兩回事。已實現＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費）；勝率、獲利因子、每筆平均、最長連虧都以「每筆賣出」為單位，未滿 20 筆不當結論。「交割款」是 T+2：成交日後第 2 個交易日，買進要付價金＋手續費、賣出收價金−費稅，開休市表沒載入時只跳週末。" },
   { term: "淨期望值", aliases: ["期望值", "淨期望", "每筆平均淨報酬"], cat: "成績單與決策", def: "每做一筆平均賺賠多少：把每筆的<strong>淨報酬</strong>（扣一買一賣的模型費稅）平均起來。勝率高不代表賺錢——十筆贏九筆各賺 0.3%、輸一筆賠 4%，期望值還是負的；反過來也成立。隔日沖成績單的淨期望值用「次日開盤買、當日收盤賣」這個做得到的口徑算，正才值得做；未計每筆最低手續費與滑價，小額部位實際會更差一點。" },
   { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "開盤進場淨獲利率", "開盤進場勝率", "跳空略過"], cat: "成績單與決策", def: "唯一實際做得到的進場口徑：訊號要等 13:30 收盤後的整批資料才算得出來，訊號日收盤已經買不到，真實進場是<strong>次日開盤</strong>。隔日沖成績單的「開盤進場」＝次日開盤買、當日收盤賣，扣模型費稅後淨報酬 > 0 算贏；觀察日整天只有漲停一個成交價（一價鎖死）代表開盤買不到，不進分母。波段驗證則是同一批驗證單改以第一個交易日的開盤價當進場價重算並陳；開盤已經在停損下方或目標上方的單這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];

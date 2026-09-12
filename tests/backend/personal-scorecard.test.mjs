@@ -114,3 +114,30 @@ test("GET /api/trades 帶 scorecard 與 settlement；空帳本也有形狀", asy
   assert.deepEqual(body.settlement.days, []);
   assert.ok(["weekends-only", "cached-official-holiday-schedule"].includes(body.settlement.calendarSource));
 });
+
+test("currentLossStreak 是尾端連虧；年度股利稅務估算：單筆 ≥ 2 萬才算補充保費、抵減 8.5% 上限 8 萬、分離 28%", () => {
+  const records = [
+    { id: "b1", code: "2330", side: "buy", price: 100, shares: 2000, fee: 170, tax: 0, date: "20260701" },
+    { id: "s1", code: "2330", side: "sell", price: 105, shares: 500, fee: 45, tax: 157, date: "20260702" }, // 賺
+    { id: "s2", code: "2330", side: "sell", price: 99, shares: 500, fee: 42, tax: 148, date: "20260703" }, // 虧
+    { id: "s3", code: "2330", side: "sell", price: 98, shares: 500, fee: 42, tax: 147, date: "20260704" }, // 虧
+    { id: "d1", code: "2330", side: "dividend", price: 50, shares: 500, fee: 0, status: "received", receivedAmount: 25000, date: "20260720" }, // 25,000 ≥ 2 萬
+    { id: "d2", code: "2330", side: "dividend", price: 30, shares: 500, fee: 0, status: "receivable", date: "20260910" }, // 15,000 待入帳，稅務仍算給付
+  ];
+  const card = mod.buildPersonalScorecard({ records, settings: { feeDiscount: 0.6, minFee: 20 } });
+  assert.equal(card.overall.currentLossStreak, 2, "最新兩筆都虧");
+  assert.equal(card.overall.maxConsecutiveLosses, 2);
+  const year = card.years.find((y) => y.key === "2026");
+  assert.equal(year.dividendsNet, 25000, "已入帳淨額只算 received");
+  const tax = year.dividendTax;
+  assert.equal(tax.dividendGross, 40000);
+  assert.equal(tax.payments, 2);
+  assert.equal(tax.nhiQualifyingCount, 1, "只有 25,000 那筆 ≥ 2 萬");
+  assert.equal(tax.nhiPremiumEstimate, Math.round(25000 * 0.0211));
+  assert.equal(tax.creditableEstimate, 3400, "40,000 × 8.5%");
+  assert.equal(tax.separateTaxEstimate, 11200, "40,000 × 28%");
+  assert.equal(tax.rates.creditCap, 80000);
+  assert.ok(card.months.some((m) => m.key === "202609"), "只有待入帳股利的月份也要有 bucket，稅務估算才看得到");
+  const big = mod.estimateDividendTax({ gross: 2000000, payments: 1, nhiQualifyingCount: 1, nhiPremium: 42200 });
+  assert.equal(big.creditableEstimate, 80000, "抵減上限 8 萬");
+});

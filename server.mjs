@@ -1871,6 +1871,20 @@ function buildPortfolio(payload) {
 // 最長連虧、費稅、股利入帳。已實現損益＝賣出價金−賣出費稅−加權平均成本（成本含買進手續費），與 buildPortfolio 同一個數。
 // 未滿 minTrades 筆只講「累積中」，不當結論（和策略成績單的 20 天門檻同一個精神）。
 const PERSONAL_SCORECARD_MIN_TRADES = 20;
+// 股利稅務估算（只是估算、不是申報依據，規則每年要對一次）：
+// 二代健保補充保費對「單筆給付 ≥ 2 萬」的股利按 2.11% 扣；股利所得可選「合併計稅、股利 8.5% 可抵減、每戶上限 8 萬」
+// 或「28% 分離課稅」。這裡兩種都算給使用者看，不替他選。
+const DIVIDEND_TAX_RULES = Object.freeze({ nhiRate: 0.0211, nhiThreshold: 20000, creditRate: 0.085, creditCap: 80000, separateRate: 0.28, basis: "2026-estimate" });
+function estimateDividendTax(summary) {
+  const gross = Math.round(summary?.gross || 0);
+  return {
+    dividendGross: gross, payments: summary?.payments || 0,
+    nhiQualifyingCount: summary?.nhiQualifyingCount || 0, nhiPremiumEstimate: Math.round(summary?.nhiPremium || 0),
+    creditableEstimate: Math.round(Math.min(gross * DIVIDEND_TAX_RULES.creditRate, DIVIDEND_TAX_RULES.creditCap)),
+    separateTaxEstimate: Math.round(gross * DIVIDEND_TAX_RULES.separateRate),
+    rates: { ...DIVIDEND_TAX_RULES }, note: "估算、非申報依據；補充保費看單筆給付是否 ≥ 2 萬，抵減上限是每戶合計",
+  };
+}
 function buildPersonalScorecard(payload, portfolio = buildPortfolio(payload)) {
   const records = Array.isArray(payload?.records) ? payload.records : [];
   // buildPortfolio 把最新的放前面；勝率／連虧要按時間序
@@ -1889,10 +1903,22 @@ function buildPersonalScorecard(payload, portfolio = buildPortfolio(payload)) {
       const m = bucket(month); m.fees += num(t.fee); m.buyAmount += gross;
     } else if (t.side === "sell") {
       const m = bucket(month); m.fees += num(t.fee); m.taxes += num(t.tax); m.sellAmount += gross;
-    } else if (t.side === "dividend" && t.status !== "receivable") {
+    } else if (t.side === "dividend") {
       const m = bucket(month);
-      m.dividendsNet += Number.isFinite(Number(t.receivedAmount)) ? Math.max(0, Number(t.receivedAmount)) : Math.max(0, gross - num(t.fee));
+      if (t.status !== "receivable") m.dividendsNet += Number.isFinite(Number(t.receivedAmount)) ? Math.max(0, Number(t.receivedAmount)) : Math.max(0, gross - num(t.fee));
     }
+  }
+  // 股利稅務：每筆股利紀錄＝一次給付（毛額＝每股股利 × 股數），按年彙總
+  const dividendByYear = new Map();
+  for (const t of records) {
+    if (t.side !== "dividend") continue;
+    const year = String(t.date || "").slice(0, 4);
+    if (year.length !== 4) continue;
+    const gross = num(t.price) * num(t.shares);
+    const d = dividendByYear.get(year) || { gross: 0, payments: 0, nhiQualifyingCount: 0, nhiPremium: 0 };
+    d.gross += gross; d.payments += 1;
+    if (gross >= DIVIDEND_TAX_RULES.nhiThreshold) { d.nhiQualifyingCount += 1; d.nhiPremium += gross * DIVIDEND_TAX_RULES.nhiRate; }
+    dividendByYear.set(year, d);
   }
   let run = 0; let longest = 0; let best = null; let worst = null; let total = 0;
   for (const r of realized) {
@@ -1932,10 +1958,10 @@ function buildPersonalScorecard(payload, portfolio = buildPortfolio(payload)) {
       avgWin: wins.length ? Math.round(gain / wins.length) : null,
       avgLoss: losses.length ? Math.round(loss / losses.length) : null,
       avgWinPct: avgPct(wins), avgLossPct: avgPct(losses),
-      maxConsecutiveLosses: longest, best, worst, realizedPnl: Math.round(total),
+      maxConsecutiveLosses: longest, currentLossStreak: run, best, worst, realizedPnl: Math.round(total),
     },
     months,
-    years: [...years.values()].sort((a, b) => b.key.localeCompare(a.key)).map(finish),
+    years: [...years.values()].sort((a, b) => b.key.localeCompare(a.key)).map((y) => ({ ...finish(y), dividendTax: estimateDividendTax(dividendByYear.get(y.key)) })),
   };
 }
 
@@ -15178,6 +15204,8 @@ async function handleApi(request, requestUrl, response) {
           rev: committed.rev,
           ...payload,
           portfolio,
+          scorecard: buildPersonalScorecard(payload, portfolio),
+          settlement: buildSettlementSchedule(payload.records, toTaipeiCompactDate(), tradingCalendarCache.value?.holidayRows || []),
           instrumentWarnings: canonical.warnings,
           instrumentDataQuality: canonical.dataQuality,
         });
@@ -16936,7 +16964,7 @@ export {
   buildAdjustedPeriodRows, resolveCorporateActionAdjustments,
   parseYahooSplitFactors, normalizeYahooHistoryRows,
   // 隔日沖／波段評分
-  buildPick, buildRiskTags, buildReasons, buildPersonalScorecard, buildSettlementSchedule, corporateActionGapRatio, officialCorporateActionRatio, plausibleShareFactor,
+  buildPick, buildRiskTags, buildReasons, buildPersonalScorecard, buildSettlementSchedule, DIVIDEND_TAX_RULES, estimateDividendTax, corporateActionGapRatio, officialCorporateActionRatio, plausibleShareFactor,
   backAdjustForCorporateActions, computeSwingFeatures, classifySwingScenario,
   SWING_FORMULA_VERSION, stockTickSize, roundToStockTick,
   buildSwingPlan, scoreSwing, buildSwingPick, preselectQuotes, preselectSwingQuotes,
