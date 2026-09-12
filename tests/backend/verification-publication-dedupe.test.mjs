@@ -7,6 +7,7 @@ import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importServer } from "../helpers/test-server.mjs";
+import { readCaptureOutcomes } from "../../verification-evidence.mjs";
 
 const evidence = (n) => Array.from({ length: n }, (_, i) => ({ code: String(2330 + i), exchange: "TWSE", candidateRank: i + 1, outcome: "selected", observedAt: "2026-09-07T05:30:00.000Z" }));
 
@@ -38,7 +39,7 @@ test("loadDb 遷移：與擷取清單相同的 inputEvidence 剝掉（含 swingS
   assert.equal(pubs["cap-same"].inputEvidenceRef, "verificationCaptures.outcomes");
   assert.deepEqual(pubs["cap-diff"].inputEvidence, evidence(2), "與擷取清單不同 → 保留，不猜哪份對");
   assert.deepEqual(pubs["cap-orphan"].inputEvidence, evidence(1), "沒有擷取清單 → 保留");
-  assert.deepEqual(db.verificationCaptures["cap-same"].outcomes, same, "單一副本在擷取清單");
+  assert.deepEqual(readCaptureOutcomes(db.verificationCaptures["cap-same"]), same, "單一副本在擷取清單（載入時已壓成 outcomesBlob）");
   assert.equal(db.swingSnapshots["20260907:all"].body.publication.inputEvidence, undefined, "7 天快取裡的發布副本也剝掉");
   await mod.flushPersistence();
   const disk = JSON.parse(await readFile(join(dataDir, "stock1-db.json"), "utf8"));
@@ -59,7 +60,7 @@ test("publishVerification：新發布不再把 inputEvidence 存進發布紀錄�
   assert.equal(first.inputEvidence, undefined, "回傳值（會進 API 回應與 swingSnapshots）不再帶 260 列證據");
   const stored = db.verificationPublications.captures[first.captureId];
   assert.equal(stored.inputEvidence, undefined);
-  assert.deepEqual(db.verificationCaptures[first.captureId].outcomes, evidence(3), "擷取清單保有完整證據（fullRecord 與否由 verificationScanAccounting 決定，不在本測試範圍）");
+  assert.deepEqual(readCaptureOutcomes(db.verificationCaptures[first.captureId]), evidence(3), "擷取清單保有完整證據（packed；fullRecord 與否由 verificationScanAccounting 決定，不在本測試範圍）");
   const again = mod.publishVerification(db, "overnight", body);
   assert.equal(again.captureId, first.captureId, "指紋沒變 → 重用同一筆，不長出新 revision");
 });

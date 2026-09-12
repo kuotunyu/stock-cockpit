@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import './portfolio-risk.js';
-import { prepareCompletedBenchmark } from './verification-evidence.mjs';
+import { prepareCompletedBenchmark, packCaptureOutcomes, readCaptureOutcomes } from './verification-evidence.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
@@ -2357,6 +2357,8 @@ async function loadDbOnce() {
   let changed = recoveredFromCorruption || verificationChanged;
   // 2026-09-12：發布紀錄裡與擷取清單重複的 260 列證據剝掉（每策略每天 177 KB、無讀取端）。
   if (stripDuplicatedPublicationEvidence(dbCache)) changed = true;
+  // 2026-09-12：inline 的 outcomes 壓成 outcomesBlob（先剝重複再壓，剝除的比對走 readCaptureOutcomes 兩種格式都認）。
+  if (packStoredCaptureOutcomes(dbCache)) changed = true;
   // 既有 DB 補標 passwordSource：這個欄位是 2026-07-31 才加的，在那之前建立的帳號沒有。
   // 唯一可靠的判準就是實際驗一次 hash——不能用 createdAt === updatedAt 這種啟發式，
   // 那只說明「沒改過任何欄位」，不代表密碼是哪一組。
@@ -9265,7 +9267,8 @@ function buildCaptureManifest({ capture, body }) {
   const outcomes = cloneJson(body.inputEvidence || []);
   const { terminal, marketsComplete, allFailed } = verificationScanAccounting(body, capture.tradeDate);
   const complete = capture.complete && terminal && marketsComplete && !allFailed;
-  return {
+  // outcomes 沒有執行期讀取端：直接以 packed 形式存（deflate＋sha256），讀取走 readCaptureOutcomes。
+  return packCaptureOutcomes({
     manifestVersion: 1, captureId: capture.captureId, strategy: capture.strategy, tradeDate: capture.tradeDate,
     kind: capture.kind, identity: cloneJson(capture.identity), revision: capture.revision,
     requestScope: cloneJson(capture.requestScope), canonical: stableJson(capture.requestScope) === stableJson(canonicalVerificationScope(capture.strategy)),
@@ -9284,7 +9287,7 @@ function buildCaptureManifest({ capture, body }) {
       signalId: signal.signalId, code: signal.code, exchange: signal.exchange || null,
       scenario: signal.group || signal.scenario?.key || 'unknown', fillRisk: signal.fillRisk || null,
     }])).values()] : [],
-  };
+  });
 }
 
 // 固定期間候選池是獨立價格觀察，不能借用提前退出或含息現金模型。
@@ -9904,17 +9907,42 @@ function verificationInputContent(value) {
 function stripDuplicatedPublicationEvidence(db) {
   let changed = false;
   const manifests = db?.verificationCaptures || {};
+  const outcomesOf = (manifest) => {
+    try { return readCaptureOutcomes(manifest); } catch { return null; }
+  };
   const strip = (record) => {
     if (!record || !Array.isArray(record.inputEvidence)) return;
-    const manifest = manifests[record.captureId];
-    if (!manifest || !Array.isArray(manifest.outcomes)) return;
-    if (stableJson(record.inputEvidence) !== stableJson(manifest.outcomes)) return;
+    const outcomes = outcomesOf(manifests[record.captureId]);
+    if (!Array.isArray(outcomes)) return;
+    if (stableJson(record.inputEvidence) !== stableJson(outcomes)) return;
     delete record.inputEvidence;
     record.inputEvidenceRef = "verificationCaptures.outcomes";
     changed = true;
   };
   for (const record of Object.values(db?.verificationPublications?.captures || {})) strip(record);
   for (const snapshot of Object.values(db?.swingSnapshots || {})) strip(snapshot?.body?.publication);
+  return changed;
+}
+
+// 舊資料遷移：擷取清單 inline 的 outcomes 壓成 outcomesBlob（含 pending benchmark memo 內嵌的 capture 副本）。
+// 新發布由 buildCaptureManifest 直接產生 packed 版；這裡只處理啟動時還是 inline 的舊紀錄。
+function packStoredCaptureOutcomes(db) {
+  let changed = false;
+  const captures = db?.verificationCaptures || {};
+  for (const [id, manifest] of Object.entries(captures)) {
+    if (!Array.isArray(manifest?.outcomes)) continue;
+    const packed = packCaptureOutcomes(manifest);
+    if (packed === manifest) continue;
+    captures[id] = packed;
+    changed = true;
+  }
+  for (const memo of Object.values(db?.verificationBenchmarks?.memos || {})) {
+    if (!Array.isArray(memo?.capture?.outcomes)) continue;
+    const packed = packCaptureOutcomes(memo.capture);
+    if (packed === memo.capture) continue;
+    memo.capture = packed;
+    changed = true;
+  }
   return changed;
 }
 
@@ -16555,7 +16583,7 @@ export {
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime,
-  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, publicSignalsView,
+  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureOutcomes, publicSignalsView,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
   runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,

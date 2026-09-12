@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { describeSamples, seededRandom, validateMeasurementOptions, withExpectedFixtureDiagnostic } from '../../scripts/verification-measurement.mjs';
 import { buildSyntheticDb } from '../../scripts/verification-diagnostics.mjs';
 import { importServer } from '../helpers/test-server.mjs';
-import { prepareCompletedBenchmark, readBenchmarkEvidence } from '../../verification-evidence.mjs';
+import { prepareCompletedBenchmark, readBenchmarkEvidence, readCaptureOutcomes } from '../../verification-evidence.mjs';
 import { rm, mkdir, rmdir, readFile } from 'node:fs/promises';
 import { resolve, dirname, basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -34,9 +34,9 @@ test('同種子合成 cohort 身份可重現，來源／出版／完整月份／
     assert.deepEqual(Object.keys(first.verificationCaptures),Object.keys(second.verificationCaptures));
     for(const memo of Object.values(first.verificationBenchmarks.memos)) {
       const capture=first.verificationPublications.captures[memo.captureId];
-      // 證據只存在擷取清單的 outcomes（發布紀錄自 2026-09-12 起只留 inputEvidenceRef）
-      const evidence=first.verificationCaptures[memo.captureId]?.outcomes||capture.inputEvidence;
-      assert.ok(evidence.every(row=>row.observedAt<=capture.publishedAt));
+      // 證據只存在擷取清單（發布紀錄自 2026-09-12 起只留 inputEvidenceRef；outcomes 以 outcomesBlob 壓縮保存）
+      const evidence=readCaptureOutcomes(first.verificationCaptures[memo.captureId])||capture.inputEvidence||[];
+      assert.ok(evidence.length>0&&evidence.every(row=>row.observedAt<=capture.publishedAt));
       for(const month of Object.values(memo.calendar.monthEvidence)) {
         assert.ok(month.coveredThrough<=month.observedAt.slice(0,10).replaceAll('-',''));
         assert.ok(month.observedAt<=memo.completedAt);

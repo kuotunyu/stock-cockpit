@@ -27,7 +27,7 @@ API 的 `publication` 提供 captureId、版本身份、輸入指紋、request s
 
 完整枚舉並保留每個候選終端結果後，已有可評估結果的掃描可正式發布並揭露 degraded／coverage；不要求逐檔來源成功率100%。全部候選僅有來源失敗仍不能發布。TWSE STOCK_DAY 已證明的無資料回應（精確中文 stat、numeric total=0、無 data）可確認空月份；超出查詢範圍或未知錯誤不算空資料，這個形狀不外推至 TPEx。
 
-主 DB 的 `verificationCaptures` 與發布共用 captureId、同次提交，保存真正 preselection 當下的候選順位、原價與來源，以及逐檔終端結果和 issued 清單。完整零訊號、未完成、來源失敗與事後發現缺採集分開記錄；候選池不是畫面切片，也不代表全市場。兩套成績單 API 提供 `captureCoverage`／`population`，主卡以 `cohort` 接正式成熟比較，舊欄位保留。`fullRecordStartDate` 只表示完整格式開始日；覆蓋僅以取得的官方交易日與已有正式紀錄核對，後續缺口仍列出。`not-captured` 保存本次發現時間，不能證明當天伺服器一定沒開；舊 capture 沒有候選證據時維持未知。
+主 DB 的 `verificationCaptures` 與發布共用 captureId、同次提交，保存真正 preselection 當下的候選順位、原價與來源，以及逐檔終端結果（自 2026-09-12 起以 deflate 壓縮並附 sha256 保存於 `outcomesBlob`，讀取走 `readCaptureOutcomes`）和 issued 清單。完整零訊號、未完成、來源失敗與事後發現缺採集分開記錄；候選池不是畫面切片，也不代表全市場。兩套成績單 API 提供 `captureCoverage`／`population`，主卡以 `cohort` 接正式成熟比較，舊欄位保留。`fullRecordStartDate` 只表示完整格式開始日；覆蓋僅以取得的官方交易日與已有正式紀錄核對，後續缺口仍列出。`not-captured` 保存本次發現時間，不能證明當天伺服器一定沒開；舊 capture 沒有候選證據時維持未知。
 
 兩套成績單另提供 `benchmarks`，在「分母、模型與來源」比較「相對候選池的同期間報酬差」。隔日沖使用凍結的官方收盤到次一官方交易日收盤；波段使用訊號後第 1 個官方交易日開盤到第 15 日收盤，與提前停損／達標及含息持有結果分列。兩邊同採官方還原參考價格，各扣 0.471% 近似成本。候選池含入選股，以原凍結名單在各市場等權計算；每市場完整才配對，缺檔不移出原池。`pairedCount/eligibleCount` 是已發布訊號數，候選檔數及有效日期另列；同股跨場景不代表獨立部位，平均報酬不是帳戶資產曲線。收盤發布不證明可用該收盤成交，次開另揭露晚發布與時間不確定。
 
