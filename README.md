@@ -267,6 +267,40 @@ npm run test:live
 
 ---
 
+### 6. 部署到 Zeabur（對外使用）
+
+本機與 LAN 模式之外，要在手機網路上也能看，可以把整個服務放到 Zeabur（或任何吃 Dockerfile 的平台）。前提與本機不同：站台在公網上，**所有 API 都要登入才給**（`REQUIRE_LOGIN=on`），資料放在掛載的持久磁碟，而且只能跑一個副本。
+
+1. 在 Zeabur 建立服務並連到這個 GitHub repo，平台會直接用根目錄的 [Dockerfile](Dockerfile)（Node 24、非 root、資料寫到 `/data`）。
+2. 服務加一個 **Volume，掛載路徑 `/data`**。沒掛 volume 也能啟動，但資料在映像裡，重新部署就沒了。
+3. 在服務的環境變數填入（先在本機 `npm run secret` 產生密鑰）：
+
+   ```text
+   NODE_ENV=production
+   PUBLIC_ORIGIN=https://你的網域.zeabur.app
+   COOKIE_SECURE=true
+   REQUIRE_LOGIN=on
+   TRUST_PROXY=on
+   TRUST_PROXY_HOPS=1
+   DATA_DIR=/data
+   APP_SECRET=（npm run secret 產生的 32 字元以上隨機字串）
+   ADMIN_USERNAME=admin
+   ADMIN_PASSWORD=（至少 12 字元的強密碼）
+   SCHEDULER=on
+   ```
+
+   `PORT` 由平台注入（Dockerfile 預設 8080），`HOST` 與 `TZ` 映像已設好。前面若再放 Cloudflare，`TRUST_PROXY` 改 `cloudflare`。
+4. 部署完成後開網域，會直接看到登入畫面（未登入時連行情都不給，這是刻意的）。用 `ADMIN_USERNAME`／`ADMIN_PASSWORD` 登入，**立刻在「更多 → 帳號管理」改一次密碼**。
+5. 在平台的 shell 或本機（把同一組環境變數放進 `.env`）跑 `npm run preflight`，它會列出哪些設定「不改就別上線」（✖）與「上線也行但要知道」（⚠）。
+
+要點與限制：
+
+- **只能單一副本。** 資料是單一 JSON 檔加程序內排程；同一台機器上的第二個程序會被 writer lease 擋下，跨機器的兩個副本則會互相覆蓋。
+- **備援要自己拉回來。** 平台的 volume 不是異地備份：定期用「更多 → 個人資料備份」把本人資料匯出，整機備份見第 4 節（需要能停止服務並存取 `/data`）。
+- **收盤後排程靠伺服器一直開著。** 這正是放到雲端最大的好處：09-08～09-11 那種「電腦沒開就沒快照」不會再發生。
+- 券商 API（富邦）憑證用 `APP_SECRET` 加密後存在 `/data`：換掉 `APP_SECRET` 會讓已存的憑證讀不回來，要重新設定。
+- 映像裡沒有 `.git`，「版本與更新」只會顯示 unavailable（`UPDATE_CHECK=off`）；更新方式是重新部署新的 commit。
+
 ## 環境變數說明
 
 本機設定集中在 [.env.example](.env.example)，不要把實際 `.env` 提交至 GitHub。尚未建立 `.env` 時才複製範本；`npm start`、`start:lan`、`backup` 與 `start.bat` 會載入它。沒有此檔也能按本機預設啟動。
@@ -287,6 +321,8 @@ TRUST_PROXY=off   # off｜on｜cloudflare：只有放在反向代理後面才設
 TRUST_PROXY_HOPS=1 # 可信代理層數（on 模式取 x-forwarded-for 從右數第 N 段；代理是附加不是取代，最左段由客戶端自填）
 SCHEDULER=on      # 收盤後排程（每 10 分鐘檢查、兩市場對齊後自動掃描與推進驗證）；設 off 回到「有人開 App 才算」
 STOCK1_BACKUP_DIR= # 異地備份目標；也可直接傳給 npm run backup
+REQUIRE_LOGIN=off # 對外部署才設 on：除健康探針與登入本身，所有 API 都要先登入，未登入連唯讀行情也不給
+SESSION_MAX_AGE_MS= # 登入有效期（毫秒），預設 14 天
 ```
 
 伺服器只回應 Host 在允許清單內的請求（其他一律 `421 Misdirected Request`）。這是為了擋 DNS rebinding：瀏覽器裡任何網頁都能把自己的網域指到 127.0.0.1 再打本機 API，Host 是唯一分得出「這是不是你自己開的網址」的線索。

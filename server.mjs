@@ -30,6 +30,10 @@ const host = process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0
 const dataDir = process.env.DATA_DIR || join(root, ".data");
 const dbPath = process.env.DB_PATH || join(dataDir, "stock1-db.json");
 const sessionMaxAgeMs = Number(process.env.SESSION_MAX_AGE_MS || 1000 * 60 * 60 * 24 * 14);
+// REQUIRE_LOGIN=on（對外部署用）：除了健康探針與登入本身，所有 /api 都要有登入狀態，未登入連唯讀行情也不給。
+// 本機／LAN 預設 off：看盤不必登入，登入只影響自選股同步與券商設定。
+const requireLoginMode = /^(1|on|true|yes)$/i.test(String(process.env.REQUIRE_LOGIN || "").trim());
+const requireLoginOpenPaths = new Set(["/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/me"]);
 const MAX_SESSIONS_PER_USER = 10;
 const passwordIterations = 210000;
 const unsafeExampleSecrets = new Set([
@@ -181,6 +185,11 @@ function validateStartupSecurity(listenHost) {
   if (problems.length) {
     const context = production ? "production " : "對外啟動 ";
     throw new Error(`[Stock1] ${context}安全設定不足：${problems.join("；")}。伺服器已拒絕啟動。`);
+  }
+  // 對外部署（production 或設了 PUBLIC_ORIGIN）而沒開 REQUIRE_LOGIN：不是錯，但要講清楚——
+  // 訊號、成績單與所有唯讀行情端點會攤給任何人看，而且每個訪客都能讓伺服器替他打上游。
+  if ((production || publicOrigin) && !requireLoginMode) {
+    console.warn("[Stock1] REQUIRE_LOGIN 未開：對外可達時，唯讀行情與成績單免登入可讀、訪客可觸發上游請求。對外部署建議設 REQUIRE_LOGIN=on。");
   }
 }
 
@@ -14231,6 +14240,15 @@ async function handleApi(request, requestUrl, response) {
     jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
     return true;
   }
+  // REQUIRE_LOGIN=on：公網上的免登入端點等於幫任何人放大對上游（證交所／櫃買）的請求，也會把訊號與
+  // 成績單攤給所有人看；未登入一律 401（帶 requireLogin 讓前端直接開登入閘、不再發其他請求）。
+  if (requireLoginMode && !requireLoginOpenPaths.has(requestUrl.pathname)) {
+    const gate = await getAuthContext(request);
+    if (!gate.user) {
+      jsonResponse(response, 401, { ok: false, error: "這個站台需要先登入", code: "AUTH_REQUIRED", requireLogin: true });
+      return true;
+    }
+  }
   if (requestUrl.pathname === "/api/operational-status") {
     // 只投影已提交 RAM；不可走含 save、補驗 queue 或解壓證據的成績單 wrapper。
     const now = new Date();
@@ -14259,6 +14277,7 @@ async function handleApi(request, requestUrl, response) {
     jsonResponse(response, ready ? 200 : 503, {
       ok: ready,
       status: lifecycleStatus,
+      requireLogin: requireLoginMode,
       instanceId,
       version: appVersion,
       // build 只讀本機 .git（有快取、不打網路），符合「探針不得觸發昂貴上游」。
@@ -14382,10 +14401,15 @@ async function handleApi(request, requestUrl, response) {
   }
 
   if (requestUrl.pathname === "/api/auth/me") {
-    const auth = await requireAuth(request, response);
-    if (!auth) return true;
+    const auth = await getAuthContext(request);
+    if (!auth.user) {
+      // requireLogin 讓前端分得出「訪客可看行情」與「這個站台非登入不可」，兩者的 401 處理不同。
+      jsonResponse(response, 401, { ok: false, error: requireLoginMode ? "這個站台需要先登入" : "需要先登入", code: "AUTH_REQUIRED", requireLogin: requireLoginMode });
+      return true;
+    }
     jsonResponse(response, 200, {
       ok: true,
+      requireLogin: requireLoginMode,
       user: sanitizeUser(auth.user),
       warnings: {
         defaultAdminPassword: usesSeededPassword(auth.user),

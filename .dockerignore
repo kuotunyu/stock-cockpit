@@ -1,0 +1,31 @@
+# 映像只要執行時需要的東西：程式、靜態資產、依賴清單。
+# 資料、密鑰、憑證、測試與本機開發檔一律不進映像（資料由 volume 掛進 /data）。
+node_modules
+.git
+.github
+.data
+.data-preview
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+tests
+test-results
+log
+docs
+.agents
+.claude
+.superpowers
+.worktrees
+.impeccable
+CLAUDE.md
+PLAN.md
+PROGRESS.md
+*.private.md
+interview*.md
+INTERVIEW_PREP.md
+Dockerfile
+.dockerignore

@@ -11,6 +11,7 @@
     "start:lan": "node --env-file-if-exists=.env scripts/start-lan.mjs",
     "secret": "node scripts/print-secret.mjs",
     "backup": "node --env-file-if-exists=.env scripts/backup.mjs",
+    "preflight": "node --env-file-if-exists=.env scripts/preflight.mjs",
     "test": "node --test tests/backend/*.test.mjs tests/frontend/*.test.mjs",
     "test:browser": "node --test --test-concurrency=1 tests/browser/*.test.mjs",
     "test:backend": "node --test tests/backend/*.test.mjs",

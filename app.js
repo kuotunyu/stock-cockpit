@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v54";
+const APP_SHELL_VERSION = "stock1-shell-v55";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -301,6 +301,9 @@ const authState = {
   warnings: {},
   // 登入閘從哪裡打開（"holdings"／"alerts"）：登入成功後回到原處續作，取消則回原 opener。
   loginIntent: null,
+  // REQUIRE_LOGIN=on 的站台：未登入時整個站台鎖在登入閘、開機不抓資料（bootDeferred），登入後補跑。
+  requireLogin: false,
+  bootDeferred: false,
 };
 let authScopeGeneration = 0;
 
@@ -1485,7 +1488,7 @@ async function fetchApi(path, options = {}) {
             let payload = {};
             try { payload = await response.json(); } catch { /* Preserve explicit HTTP rejection. */ }
             const error = new Error(payload?.error || payload?.message || `HTTP ${response.status}`);
-            Object.assign(error, { fromServer: true, status: response.status, code: payload?.code || '' });
+            Object.assign(error, { fromServer: true, status: response.status, code: payload?.code || '', requireLogin: Boolean(payload?.requireLogin) });
             throw error;
           }
           return await response.json();
@@ -1733,9 +1736,16 @@ document.addEventListener("focusin", (event) => {
   if (entry && !entry.root.contains(event.target)) focusDialogEntry(entry);
 });
 
+function loginGateLocked() {
+  return Boolean(authState.requireLogin) && !authState.user;
+}
+
 function setLoginGateVisible(visible, message = "", { intent = null, trigger = undefined, openerResolver = null } = {}) {
   if (el.loginMessage) el.loginMessage.textContent = message;
   if (!el.loginGate) return;
+  if (!visible && loginGateLocked()) return;
+  const closeButton = document.getElementById("loginClose");
+  if (closeButton) closeButton.hidden = visible && loginGateLocked();
   if (visible) {
     if (intent) authState.loginIntent = intent;
     openDialogLayer(el.loginGate, {
@@ -2330,6 +2340,16 @@ async function loadCurrentUser({ showLogin = false } = {}) {
     return Boolean(authState.user);
   } catch (error) {
     authState.checked = true;
+    // REQUIRE_LOGIN=on（對外部署）：伺服器在 401 帶 requireLogin，這不是「訪客可看行情」的 401，
+    // 而是整個站台非登入不可——直接開閘鎖住，initializeApp 不再發任何資料請求（全部會 401）。
+    if (error.status === 401 && error.requireLogin) {
+      authState.requireLogin = true;
+      if (authState.user || hadSessionBefore()) clearUserScopedState({ renderNow: false });
+      authState.error = "";
+      setLoginGateVisible(true, hadSessionBefore() ? "登入已到期，這個站台需要登入才能使用" : "這個站台需要登入才能使用");
+      rememberHadSession(false);
+      return false;
+    }
     // 從沒登入過的訪客拿到 401 是常態（朋友第一次開頁）：沒有任何帳號資料可清，本機自選必須留著
     // （2026-09-09 CUA-06 N1：以前每次重載都在這裡把訪客的 localStorage 清單清掉）。
     // 曾登入過（旗標在）或目前仍有帳號的 401 才是到期／失效，照舊清空並開閘。
@@ -2364,6 +2384,13 @@ async function loginWithCredentials(username, password) {
     authState.error = "";
     authState.warnings = payload.warnings || {};
     setLoginGateVisible(false);
+    if (authState.bootDeferred) {
+      // REQUIRE_LOGIN=on：開機時只開了登入閘，資料一筆都沒抓；現在照正常開機順序補齊。
+      authState.bootDeferred = false;
+      await startDataLoads(true);
+      showToast(`已登入：${authState.user?.displayName || authState.user?.username || ""}`);
+      return;
+    }
     await loadWatchListsFromServer();
     await loadAlertsFromServer();
     await loadTradesFromServer();
@@ -2397,7 +2424,12 @@ async function logout() {
   authState.warnings = {};
   sourceState.selected = "official";
   saveDataSource();
-  setLoginGateVisible(false, "");
+  if (authState.requireLogin) {
+    authState.bootDeferred = true;
+    setLoginGateVisible(true, "已登出；這個站台需要登入才能使用");
+  } else {
+    setLoginGateVisible(false, "");
+  }
   render();
   showToast("已登出，回到未登入看盤模式");
   loadSourceStatus();
@@ -13708,6 +13740,7 @@ async function refreshLiveData() {
   if (document.hidden || autoRefreshInFlight || getSelectedSource() !== "official") return;
   // 鎖要在第一個 await 前取得；否則 timer 與 visibilitychange 可同時通過 guard，
   // 各送一整組市場／個股請求。等待交易日曆時頁面狀態也可能改變，完成後必須重驗。
+  if (loginGateLocked()) return; // 站台鎖定且未登入：每 10 秒的行情輪詢也全是 401，不發
   autoRefreshInFlight = true;
   try {
     await ensureMarketSessionStatus();
@@ -14556,6 +14589,15 @@ async function initializeApp() {
   render();
   // 目前先做本機看盤：未登入也能看行情；登入只影響自選股同步與券商設定。
   const isAuthenticated = await loadCurrentUser();
+  if (authState.requireLogin && !isAuthenticated) {
+    // REQUIRE_LOGIN=on 的站台：未登入時所有 API 都 401，資料請求一筆都不發；登入成功後 loginWithCredentials 補跑。
+    authState.bootDeferred = true;
+    return;
+  }
+  await startDataLoads(isAuthenticated);
+}
+
+async function startDataLoads(isAuthenticated) {
   if (isAuthenticated) {
     await loadWatchListsFromServer();
     await loadAlertsFromServer();
