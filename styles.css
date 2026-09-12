@@ -7385,7 +7385,8 @@ details[data-overnight-warnings-fold] > .overnight-warning {
       "facts"
       "entry"
       "plan"
-      "rrbar";
+      "rrbar"
+      "actions";
     gap: 9px;
     padding: 13px;
   }
@@ -7470,47 +7471,84 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 @media (max-width: 760px) {
   /* 「?」放來源列右側：第一列塞進第四個元素會把市場 pill 擠成兩行（375px 實測），
      第一列維持 market／title／actions，help 佔第二列的右欄。 */
+  /* 手機頂欄（M1，2026-09-13）：以前三層 140px。改成 44px 標題列（標題＋工具鈕）＋ 40px 狀態列
+     （台指 pill、來源與更新時間、「?」）。三欄、每列三個 area（ux-structure 測試釘住欄數＝area 數）。 */
   .topbar {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "market title actions"
-      "source source help";
-    gap: 7px;
-    padding-left: 10px;
-    padding-right: 10px;
+      "title title help actions"
+      "market source source source";
+    gap: 4px 8px;
+    min-height: 0;
+    padding: 6px 10px 5px;
   }
 
   .market-pill {
     grid-area: market;
     min-width: 0;
     max-width: 100%;
+    min-height: 32px;
+    padding: 3px 9px;
+    gap: 5px;
+    font-size: var(--fs-badge);
   }
 
-  .screen-help {
+  .market-pill strong {
+    font-size: 15px;
+  }
+
+  .topbar .screen-help {
     grid-area: help;
-    align-self: start;
+    align-self: center;
+    width: 44px;
+    height: 44px;
   }
 
   .topbar h1 {
     grid-area: title;
+    align-self: center;
+    font-size: 19px;
   }
 
   .source-switch {
     grid-area: source;
+    position: relative;
     min-width: 0;
     width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .source-switch .source-pill {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 0 10px;
+    font-size: var(--fs-badge);
+  }
+
+  .source-switch small {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--fs-badge);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 點開來源切換時用浮層，不把狀態列撐高 */
+  .source-switch.is-expanded .source-switch-buttons {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 30;
+    min-width: 232px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
   }
 
   .top-actions {
     grid-area: actions;
-  }
-
-  .market-pill {
-    padding: 8px 10px;
-  }
-
-  .topbar h1 {
-    font-size: 20px;
+    align-self: center;
   }
 
   .icon-button {
@@ -10113,3 +10151,14 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 
 /* 200% 字級的圖表讀值不可跨出畫布遮住正在閱讀的等價資料。 */
 #technicalZoomModal:has(#zoomOhlc:focus-within) #zoomChartReadout { visibility:hidden; }
+
+/* ===== 手機外殼（M1，2026-09-13）===== */
+/* 分群 tab 列：按鈕維持 44px 觸控高，去掉多餘的上下留白，讓內容更早開始 */
+@media (max-width: 760px) {
+  .strategy-strip { padding-top: 4px; padding-bottom: 4px; gap: 6px; }
+  .strategy-strip button { min-height: 44px; padding: 0 12px; }
+  .segment-tabs { padding: 6px 10px; gap: 6px; }
+  .segment { min-height: 44px; padding: 8px 12px; }
+}
+/* 加到主畫面後 iPhone 的 home 指示條會壓在底部導覽上：留 safe-area，高度由既有 ResizeObserver 量進 --bottom-nav-height */
+.bottom-nav { padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
