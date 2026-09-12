@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v55";
+const APP_SHELL_VERSION = "stock1-shell-v56";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -2099,6 +2099,48 @@ function personalBackupDownloadName() {
   const clock = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   const username = safePersonalBackupFilePart(authState.user?.username || authState.user?.displayName);
   return `stock1-${username}-${day}-${clock}.json`;
+}
+
+// 管理者整機匯出：GET /api/admin/machine-export → 存成 stock1-machine-export-<時間>.json。
+// 沿用個人備份的下載方式（Blob + <a download>）；非 admin 伺服器會回 403，這裡只把訊息 toast 出來。
+async function downloadMachineExport(button = null) {
+  if (authState.user?.role !== "admin") {
+    showToast("整機匯出只有管理者能下載");
+    return;
+  }
+  const scope = captureAuthScope();
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+  }
+  let objectUrl = "";
+  let anchor = null;
+  try {
+    const response = await fetchApi("/api/admin/machine-export");
+    if (!isCurrentAuthScope(scope)) return;
+    const bundle = response?.bundle;
+    if (!bundle || typeof bundle !== "object" || !Array.isArray(bundle.files)) throw new Error("伺服器沒有回傳可下載的匯出內容");
+    const blob = new Blob([JSON.stringify(bundle)], { type: "application/json;charset=utf-8" });
+    objectUrl = URL.createObjectURL(blob);
+    anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = `stock1-machine-export-${String(bundle.createdAt || new Date().toISOString()).replace(/[:.]/g, "-")}.json`;
+    anchor.hidden = true;
+    document.body.appendChild(anchor);
+    anchor.click();
+    const pending = Number(bundle.pendingWrites) > 0 ? `；有 ${bundle.pendingWrites} 筆寫入還沒落盤，幾秒後再下載一次會更完整` : "";
+    showToast(`整機匯出已下載（${bundle.files.length} 個檔${bundle.brokerCredentialsStripped ? "，券商憑證已剝除" : ""}）；這是全站資料，請放在只有自己能存取的位置${pending}`, 8000);
+  } catch (error) {
+    if (!isCurrentAuthScope(scope)) return;
+    if (!handleAuthRequired(error)) showToast(`整機匯出失敗：${error.message}`);
+  } finally {
+    anchor?.remove();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
 }
 
 async function downloadPersonalBackup(button = null) {
@@ -5589,6 +5631,11 @@ function renderAccountManagementPanel() {
             </div>
           </div>`;
         }).join("") || "<p>尚未載入帳號清單，請按重新整理。</p>"}
+      </section>
+      <section class="machine-export-panel">
+        <h3>整機匯出</h3>
+        <p>把伺服器上的全部資料（所有帳號、帳本、計畫、正式發布與驗證證據、基本面與處置歷史）打包成一個 JSON 下載。放在雲端（Zeabur）時拿不到磁碟，這是把資料拉回本機的常規方式；它是「最後一次落盤」的內容，不是停機一致備份。還原：<code>node scripts/unpack-machine-export.mjs 匯出檔.json 目的資料夾</code>，再照 README 第 4 節的還原流程。</p>
+        <button class="watch-secondary-action" data-action="download-machine-export" type="button">下載整機匯出</button>
       </section>
     ` : `
       <p class="api-warning">你目前不是管理者。要建立朋友帳號，請用 admin 登入。</p>
@@ -13040,6 +13087,11 @@ document.addEventListener("click", async (event) => {
   const downloadBackup = event.target.closest('[data-action="download-personal-backup"]');
   if (downloadBackup) {
     await downloadPersonalBackup(downloadBackup);
+    return;
+  }
+  const downloadMachine = event.target.closest('[data-action="download-machine-export"]');
+  if (downloadMachine) {
+    await downloadMachineExport(downloadMachine);
     return;
   }
   const openPersonalRestore = event.target.closest('[data-action="open-personal-restore"]');

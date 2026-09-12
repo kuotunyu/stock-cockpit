@@ -233,6 +233,14 @@ npm run backup "D:\OneDrive\stock1-backup"
 
 `manifest.json` 記錄格式版本、時間、stopped-writer 一致性、檔案清單與 hash、是否剝除券商憑證，不記錄密鑰或來源私密路徑。弱／未設定 APP_SECRET 時移除券商憑證；強密鑰時保留加密內容，**APP_SECRET 與券商憑證檔須另行安全保管**，不在此包內。風險 last-good 快取與同地 backups 不收錄；基本面歷史不可重建，必須保留。
 
+放在雲端（Zeabur）時拿不到磁碟與 shell，改用 App 內的**整機匯出**：admin 登入後到「更多 → 帳號管理 → 整機匯出」下載一個 JSON（同樣三個檔、逐檔附長度與 sha256；它是最後一次落盤的內容，不是停機一致備份，回應會註明尚未落盤的寫入筆數）。拆回檔案（路徑用斜線或反斜線都可以）：
+
+```powershell
+node scripts/unpack-machine-export.mjs "D:/下載/stock1-machine-export-….json" "D:/stock1-restore/2026-09-13"
+```
+
+拆出來的資料夾含三個 JSON 與 manifest.json，之後照下面的還原流程從第 3 步接上（不適用 `--verify`，拆檔時已逐檔核對雜湊）。
+
 還原流程：
 
 1. 停止原服務，等程序完整結束；保留原 DATA_DIR 與設定作為回復點。
@@ -296,7 +304,7 @@ npm run test:live
 要點與限制：
 
 - **只能單一副本。** 資料是單一 JSON 檔加程序內排程；同一台機器上的第二個程序會被 writer lease 擋下，跨機器的兩個副本則會互相覆蓋。
-- **備援要自己拉回來。** 平台的 volume 不是異地備份：定期用「更多 → 個人資料備份」把本人資料匯出，整機備份見第 4 節（需要能停止服務並存取 `/data`）。
+- **備援要自己拉回來。** 平台的 volume 不是異地備份：定期用「更多 → 帳號管理 → 整機匯出」（admin）把全站資料下載回本機，或用「更多 → 個人資料備份」匯出本人資料；拆檔與還原見第 4 節。
 - **收盤後排程靠伺服器一直開著。** 這正是放到雲端最大的好處：09-08～09-11 那種「電腦沒開就沒快照」不會再發生。
 - 券商 API（富邦）憑證用 `APP_SECRET` 加密後存在 `/data`：換掉 `APP_SECRET` 會讓已存的憑證讀不回來，要重新設定。
 - 映像裡沒有 `.git`，「版本與更新」只會顯示 unavailable（`UPDATE_CHECK=off`）；更新方式是重新部署新的 commit。

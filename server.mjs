@@ -2224,6 +2224,41 @@ async function saveDb(db) {
   clearPersistenceFailure();
 }
 
+const MACHINE_EXPORT_FORMAT = "stock1-machine-export";
+async function buildMachineExport() {
+  const weakSecret = configuredAppSecret.length < 32 || usingDefaultAppSecret;
+  const sources = [
+    { file: "stock1-db.json", path: dbPath, required: true },
+    { file: "fundamentals-cache.json", path: fundamentalsHistoryPath, required: false },
+    { file: "surveillance-history.json", path: surveillanceHistoryPath, required: false },
+  ];
+  const files = [];
+  let brokerCredentialsStripped = false;
+  for (const source of sources) {
+    let bytes;
+    try {
+      bytes = await readFile(source.path);
+    } catch (error) {
+      if (!source.required && error?.code === "ENOENT") continue;
+      throw error;
+    }
+    let content = JSON.parse(bytes.toString("utf8"));
+    if (!content || typeof content !== "object" || Array.isArray(content)) throw new Error(`${source.file} 不是 JSON 物件`);
+    // 與 scripts/backup.mjs 同一條規則：弱／未設定 APP_SECRET 時券商憑證等同明文，不放進匯出。
+    if (source.required && weakSecret && Object.hasOwn(content, "brokerCredentials")) {
+      delete content.brokerCredentials;
+      brokerCredentialsStripped = true;
+      bytes = Buffer.from(JSON.stringify(content));
+    }
+    files.push({ file: source.file, format: "json", bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), content });
+  }
+  return {
+    format: MACHINE_EXPORT_FORMAT, version: 1, createdAt: new Date().toISOString(),
+    consistency: "live-committed", pendingWrites: pendingPersistenceCount(),
+    brokerCredentialsStripped, instanceId, appVersion, files,
+  };
+}
+
 function pendingPersistenceCount() {
   return dbSavePendingCount
     + dbMutationPendingCount
@@ -14212,6 +14247,7 @@ const getOnlyApiPaths = new Set([
   "/api/app-version",
   "/api/auth/me",
   "/api/personal-data/export",
+  "/api/admin/machine-export",
   "/api/symbols",
   "/api/sources",
   "/api/markets",
@@ -14230,7 +14266,7 @@ const getOnlyApiPaths = new Set([
 // 固定 allowlist，只記已知路由與方法；任意 URL／query／body 不進診斷。
 const diagnosticApiPaths = new Set([...getOnlyApiPaths,
   '/api/auth/login','/api/auth/logout','/api/auth/password','/api/personal-data/restore/preview','/api/personal-data/restore',
-  '/api/admin/users','/api/watchlists','/api/alerts','/api/instrument-profile','/api/trade-plans','/api/trades',
+  '/api/admin/users','/api/admin/machine-export','/api/watchlists','/api/alerts','/api/instrument-profile','/api/trade-plans','/api/trades',
   '/api/broker/settings','/api/broker/test','/api/market-session','/api/quotes','/api/institutional','/api/margin',
   '/api/notes','/api/company','/api/swing','/api/surveillance-board',
 ]);
@@ -14544,6 +14580,24 @@ async function handleApi(request, requestUrl, response) {
       } else {
         apiFailure(response, 500, error);
       }
+    }
+    return true;
+  }
+
+  // 管理者整機匯出：放在雲端（Zeabur）時拿不到 /data 的 shell，這是把整份資料抓回本機的唯一常規出口。
+  // 讀的是磁碟上最後一次提交的三個檔（與 scripts/backup.mjs 的 SOURCES 相同），不是停機一致備份：
+  // 回應帶 pendingWrites 讓人知道有沒有還沒落盤的寫入；還原走 scripts/unpack-machine-export.mjs 再照 README 第 4 節。
+  if (requestUrl.pathname === "/api/admin/machine-export") {
+    if (!ensureAuthed(auth, response)) return true;
+    if (auth.user.role !== "admin") {
+      jsonResponse(response, 403, { ok: false, error: "需要管理者權限" });
+      return true;
+    }
+    try {
+      const bundle = await buildMachineExport();
+      jsonResponse(response, 200, { ok: true, bundle });
+    } catch (error) {
+      apiFailure(response, 500, error);
     }
     return true;
   }
@@ -16738,5 +16792,5 @@ export {
   // 上櫃除權息候選池（tpex-exright-candidate.test）
   restoreTpexCorporateActionBaselines, TPEX_BASELINE_MAX_CODES, TPEX_BASELINE_BUDGET_MS,
   // 伺服器
-  server, startServer, shutdownServer,
+  server, startServer, shutdownServer, buildMachineExport, MACHINE_EXPORT_FORMAT,
 };
