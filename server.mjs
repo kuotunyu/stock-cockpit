@@ -3566,13 +3566,22 @@ function parsePercentNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+// 民國年 ↔ 西元年只差 1911；以前六處各自寫 ±1911，任何一處打錯都不會有測試抓到，收斂成兩個函式。
+function rocYearToWestern(year) {
+  return Number(year) + 1911;
+}
+
+function westernYearToRoc(year) {
+  return Number(year) - 1911;
+}
+
 function formatDate(value) {
   const text = String(value || "").replace(/\D/g, "");
   if (/^\d{8}$/.test(text)) {
     return `${text.slice(0, 4)}/${text.slice(4, 6)}/${text.slice(6, 8)}`;
   }
   if (/^\d{7}$/.test(text)) {
-    const year = Number(text.slice(0, 3)) + 1911;
+    const year = rocYearToWestern(text.slice(0, 3));
     return `${year}/${text.slice(3, 5)}/${text.slice(5, 7)}`;
   }
   return text || "";
@@ -3612,7 +3621,7 @@ function toCompactDate(value = new Date()) {
   const text = String(value || "").replace(/\D/g, "");
   if (/^\d{8,}/.test(text)) return text.slice(0, 8);
   if (/^\d{7}$/.test(text)) {
-    const year = Number(text.slice(0, 3)) + 1911;
+    const year = rocYearToWestern(text.slice(0, 3));
     return `${year}${text.slice(3, 5)}${text.slice(5, 7)}`;
   }
   return "";
@@ -3633,7 +3642,7 @@ function compactToSlashDate(value) {
 function compactToRocSlashDate(value) {
   const text = toCompactDate(value);
   if (!text) return "";
-  const year = Number(text.slice(0, 4)) - 1911;
+  const year = westernYearToRoc(text.slice(0, 4));
   return `${year}/${text.slice(4, 6)}/${text.slice(6, 8)}`;
 }
 
@@ -5293,7 +5302,7 @@ async function saveFundamentalsHistory() {
 function rocYearMonthToIso(value) {
   const m = String(value || "").trim().match(/^(\d{2,3})(\d{2})$/);
   if (!m) return "";
-  return `${Number(m[1]) + 1911}-${m[2]}`;
+  return `${rocYearToWestern(m[1])}-${m[2]}`;
 }
 
 // 各維度共用的 TTL 快取殼：抓失敗且無快取 → 回空 Map（呼叫端補 warning，不擋整頁）。
@@ -5382,7 +5391,7 @@ async function getQuarterlyEps() {
         const quarter = Number(String(row["季別"] || "").trim());
         const eps = parseNumber(row[epsField]);
         if (!year || !quarter || !Number.isFinite(eps)) continue;
-        map.set(code, { period: `${year + 1911}Q${quarter}`, eps });
+        map.set(code, { period: `${rocYearToWestern(year)}Q${quarter}`, eps });
       }
     };
     if (twse.status === "fulfilled") ingest(twse.value, "公司代號", "基本每股盈餘(元)", "年度");
@@ -13185,7 +13194,7 @@ async function getSwingHistoricalCalendar(from, through, { includeSourceEvidence
         // 不適合完整月份證據。指數 -- 不影響該日期確實開市的事實。
         const match = Array.isArray(row) && typeof row[0] === "string"
           ? row[0].trim().match(/^(\d{2,3})\/(\d{2})\/(\d{2})$/) : null;
-        const date = match ? `${Number(match[1]) + 1911}${match[2]}${match[3]}` : "";
+        const date = match ? `${rocYearToWestern(match[1])}${match[2]}${match[3]}` : "";
         if (!isValidCompactCalendarDate(date) || !date.startsWith(month)) {
           throw new Error("歷史交易日含無效日期或非要求月份");
         }
@@ -16565,7 +16574,7 @@ export {
   canonicalizeTradePlans, validatePortableTradePlans, emptyTradePlans,
   // 日期
   toTaipeiCompactDate, toCompactDate, compactToIsoDate, compactToSlashDate,
-  compactToRocSlashDate, addMonthsCompact, addDaysCompact, compactDaysDiff, formatDate,
+  compactToRocSlashDate, addMonthsCompact, addDaysCompact, compactDaysDiff, formatDate, rocYearToWestern, westernYearToRoc,
   // 解析／工具
   cleanCode, parseNumber, parsePercentNumber, unique, average, pct,
   // 行情正規化（quote-normalizers.test）

@@ -183,7 +183,8 @@ test("場景卡：依大盤季線上／下分層；未達最小樣本只給筆�
     renderSwingVerifyPanel();
     return document.getElementById("swingVerify").innerHTML;
   })()`)).replace(/\s+/g, " ");
-  assert.match(html, /大盤季線上 60%・季線下 0\/2/);
+  assert.match(html.replace(/<[^>]+>/g, ""), /大盤季線上 60%・季線下 0\/2/);
+  assert.match(html, /data-glossary-term="大盤位階"/, "「大盤」要能點開位階的名詞解釋");
   assert.doesNotMatch(html, /位階未知/);
 });
 
@@ -200,5 +201,6 @@ test("場景卡：分佈指標一行（PF／中位／最長連虧／最差單日
   const text = html.replace(/<[^>]+>/g, "");
   assert.match(text, /獲利因子 淨 1\.2（毛 1\.53）・中位 淨 -3\.47%・最長連虧 1 天・最差單日 08\/25 -3%（3 筆）/, "PF／中位改淨口徑、連虧以結案日為叢集");
   assert.doesNotMatch(text, /PF 1\.53/);
+  assert.equal((html.match(/data-glossary-term="中位數與最長連虧"/g) || []).length, 2, "中位與最長連虧都要連到同一條名詞解釋");
   assert.match(text, /含處置股 55\.6%（27 筆）・主要勝率只算 23 筆連續競價的單/);
 });

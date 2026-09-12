@@ -70,9 +70,12 @@ test("市場位階一行：位階、漲跌家數、基差、事件；位階未�
     marketBreadthState.data = { ok: true, taiex: { close: 24123.45, aboveMa20: true, aboveMa60: false }, breadth: { up: 812, down: 640, flat: 120, total: 1572, upRatio: 0.5165 }, basis: { points: -35.5 }, events: [{ date: "20260916", label: "台指期最後結算日", kind: "settlement" }], warnings: [] };
     return renderMarketStanceLine();
   })()`));
-  assert.match(html, /大盤 24,123\.45・季線下・月線上/);
+  const stanceText = html.replace(/<[^>]+>/g, "");
+  assert.match(stanceText, /大盤 24,123\.45・季線下・月線上/);
+  assert.match(html, /data-glossary-term="大盤位階"/, "「大盤」要能點開位階的名詞解釋");
   assert.match(html, /漲 <span class="positive">812<\/span>／跌 <span class="negative">640<\/span>／平 120（上漲 52%）/);
-  assert.match(html, /期指基差 -35\.5/);
+  assert.match(stanceText, /期指基差 -35\.5/);
+  assert.match(html, /data-glossary-term="期指基差"/, "基差標籤要能點開名詞解釋");
   assert.match(html, /本週事件：09\/16 台指期最後結算日/);
   const unknown = String(app.evalIn(`(() => { marketBreadthState.data = { ok: true, taiex: null, breadth: { total: 0 }, basis: null, events: [], warnings: ["加權指數歷史暫時抓不到"] }; return renderMarketStanceLine(); })()`));
   assert.match(unknown, /大盤位階未知/);
@@ -91,9 +94,10 @@ test("市場位階一行：位階、漲跌家數、基差、事件；位階未�
   assert.match(toast, /加權指數歷史暫時抓不到/);
   // 15:00 後期交所 MIS 給的是夜盤價：減 13:30 的加權收盤 ＝ 夜盤變動 ＋ 真基差，不可再叫「基差」
   const night = String(app.evalIn(`(() => { marketBreadthState.data = { ok: true, taiex: null, breadth: { total: 0 }, basis: { points: 120, session: "夜盤", contractMonth: "2026/09" }, events: [], warnings: [] }; return renderMarketStanceLine(); })()`));
-  assert.match(night, /夜盤 vs 現貨收盤 \+120/);
-  assert.doesNotMatch(night.replace(/title="[^"]*"/g, ""), /期指基差/, "可見文字不可再叫基差（title 裡的定義說明不算）");
-  assert.match(night, /2026\/09/, "合約月份要看得到（結算週換月時基差會跳一個月持有成本）");
+  const nightText = night.replace(/<[^>]+>/g, "");
+  assert.match(nightText, /夜盤 vs 現貨收盤 \+120/);
+  assert.doesNotMatch(nightText, /期指基差/, "可見文字不可再叫基差（title 與名詞連結的屬性不算）");
+  assert.match(nightText, /2026\/09/, "合約月份要看得到（結算週換月時基差會跳一個月持有成本）");
 });
 
 test("持股面板：前三大占比僅為觀察值，不自動套用通用警告比例", () => {
@@ -138,6 +142,7 @@ test("場景卡：次日開盤進場口徑與全版本合併一行", () => {
     renderSwingVerifyPanel();
     return document.getElementById("swingVerify").innerHTML;
   })()`)).replace(/\s+/g, " ");
-  assert.match(html, /次日開盤進場 1\/3（3 筆）・平均 -0\.27%・跳空略過 2/);
+  assert.match(html.replace(/<[^>]+>/g, ""), /次日開盤進場 1\/3（3 筆）・平均 -0\.27%・跳空略過 2/);
+  assert.match(html, /data-glossary-term="次日開盤進場"/, "口徑名稱要能點開名詞解釋");
   assert.match(html, /全版本合併 48%（25 筆結案）/);
 });

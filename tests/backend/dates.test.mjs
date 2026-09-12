@@ -8,8 +8,16 @@ import { importServer, SERVER_PATH } from "../helpers/test-server.mjs";
 const { mod } = await importServer();
 const {
   toTaipeiCompactDate, toCompactDate, compactToIsoDate, compactToSlashDate,
-  compactToRocSlashDate, addMonthsCompact, addDaysCompact, compactDaysDiff,
+  compactToRocSlashDate, addMonthsCompact, addDaysCompact, compactDaysDiff, rocYearToWestern, westernYearToRoc,
 } = mod;
+
+test("民國年 ↔ 西元年：六處 ±1911 收斂成兩個函式，且彼此互逆", () => {
+  assert.equal(rocYearToWestern(115), 2026);
+  assert.equal(rocYearToWestern("115"), 2026);
+  assert.equal(westernYearToRoc(2026), 115);
+  assert.equal(westernYearToRoc(rocYearToWestern(99)), 99);
+  assert.equal(compactToRocSlashDate("20260724"), "115/07/24");
+});
 
 test("toCompactDate：民國 7 碼 +1911", () => {
   assert.equal(toCompactDate("1150612"), "20260612");

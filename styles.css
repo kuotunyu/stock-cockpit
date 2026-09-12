@@ -7919,6 +7919,29 @@ details[data-overnight-warnings-fold] > .overnight-warning {
   color: var(--down-text);
 }
 
+/* 整個信賴區間都在 50% 以下：琥珀提示（不是綠，綠＝跌） */
+.verify-panel .verify-stats span.is-warn,
+.verify-history .verify-stats span.is-warn {
+  border-color: rgba(255, 177, 44, 0.5);
+  color: var(--warn-text);
+}
+
+/* 成績單第一層只留三個數字，其餘口徑收進 details（手機預設收合） */
+.verify-stats details.verify-more {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.verify-stats details.verify-more > summary {
+  flex-basis: 100%;
+  cursor: pointer;
+  color: var(--muted-2);
+  font-size: var(--fs-note);
+  font-weight: 800;
+  padding: 2px 0;
+}
+
 .verify-rows {
   display: flex;
   flex-wrap: wrap;
@@ -9983,6 +10006,16 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 .verification-saved-models { overflow-wrap: anywhere; }
 
 .verify-history-row > span { min-width: 0; overflow-wrap: anywhere; }
+/* 手機（≤760px）逐日表不再是要橫向捲 760px 的七欄列：改成卡片列，日期一整行、其餘六個數字兩欄排，
+   每格用 ::before 印欄名，表頭列因此隱藏。桌機仍是原本的七欄表（一眼掃整欄比較快）。 */
+@media (max-width: 760px) {
+  .verify-history-row { min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; align-items: start; }
+  .verify-history-row.is-head { display: none; }
+  .verify-history-row > span[data-col] { display: grid; gap: 2px; }
+  .verify-history-row > span[data-col]::before { content: attr(data-col); color: #8ea3b7; font-family: var(--sans); font-size: var(--fs-note); font-weight: 700; }
+  .verify-history-row > span[data-col="訊號→觀察"] { grid-column: 1 / -1; }
+  .verify-history-row .verify-pending-note { grid-column: 1 / -1; }
+}
 .holding-outcome { display: block; color: var(--muted); font-weight: 500; }
 .holding-outcome.positive { color: var(--up-text); }
 .holding-outcome.negative { color: var(--down-text); }

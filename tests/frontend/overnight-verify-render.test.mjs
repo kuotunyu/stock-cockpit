@@ -183,6 +183,24 @@ test("長期成績單：未滿 20 天不染色且顯示累積中；達到後附�
   assert.equal(chips.find((c) => c.textContent.includes("曾達+2%")).classList.contains("positive"), false, "點估計 67% 但下界 45% 不染");
   assert.match(enough, /開盤賣勝率.*曾達\+2%.*曾破−2%.*平均開盤.*平均收盤/, "表頭七欄");
   assert.match(enough, /100%/, "該日 winAtOpen 2/2");
+  // 第一層只留三個數字（累計、開盤淨獲利率、平均開盤）；收盤、曾達／曾破、平均隔日收收進「更多口徑」，桌機預設展開
+  const firstLayer = [...host.querySelectorAll(".verify-stats > span")].map((c) => c.textContent.trim().slice(0, 6));
+  assert.equal(firstLayer.length, 3, firstLayer.join(" | "));
+  const more = host.querySelector(".verify-stats > details.verify-more");
+  assert.ok(more, "其餘口徑要在 details 裡");
+  assert.equal(more.open, true, "jsdom 無 matchMedia → 桌機預設展開");
+  assert.match(more.textContent, /收盤觀察淨獲利率/);
+  assert.match(more.textContent, /曾達\+2%/);
+  assert.match(more.textContent, /平均隔日收/);
+  assert.match(enough, /data-glossary-term="盤中曾達／曾破"/, "曾達／曾破也要連到名詞解釋");
+  // 整個區間都在 50% 以下：琥珀（is-warn），不是綠
+  const weak = render({ days: 25, signals: 300, hitPlus2: 100, brokeMinus2: 50, winAtOpen: 90, winAtClose: 120, avgOpenReturn: -0.2, avgCloseReturn: 0.1, minDays: 20,
+    ci: { hitPlus2: null, winAtOpen: { n: 25, mean: 0.3, low: 0.2, high: 0.42 }, winAtClose: null } });
+  host = app.doc.createElement("div");
+  host.innerHTML = weak;
+  const weakChip = [...host.querySelectorAll(".verify-stats span")].find((c) => c.textContent.includes("開盤觀察淨獲利率"));
+  assert.ok(weakChip.classList.contains("is-warn"), weakChip.className);
+  assert.ok(!weakChip.classList.contains("negative"), "不可用綠色（綠＝跌）");
 });
 
 test("策略表現面板：明講 look-ahead 取樣與偏誤量級，卡片回測門檻 10 次", () => {
@@ -217,7 +235,8 @@ test("長期成績單：依大盤季線上／下分層的一行", () => {
     verifyHistoryState.error = "";
     return renderVerifyHistory();
   })()`));
-  assert.match(html, /大盤季線上 20 天：開盤賣 60%（區間 52～68%）・收盤賣 40%/);
+  assert.match(html.replace(/<[^>]+>/g, ""), /大盤季線上 20 天：開盤賣 60%（區間 52～68%）・收盤賣 40%/);
+  assert.match(html, /data-glossary-term="大盤位階"/, "「大盤」要能點開位階的名詞解釋");
   assert.match(html, /季線下 8 天（累積中 8\/20）/, "未滿最小天數的分層不印百分比");
   assert.doesNotMatch(html, /季線下 8 天：開盤賣/);
   assert.match(html, /位階未知 2 天/);

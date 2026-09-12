@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v52";
+const APP_SHELL_VERSION = "stock1-shell-v53";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -6661,7 +6661,7 @@ function renderVerifyRegimeLine(totals) {
     return `${label} ${bucket.days} 天：開盤賣 ${rate(bucket.winAtOpen, bucket.signals)}${ciText}・收盤賣 ${rate(bucket.winAtClose, bucket.signals)}`;
   };
   const unknown = by.unknown?.days ? `・位階未知 ${by.unknown.days} 天` : "";
-  return `<p class="verify-regime" title="以快照建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改任何選股">大盤${part("季線上", by.aboveMa60)}｜${part("季線下", by.belowMa60)}${unknown}</p>`;
+  return `<p class="verify-regime" title="以快照建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改任何選股">${glossLink("大盤", "大盤位階")}${part("季線上", by.aboveMa60)}｜${part("季線下", by.belowMa60)}${unknown}</p>`;
 }
 
 function verificationMetricNote(metric) {
@@ -6799,20 +6799,20 @@ function renderVerifyHistory() {
     .map((record) => (record.status !== "final" || record.complete === false)
       ? `
         <div class="verify-history-row is-pending">
-          <span>${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
-          <span>${record.verified || 0}/${record.signals} 檔</span>
+          <span data-col="訊號→觀察">${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
+          <span data-col="驗證檔數">${record.verified || 0}/${record.signals} 檔</span>
           <span class="verify-pending-note">${record.status === "partial" ? "部分官方行情待補，暫不納入累計" : "等待實際下一交易日的正式行情"}</span>
         </div>
       `
       : `
         <div class="verify-history-row">
-          <span>${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
-          <span>${record.verified} 檔</span>
-          <span>${rate(record.winAtOpen, record.metricCoverage?.winAtOpen?.validCount ?? record.verified)}</span>
-          <span>${rate(record.hitPlus2, record.metricCoverage?.hitPlus2?.validCount ?? record.verified)}</span>
-          <span>${rate(record.brokeMinus2, record.metricCoverage?.brokeMinus2?.validCount ?? record.verified)}</span>
-          <span>${formatSignedPercent(record.avgOpenReturn)}</span>
-          <span>${formatSignedPercent(record.avgCloseReturn)}</span>
+          <span data-col="訊號→觀察">${escapeHtml(compactDateLabel(record.asOf))}→${escapeHtml(compactDateLabel(record.observationDate))}</span>
+          <span data-col="驗證檔數">${record.verified} 檔</span>
+          <span data-col="開盤賣勝率">${rate(record.winAtOpen, record.metricCoverage?.winAtOpen?.validCount ?? record.verified)}</span>
+          <span data-col="曾達+2%">${rate(record.hitPlus2, record.metricCoverage?.hitPlus2?.validCount ?? record.verified)}</span>
+          <span data-col="曾破−2%">${rate(record.brokeMinus2, record.metricCoverage?.brokeMinus2?.validCount ?? record.verified)}</span>
+          <span data-col="平均開盤">${formatSignedPercent(record.avgOpenReturn)}</span>
+          <span data-col="平均收盤">${formatSignedPercent(record.avgCloseReturn)}</span>
         </div>
       `)
     .join("");
@@ -6827,7 +6827,16 @@ function renderVerifyHistory() {
     ? `（區間 ${Math.round(ci.low * 100)}～${Math.round(ci.high * 100)}%）`
     : "");
   // 新母體的官方已知日期不證明歷史連續覆蓋；保留區間，首版不另給顯著性配色。
-  const ciTone = (ci, field) => (!data.cohort && sufficient(field) && !totals?.metricCoverage?.[field]?.missingCount && ci && Number.isFinite(ci.low) && ci.low >= 0.5 ? "positive" : "");
+  // 染色看區間：下界 ≥ 50% 才算「贏面」；整個區間都在 50% 以下用琥珀提示（不是綠，綠＝跌）——
+  // 使用者最需要被提醒的是後者，以前只有前者會變色。
+  const ciTone = (ci, field) => {
+    if (data.cohort || !sufficient(field) || totals?.metricCoverage?.[field]?.missingCount || !ci || !Number.isFinite(ci.low) || !Number.isFinite(ci.high)) return "";
+    if (ci.low >= 0.5) return "positive";
+    if (ci.high < 0.5) return "is-warn";
+    return "";
+  };
+  // 第一層只留三個數字（累計、開盤淨獲利率、平均開盤）；其餘口徑收進「更多口徑」，手機預設收合、桌機展開。
+  const verifyMoreOpen = !(typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches);
   const denom = field => totals?.metricCoverage?.[field]?.validCount ?? totals?.signals;
   const mainRate = field => {
     if (!denom(field)) return '--';
@@ -6845,11 +6854,14 @@ function renderVerifyHistory() {
           <div class="verify-stats">
             <span>累計 ${totals.days} 天 / ${totals.signals} 檔${enoughDays ? "" : `・累積中 ${totals.days}/${minDays} 天`}</span>
             <span class="${ciTone(totals.ci?.winAtOpen,'winAtOpen')}" title="${verificationMetricNote(totals.metricCoverage?.winAtOpen)}">${glossLink(holding ? '開盤含息淨獲利率' : '開盤觀察淨獲利率',holding ? '假設含息持有' : '開盤賣勝率')} ${mainRate('winAtOpen')}${ciText(totals.ci?.winAtOpen,'winAtOpen')}</span>
-            <span class="${ciTone(totals.ci?.winAtClose,'winAtClose')}" title="${verificationMetricNote(totals.metricCoverage?.winAtClose)}">${glossLink(holding ? '收盤含息淨獲利率' : '收盤觀察淨獲利率',holding ? '假設含息持有' : '收盤賣勝率')} ${mainRate('winAtClose')}${ciText(totals.ci?.winAtClose,'winAtClose')}</span>
-            <span class="${ciTone(totals.ci?.hitPlus2,'hitPlus2')}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">曾達+2% ${mainRate('hitPlus2')}${ciText(totals.ci?.hitPlus2,'hitPlus2')}</span>
-            <span title="觀察日最低價曾碰到 −2%">曾破−2% ${mainRate('brokeMinus2')}</span>
             <span>平均開盤 ${holding ? `價格 ${formatSignedPercent(totals.avgOpenReturn)}；含息淨 ${formatSignedPercent(totals.avgOpenReturnNet)}` : formatGrossWithNet(totals.avgOpenReturn, totals.avgOpenReturnNet)}</span>
-            <span>平均隔日收 ${holding ? `價格 ${formatSignedPercent(totals.avgCloseReturn)}；含息淨 ${formatSignedPercent(totals.avgCloseReturnNet)}` : formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
+            <details class="verify-more"${verifyMoreOpen ? " open" : ""}>
+              <summary>更多口徑：收盤、盤中曾達／曾破、平均隔日收</summary>
+              <span class="${ciTone(totals.ci?.winAtClose,'winAtClose')}" title="${verificationMetricNote(totals.metricCoverage?.winAtClose)}">${glossLink(holding ? '收盤含息淨獲利率' : '收盤觀察淨獲利率',holding ? '假設含息持有' : '收盤賣勝率')} ${mainRate('winAtClose')}${ciText(totals.ci?.winAtClose,'winAtClose')}</span>
+              <span class="${ciTone(totals.ci?.hitPlus2,'hitPlus2')}" title="觀察日最高價曾碰到 +2%（盤中曾觸及，不是可實現損益）">${glossLink('曾達+2%', '盤中曾達／曾破')} ${mainRate('hitPlus2')}${ciText(totals.ci?.hitPlus2,'hitPlus2')}</span>
+              <span title="觀察日最低價曾碰到 −2%">${glossLink('曾破−2%', '盤中曾達／曾破')} ${mainRate('brokeMinus2')}</span>
+              <span>平均隔日收 ${holding ? `價格 ${formatSignedPercent(totals.avgCloseReturn)}；含息淨 ${formatSignedPercent(totals.avgCloseReturnNet)}` : formatGrossWithNet(totals.avgCloseReturn, totals.avgCloseReturnNet)}</span>
+            </details>
           </div>
         ` : ""}
       </header>
@@ -6946,7 +6958,7 @@ function renderMarketStanceLine() {
   }
   const t = data.taiex;
   const stance = t
-    ? `大盤 ${Number(t.close).toLocaleString("en-US", { maximumFractionDigits: 2 })}・${t.aboveMa60 ? "季線上" : "季線下"}${t.aboveMa20 ? "・月線上" : "・月線下"}`
+    ? `${glossLink("大盤", "大盤位階")} ${Number(t.close).toLocaleString("en-US", { maximumFractionDigits: 2 })}・${t.aboveMa60 ? "季線上" : "季線下"}${t.aboveMa20 ? "・月線上" : "・月線下"}`
     : "大盤位階未知";
   const b = data.breadth || {};
   const breadth = b.total
@@ -6956,7 +6968,7 @@ function renderMarketStanceLine() {
   const basisLabel = data.basis?.session === "夜盤" ? "夜盤 vs 現貨收盤" : "期指基差";
   const basisMonth = data.basis?.contractMonth ? `（${escapeHtml(data.basis.contractMonth)}）` : "";
   const basis = data.basis && Number.isFinite(data.basis.points)
-    ? `${basisLabel} ${data.basis.points >= 0 ? "+" : ""}${formatNumber(data.basis.points)}${basisMonth}`
+    ? `${glossLink(basisLabel, "期指基差")} ${data.basis.points >= 0 ? "+" : ""}${formatNumber(data.basis.points)}${basisMonth}`
     : "";
   const events = (data.events || []).length
     ? `本週事件：${data.events.map((e) => `${String(e.date).slice(4, 6)}/${String(e.date).slice(6, 8)} ${escapeHtml(e.label)}`).join("、")}`
@@ -7471,9 +7483,9 @@ function swingDistributionLine(s) {
     const gross = s.profitFactor != null ? `（毛 ${s.profitFactor}）` : "";
     parts.push(`${glossLink("獲利因子")} ${net}${gross}`.replace(/\s+$/, ""));
   }
-  if (s.medianResultPctNet != null) parts.push(`中位 淨 ${signed(s.medianResultPctNet)}`);
-  else if (s.medianResultPct != null) parts.push(`中位 ${signed(s.medianResultPct)}`);
-  if (s.maxConsecutiveLossDays) parts.push(`最長連虧 ${s.maxConsecutiveLossDays} 天`);
+  if (s.medianResultPctNet != null) parts.push(`${glossLink("中位", "中位數與最長連虧")} 淨 ${signed(s.medianResultPctNet)}`);
+  else if (s.medianResultPct != null) parts.push(`${glossLink("中位", "中位數與最長連虧")} ${signed(s.medianResultPct)}`);
+  if (s.maxConsecutiveLossDays) parts.push(`${glossLink("最長連虧", "中位數與最長連虧")} ${s.maxConsecutiveLossDays} 天`);
   if (s.worstDay?.day) parts.push(`最差單日 ${String(s.worstDay.day).slice(4, 6)}/${String(s.worstDay.day).slice(6, 8)} ${signed(s.worstDay.avgResultPct)}（${s.worstDay.count} 筆）`);
   const wp = s.withPeriodicCall;
   const periodic = wp && Number(wp.resolved) > Number(s.continuousResolved ?? wp.resolved)
@@ -7489,7 +7501,7 @@ function swingNextOpenLine(nextOpen) {
   const rate = nextOpen.winRate != null ? `${nextOpen.winRate}%` : `${nextOpen.wins}/${nextOpen.resolved}`;
   const avg = nextOpen.avgResultPct != null ? `・平均 ${nextOpen.avgResultPct >= 0 ? "+" : ""}${nextOpen.avgResultPct}%` : "";
   const gap = Number(nextOpen.gapSkipped) > 0 ? `・跳空略過 ${Number(nextOpen.gapSkipped)}` : "";
-  return `<small class="sv-regime" title="同一批驗證單改以「第一個交易日的開盤價」當進場價重算（扣費稅後淨報酬 > 0 算勝）。訊號依賴收盤後才發布的整批收盤，真實進場多半是次日開盤，所以並陳這個口徑；只有 2026-09-05 之後推進的單有這個數字。「跳空略過」＝第一根開盤已在停損下方或目標上方、這個口徑裡不會進場的單，不進分母。">次日開盤進場 ${rate}（${nextOpen.resolved} 筆）${avg}${gap}</small>`;
+  return `<small class="sv-regime" title="同一批驗證單改以「第一個交易日的開盤價」當進場價重算（扣費稅後淨報酬 > 0 算勝）。訊號依賴收盤後才發布的整批收盤，真實進場多半是次日開盤，所以並陳這個口徑；只有 2026-09-05 之後推進的單有這個數字。「跳空略過」＝第一根開盤已在停損下方或目標上方、這個口徑裡不會進場的單，不進分母。">${glossLink("次日開盤進場")} ${rate}（${nextOpen.resolved} 筆）${avg}${gap}</small>`;
 }
 
 // 場景勝率依驗證單建立當天的大盤位階（季線上／下）分兩欄；未達最小樣本只給筆數。
@@ -7499,7 +7511,7 @@ function swingRegimeLine(byRegime) {
   const below = byRegime.belowMa60 || {};
   if (!(above.resolved || below.resolved)) return "";
   const part = (label, bucket) => `${label} ${bucket.winRate != null ? `${bucket.winRate}%` : `${bucket.wins || 0}/${bucket.resolved || 0}`}`;
-  return `<small class="sv-regime" title="以驗證單建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改選股。未達最小樣本只顯示筆數。">大盤${part("季線上", above)}・${part("季線下", below)}${byRegime.unknown?.resolved ? `・位階未知 ${byRegime.unknown.resolved} 筆` : ""}</small>`;
+  return `<small class="sv-regime" title="以驗證單建立當天的加權指數是否站在 60 日均線之上分層；同一批紀錄拆開看，不改選股。未達最小樣本只顯示筆數。">${glossLink("大盤", "大盤位階")}${part("季線上", above)}・${part("季線下", below)}${byRegime.unknown?.resolved ? `・位階未知 ${byRegime.unknown.resolved} 筆` : ""}</small>`;
 }
 
 function renderSwingVerifyPanel() {
@@ -13902,6 +13914,7 @@ const GLOSSARY = [
   { term: "大盤位階（季線上／下）", aliases: ["大盤位階", "位階", "季線上", "季線下", "月線上", "月線下"], cat: "成績單與決策", def: "加權指數收盤相對 20 日（月線）與 60 日（季線）均線的位置。只用來把成績單<strong>分層看</strong>（季線上／季線下各算一組），不是選股濾網——它不會改變任何選股結果。" },
   { term: "期指基差", aliases: ["基差", "夜盤 vs 現貨收盤", "夜盤"], cat: "成績單與決策", def: "台指期近月價格減加權指數。正數（正價差）通常代表期貨偏多、負數偏空。只有<strong>日盤</strong>同一交易日的數字才叫基差；15:00 後期交所給的是夜盤價，減 13:30 的現貨收盤等於「夜盤自己的漲跌＋基差」，畫面上會改標「夜盤 vs 現貨收盤」。結算週換月時基差會跳一個月的持有成本，所以合約月份一起顯示。" },
   { term: "建議張數與單筆風險 %", aliases: ["建議張數", "單筆風險", "部位控管", "資金"], cat: "成績單與決策", def: "風險預算＝風險本金 × 單筆風險% ÷ 100。每股近似損失＝進場價−結構停損價＋進場價 × 0.471%；整張初估上限為<strong>風險預算 ÷（每股近似損失 × 1000）</strong>，向下取整。實際估算再補買費超過已含進場價款 0.0855% 的差額；買費按價款 × 0.1425% × 目前折數四捨五入，並套最低買費。選出符合預算的整張數，不足一張才估零股。風險本金不代表可用現金；只有另填「可用現金」才檢查價款＋買費需款，未填時標示「資金未檢查」。這是停損情境估計，不保證成交或實際損失上限，未含跳空、滑價與流動性限制。風險本金與比例是本機偏好；可用現金只存本頁，重新整理或切換帳號會清空。" },
+  { term: "盤中曾達／曾破", aliases: ["曾達", "曾破", "曾達+2%", "曾破−2%", "盤中曾達"], cat: "成績單與決策", def: "觀察日的<strong>最高價曾碰到 +2%</strong>／<strong>最低價曾碰到 −2%</strong>——只是盤中曾觸及的價位（最大有利／不利幅度），<strong>不是可實現損益</strong>，兩者同一天可以同時成立。要在最高價出場是事後才知道的；真正能執行的是開盤賣或收盤賣的淨獲利率。" },
   { term: "次日開盤進場", aliases: ["次日開盤進場", "開盤進場", "跳空略過"], cat: "成績單與決策", def: "波段驗證的另一個口徑：同一批驗證單改以<strong>第一個交易日的開盤價</strong>當進場價重算。訊號要等收盤後的整批資料才算得出來，真實進場多半是次日開盤，所以並陳。開盤已經在停損下方或目標上方的單，這個口徑裡根本不會進場，記作「跳空略過」、不進分母。" },
 ];
 const glossaryState = { cat: "", q: "", screenQuery: false };
