@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v64";
+const APP_SHELL_VERSION = "stock1-shell-v65";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -4529,6 +4529,38 @@ const detailDesktopMedia = window.matchMedia("(min-width: 1040px)");
 // 手機明細 sheet 的狀態（M3）：full＝把手拉滿 92%（預設半屏 58%）；alertHelpOpen＝到價提醒的 ⓘ 說明是否展開。
 const detailSheetState = { full: false, alertHelpOpen: false };
 
+// 手機導覽（M5，2026-09-13）：底部預設 5 籤（盤中選股／處置看板收進「更多 → 手機介面」，7 籤保留為設定）、
+// 左右滑動切頁、加到主畫面。桌機側欄（.rail-nav）永遠 7 顆，不受這個設定影響。
+const NAV_TABS_KEY = "stock1.navTabs.v1";
+const NAV_HIDDEN_IN_5 = ["screener", "surveillance"];
+const pwaState = { deferredPrompt: null, installed: false };
+function navTabsMode() {
+  try {
+    return localStorage.getItem(NAV_TABS_KEY) === "7" ? "7" : "5";
+  } catch {
+    return "5";
+  }
+}
+function applyNavTabsMode() {
+  document.body.classList.toggle("is-nav-5", navTabsMode() === "5");
+}
+function isPhoneLayout() {
+  return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches;
+}
+// 底部導覽目前看得到的分頁順序（滑動切頁用）
+function visibleNavScreens() {
+  const hidden = navTabsMode() === "5" ? NAV_HIDDEN_IN_5 : [];
+  return [...document.querySelectorAll(".bottom-nav .nav-action")].map((button) => button.dataset.screen).filter((screen) => !hidden.includes(screen));
+}
+// 滑動切頁判定：位移 ≥ 70px、水平明顯大於垂直（1.5 倍）、600ms 內；被擋（橫向捲動區／輸入框／畫布／modal／明細開著）一律不算
+function resolveScreenSwipe({ dx, dy, elapsed, blocked }) {
+  if (blocked) return null;
+  if (elapsed > 600) return null;
+  if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.5) return null;
+  return dx < 0 ? "next" : "prev";
+}
+applyNavTabsMode();
+
 function isDesktopDetailLayout() {
   return detailDesktopMedia.matches;
 }
@@ -6028,6 +6060,42 @@ function appVersionSummary() {
   }
 }
 
+// 加到主畫面的狀態：已是獨立視窗＝已安裝；瀏覽器給了 beforeinstallprompt＝可安裝；iOS 只能走 Safari 分享；其餘瀏覽器沒提供入口。
+function pwaInstallSummary() {
+  const standalone = (typeof window.matchMedia === "function" && window.matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+  if (standalone || pwaState.installed) {
+    return { status: "已加到主畫面", tone: "is-good", body: "目前就是從主畫面開的獨立視窗；更新會在下次開啟時自動套用（更多 → 版本與更新）。" };
+  }
+  if (pwaState.deferredPrompt) {
+    return { status: "可安裝", tone: "is-good", body: `按下去會跳瀏覽器的安裝確認，之後桌面／主畫面會有「盤勢雷達」圖示，開起來沒有網址列。<br><button class="more-primary" type="button" data-pwa-install>加到主畫面</button>` };
+  }
+  if (/iP(hone|ad|od)/.test(navigator.userAgent || "")) {
+    return { status: "用 Safari 分享", tone: "", body: "iPhone／iPad：用 Safari 開這個網址 → 底下「分享」→「加入主畫面」。加進去之後會全螢幕、沒有網址列。" };
+  }
+  return { status: "瀏覽器未提供", tone: "", body: "Android／桌機的 Chrome、Edge 會在網址列或選單提供「安裝」；目前這個瀏覽器沒有給安裝入口。" };
+}
+
+function renderMobileSettingsPanel() {
+  const mode = navTabsMode();
+  const install = pwaInstallSummary();
+  return `
+    <div class="mobile-settings">
+      <h3>底部導覽</h3>
+      <p>手機（760px 以下）預設 5 籤：隔日沖、策略雷達、自選股、技術分析、更多；盤中選股與處置看板從這裡進。桌機側欄不受影響。</p>
+      <div class="mobile-nav-mode" role="group" aria-label="底部導覽籤數">
+        <button type="button" class="watch-secondary-action${mode === "5" ? " is-active" : ""}" data-nav-tabs="5" aria-pressed="${mode === "5" ? "true" : "false"}">5 籤</button>
+        <button type="button" class="watch-secondary-action${mode === "7" ? " is-active" : ""}" data-nav-tabs="7" aria-pressed="${mode === "7" ? "true" : "false"}">7 籤（全部放底部）</button>
+      </div>
+      <div class="mobile-go-screens" role="group" aria-label="收在更多裡的分頁">
+        <button type="button" class="watch-secondary-action" data-go-screen="screener">盤中選股</button>
+        <button type="button" class="watch-secondary-action" data-go-screen="surveillance">處置看板</button>
+      </div>
+      <p class="more-note">在內容區左右滑動可以切換底部分頁；表格、chips 這類橫向捲動的地方不會誤觸。</p>
+      <h3>加到主畫面 <em class="${install.tone}">${install.status}</em></h3>
+      <p>${install.body}</p>
+    </div>`;
+}
+
 function renderMorePanel() {
   const screen = document.querySelector('[data-screen-panel="more"]');
   const panel = screen?.querySelector(".settings-panel");
@@ -6137,6 +6205,13 @@ function renderMorePanel() {
       desc: "確認三台機器跑同一份 code",
       status: versionSummary.badge,
     },
+    {
+      key: "mobile",
+      icon: "smartphone",
+      title: "手機介面",
+      desc: "底部導覽籤數、滑動切頁、加到主畫面",
+      status: `${navTabsMode()} 籤・${pwaInstallSummary().status}`,
+    },
   ];
 
   summary.innerHTML = `
@@ -6157,9 +6232,9 @@ function renderMorePanel() {
     </div>
   `;
 
-  // 九顆 tile 分兩組：觀察者天天會碰的「看盤設定」在前，維護者才需要的「帳號與維護」在後。
+  // 十顆 tile 分兩組：觀察者天天會碰的「看盤設定」在前，維護者才需要的「帳號與維護」在後。
   const MORE_GROUPS = [
-    { title: "看盤設定", keys: ["glossary", "source", "risk", "alerts"] },
+    { title: "看盤設定", keys: ["glossary", "source", "risk", "alerts", "mobile"] },
     { title: "帳號與維護", keys: ["system", "backup", "brokerGuide", "notesFeed", "version"] },
   ];
   const renderTile = (item) => `
@@ -6177,6 +6252,7 @@ function renderMorePanel() {
     .join("");
 
   const details = {
+    mobile: renderMobileSettingsPanel(),
     source: `
       <header>
         <span class="more-kicker">目前狀態</span>
@@ -12569,6 +12645,38 @@ function showToast(message, duration, replaceKey) {
   }, holdMs);
 }
 
+// 切換主畫面（底部導覽、桌機側欄、更多頁入口、滑動切頁共用）：推 history、清自選編輯態、該頁需要時補載資料。
+function activateScreen(screen) {
+  if (!screen) return;
+  if (state.screen !== screen) {
+    try {
+      history.pushState({ view: "screen", screen }, "");
+    } catch {
+      // 歷史 API 不可用時仍正常切換畫面。
+    }
+  }
+  state.screen = screen;
+  if (state.screen !== "watchlist") {
+    state.watchEditMode = false;
+    clearWatchSelection();
+  }
+  if (state.screen === "screener" && state.universe === "overnight") {
+    state.universe = "strong";
+    state.sort = "strategy";
+    state.sortDir = "desc";
+  }
+  render();
+  if (state.screen === "technical" && technicalNeedsReload()) {
+    loadTechnicalAnalysis();
+  }
+  if (state.screen === "strategy" && strategyNeedsReload()) {
+    loadStrategyBoard();
+  }
+  if (state.screen === "surveillance" && surveillanceNeedsReload()) {
+    loadSurveillanceBoard();
+  }
+}
+
 function updateActiveNav() {
   document.querySelectorAll(".nav-action").forEach((button) => {
     const active = button.dataset.screen === state.screen;
@@ -12576,6 +12684,9 @@ function updateActiveNav() {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
+  // 5 籤模式下盤中選股／處置看板收在「更多」：在這兩頁時底部的「更多」亮起當代理（桌機側欄不套）
+  const proxy = navTabsMode() === "5" && NAV_HIDDEN_IN_5.includes(state.screen);
+  document.querySelectorAll('.bottom-nav .nav-action[data-screen="more"]').forEach((button) => button.classList.toggle("is-active-proxy", proxy));
   document.querySelectorAll(".screen").forEach((screen) => {
     screen.classList.toggle("is-active", screen.dataset.screenPanel === state.screen);
   });
@@ -13288,6 +13399,28 @@ document.addEventListener("input", (event) => {
 
 // 到價提醒的刪除（detail 面板與「更多 → 訊號提醒」兩處共用同一個 data 屬性）。
 document.addEventListener("click", (event) => {
+  // 手機導覽（M5）：底部籤數 5／7；加到主畫面（只在瀏覽器給了 beforeinstallprompt 時才有這顆鈕）
+  const navTabs = event.target.closest("[data-nav-tabs]");
+  if (navTabs) {
+    try {
+      localStorage.setItem(NAV_TABS_KEY, navTabs.dataset.navTabs === "7" ? "7" : "5");
+    } catch {
+      // 私密視窗存不了也照樣切換這一次
+    }
+    applyNavTabsMode();
+    render();
+    return;
+  }
+  if (event.target.closest("[data-pwa-install]")) {
+    const prompt = pwaState.deferredPrompt;
+    if (!prompt) return;
+    pwaState.deferredPrompt = null;
+    Promise.resolve(prompt.prompt()).then(() => prompt.userChoice).then((choice) => {
+      if (choice?.outcome === "accepted") pwaState.installed = true;
+      renderLiveDataUpdate();
+    }).catch(() => renderLiveDataUpdate());
+    return;
+  }
   // 手機逐日表（M4）：› 展開單日其餘欄位（只改 DOM＋記進 Set，不整頁重繪）；「顯示更早」一次 +20 天
   const verifyToggle = event.target.closest("[data-verify-toggle]");
   if (verifyToggle) {
@@ -13799,33 +13932,13 @@ document.addEventListener("click", async (event) => {
 
   const nav = event.target.closest(".nav-action");
   if (nav) {
-    if (state.screen !== nav.dataset.screen) {
-      try {
-        history.pushState({ view: "screen", screen: nav.dataset.screen }, "");
-      } catch {
-        // 歷史 API 不可用時仍正常切換畫面。
-      }
-    }
-    state.screen = nav.dataset.screen;
-    if (state.screen !== "watchlist") {
-      state.watchEditMode = false;
-      clearWatchSelection();
-    }
-    if (state.screen === "screener" && state.universe === "overnight") {
-      state.universe = "strong";
-      state.sort = "strategy";
-      state.sortDir = "desc";
-    }
-    render();
-    if (state.screen === "technical" && technicalNeedsReload()) {
-      loadTechnicalAnalysis();
-    }
-    if (state.screen === "strategy" && strategyNeedsReload()) {
-      loadStrategyBoard();
-    }
-    if (state.screen === "surveillance" && surveillanceNeedsReload()) {
-      loadSurveillanceBoard();
-    }
+    activateScreen(nav.dataset.screen);
+    return;
+  }
+  // 「更多 → 手機介面」的盤中選股／處置看板入口（5 籤模式下這兩頁不在底部導覽）
+  const goScreen = event.target.closest("[data-go-screen]");
+  if (goScreen) {
+    activateScreen(goScreen.dataset.goScreen);
     return;
   }
 
@@ -14102,6 +14215,53 @@ function setDetailSheetFull(full) {
   header.addEventListener("pointerup", finish);
   header.addEventListener("pointercancel", finish);
 })();
+
+// 左右滑動切換底部分頁（M5）：只吃 touch、只在 ≤760px；main.workspace 在手機設 touch-action: pan-y，
+// 瀏覽器才不會把水平滑動當成捲動而發 pointercancel。橫向捲動區（chips、表格）自己實作手勢，不受影響。
+function swipeBlockedAt(target) {
+  if (!(target instanceof Element)) return true;
+  if (target.closest("input, textarea, select, canvas, [contenteditable], .modal-backdrop, .detail-panel")) return true;
+  if (typeof topDialogLayer === "function" && topDialogLayer()) return true;
+  if (el.detailPanel?.classList.contains("is-open") && !isDesktopDetailLayout()) return true;
+  for (let node = target; node && node !== document.body; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (/(auto|scroll)/.test(style.overflowX) && node.scrollWidth > node.clientWidth + 1) return true;
+  }
+  return false;
+}
+(() => {
+  const main = document.querySelector("main.workspace");
+  if (!main) return;
+  let swipe = null;
+  main.addEventListener("pointerdown", (event) => {
+    if (event.pointerType !== "touch" || !isPhoneLayout()) { swipe = null; return; }
+    swipe = { id: event.pointerId, x: event.clientX, y: event.clientY, at: Date.now(), blocked: swipeBlockedAt(event.target) };
+  }, { passive: true });
+  main.addEventListener("pointerup", (event) => {
+    if (!swipe || event.pointerId !== swipe.id) return;
+    const gesture = resolveScreenSwipe({ dx: event.clientX - swipe.x, dy: event.clientY - swipe.y, elapsed: Date.now() - swipe.at, blocked: swipe.blocked });
+    swipe = null;
+    if (!gesture) return;
+    const screens = visibleNavScreens();
+    const index = screens.indexOf(state.screen);
+    if (index < 0) return;
+    const target = screens[index + (gesture === "next" ? 1 : -1)];
+    if (target) activateScreen(target);
+  }, { passive: true });
+  main.addEventListener("pointercancel", () => { swipe = null; }, { passive: true });
+})();
+
+// PWA 安裝：留住 beforeinstallprompt，等使用者在「更多 → 手機介面」按下才 prompt（不在開頁時跳）
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  pwaState.deferredPrompt = event;
+  renderLiveDataUpdate();
+});
+window.addEventListener("appinstalled", () => {
+  pwaState.deferredPrompt = null;
+  pwaState.installed = true;
+  renderLiveDataUpdate();
+});
 
 document.getElementById("watchToggle").addEventListener("click", () => {
   const stock = getSelectedStock();

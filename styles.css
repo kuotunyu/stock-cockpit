@@ -10472,3 +10472,21 @@ details[data-overnight-warnings-fold] > .overnight-warning {
   .hold-strip small { color: var(--muted-2); font-size: var(--fs-badge); }
   .hold-summary > [data-hold-kpi="value"], .hold-summary > [data-hold-kpi="unrealized"] { display: none; }
 }
+
+/* ===== 手機導覽 5 籤、滑動切頁、更多→手機介面（M5，2026-09-13）===== */
+@media (max-width: 760px) {
+  /* 預設 5 籤：盤中選股／處置看板收進「更多」；每籤 75px，標籤可回到 13px（7 籤時 12.5px 是不裁的上限） */
+  body.is-nav-5 .bottom-nav { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  body.is-nav-5 .bottom-nav .nav-action[data-screen="screener"],
+  body.is-nav-5 .bottom-nav .nav-action[data-screen="surveillance"] { display: none; }
+  body.is-nav-5 .bottom-nav .nav-action { font-size: 13px; }
+  body.is-nav-5 .bottom-nav .nav-action.is-active-proxy { color: var(--orange); }
+  /* 水平滑動交給自己的手勢（切頁），垂直捲動與縮放照舊；橫向捲動區自己實作 pan-x，不受影響 */
+  main.workspace { touch-action: pan-y pinch-zoom; }
+}
+.mobile-settings h3 { margin: 12px 0 6px; font-size: 17px; }
+.mobile-settings h3:first-child { margin-top: 0; }
+.mobile-settings h3 em { margin-left: 8px; font-style: normal; font-size: var(--fs-note); color: var(--muted-2); }
+.mobile-settings h3 em.is-good { color: var(--ok-text); }
+.mobile-nav-mode, .mobile-go-screens { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+.mobile-nav-mode .watch-secondary-action.is-active { border-color: var(--orange); color: var(--orange-2); }

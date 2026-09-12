@@ -34,7 +34,7 @@ test("topbar 有 44px 的「這一頁是什麼」鈕，開名詞解釋的「畫�
   assert.ok(classes.includes("icon-button") && classes.includes("screen-help"), classes.join(" "));
 });
 
-test("更多頁：九顆 tile 分「看盤設定」「帳號與維護」兩組；靜態殼也已補齊九顆", () => {
+test("更多頁：十顆 tile 分「看盤設定」「帳號與維護」兩組；靜態殼也已補齊十顆", () => {
   const result = json(`(() => {
     const shell = document.querySelectorAll(".settings-panel [data-setting]").length;
     state.screen = "more";
@@ -43,9 +43,9 @@ test("更多頁：九顆 tile 分「看盤設定」「帳號與維護」兩組�
     const order = [...document.querySelectorAll(".settings-panel [data-setting]")].map((b) => b.dataset.setting);
     return { shell, groups, order };
   })()`);
-  assert.equal(result.shell, 9, "JS 載入前的殼就要有九顆，避免載入後跳動");
+  assert.equal(result.shell, 10, "JS 載入前的殼就要有十顆，避免載入後跳動");
   assert.deepEqual(result.groups, ["看盤設定", "帳號與維護"]);
-  assert.deepEqual(result.order, ["glossary", "source", "risk", "alerts", "system", "backup", "brokerGuide", "notesFeed", "version"]);
+  assert.deepEqual(result.order, ["glossary", "source", "risk", "alerts", "mobile", "system", "backup", "brokerGuide", "notesFeed", "version"]);
 });
 
 test("讀屏：明細與更多頁的內容區不再 aria-live；toast 每則 role=status、容器不重唸整堆", () => {

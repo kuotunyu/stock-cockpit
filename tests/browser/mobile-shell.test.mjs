@@ -284,6 +284,76 @@ test("375px 成績單逐日表一天一行＋展開＋顯示更早、策略卡�
   }
 });
 
+test("375px 底部導覽 5 籤每籤 ≥ 72px、左右滑動切頁、明細開著與橫向捲動區不切、更多可切回 7 籤（M5）", { timeout: 120_000 }, async () => {
+  const fixture = await createBrowserFixture({ scenario: "populated" });
+  try {
+    const { page } = fixture;
+    await page.setViewportSize({ width: 375, height: 812 });
+    // fixture 為了既有測試先種了 7 籤；這裡清掉，驗的是沒有旗標時的預設（5 籤）
+    await page.evaluate(() => { localStorage.removeItem("stock1.navTabs.v1"); applyNavTabsMode(); render(); });
+    await page.waitForTimeout(500);
+    const nav = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll(".bottom-nav .nav-action")];
+      const shown = buttons.filter((b) => b.getBoundingClientRect().width > 0);
+      return { total: buttons.length, shown: shown.map((b) => ({ screen: b.dataset.screen, width: Math.round(b.getBoundingClientRect().width), height: Math.round(b.getBoundingClientRect().height), font: getComputedStyle(b).fontSize })),
+        touchAction: getComputedStyle(document.querySelector("main.workspace")).touchAction, theme: document.querySelector('meta[name="theme-color"]')?.content };
+    });
+    assert.equal(nav.total, 7, "DOM 仍 7 顆");
+    assert.deepEqual(nav.shown.map((s) => s.screen), ["overnight", "strategy", "watchlist", "technical", "more"]);
+    assert.ok(nav.shown.every((s) => s.width >= 72 && s.height >= 44), `每籤 ≥ 72px：${JSON.stringify(nav.shown)}`);
+    assert.ok(nav.shown.every((s) => parseFloat(s.font) >= 13), "5 籤時標籤回到 13px");
+    assert.match(nav.touchAction, /pan-y/, "內容區水平滑動交給切頁手勢");
+    assert.equal(nav.theme, "#1f2123", "狀態列色跟頂欄一致");
+    // 合成 touch pointer 事件模擬滑動（Playwright 的 touchscreen 只有 tap）
+    const swipe = (fromX, toX, y, selector) => page.evaluate(({ fromX, toX, y, selector }) => {
+      const target = selector ? document.querySelector(selector) : document.querySelector("main.workspace");
+      const fire = (type, x) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 9, pointerType: "touch", isPrimary: true, clientX: x, clientY: y }));
+      fire("pointerdown", fromX); fire("pointermove", (fromX + toX) / 2); fire("pointerup", toX);
+      return Boolean(target);
+    }, { fromX, toX, y, selector });
+    await swipe(300, 120, 420);
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => state.screen), "strategy", "向左滑到下一頁（策略雷達，跳過收起來的盤中選股）");
+    await swipe(100, 300, 420);
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => state.screen), "overnight", "向右滑回上一頁");
+    // 起點在橫向捲動區（分群卡的條件 chips）不切
+    const scroller = await page.evaluate(() => {
+      const node = [...document.querySelectorAll('[data-screen-panel="overnight"] *')].find((n) => /(auto|scroll)/.test(getComputedStyle(n).overflowX) && n.scrollWidth > n.clientWidth + 1 && n.getBoundingClientRect().height > 0);
+      if (!node) return null;
+      node.id = node.id || "m5-scroller";
+      return "#" + node.id;
+    });
+    if (scroller) {
+      await swipe(300, 120, 420, scroller);
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => state.screen), "overnight", "橫向捲動區上的滑動不切頁");
+    }
+    // 明細開著不切
+    await page.locator('.bottom-nav .nav-action[data-screen="watchlist"]').click();
+    await page.locator('[data-screen-panel="watchlist"] .quote-stock-open').first().click();
+    await page.locator("#detailPanel.is-open").waitFor({ state: "visible" });
+    await swipe(300, 120, 200);
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => state.screen), "watchlist", "明細開著時不切頁");
+    await page.keyboard.press("Escape");
+    await page.locator("#detailPanel.is-open").waitFor({ state: "detached" });
+    // 更多 → 手機介面 → 7 籤
+    await page.locator('.bottom-nav .nav-action[data-screen="more"]').click();
+    await page.locator('[data-setting="mobile"]').click();
+    await page.locator('[data-nav-tabs="7"]').click();
+    await page.waitForTimeout(300);
+    const seven = await page.evaluate(() => [...document.querySelectorAll(".bottom-nav .nav-action")].filter((b) => b.getBoundingClientRect().width > 0).map((b) => Math.round(b.getBoundingClientRect().width)));
+    assert.equal(seven.length, 7, "切 7 籤後全部放底部");
+    assert.ok(seven.every((w) => w >= 50), seven.join("/"));
+    await page.locator('[data-nav-tabs="5"]').click();
+    await page.waitForTimeout(200);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll(".bottom-nav .nav-action")].filter((b) => b.getBoundingClientRect().width > 0).length), 5);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("底部導覽留 safe-area、viewport 用 viewport-fit=cover", () => {
   const css = readFileSync(new URL("../../styles.css", import.meta.url), "utf8");
   const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");

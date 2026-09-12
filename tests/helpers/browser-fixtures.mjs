@@ -405,6 +405,9 @@ export async function createBrowserFixture({ scenario, setupFailure } = {}) {
     if (scenario === "expired-session") {
       await page.addInitScript(() => localStorage.setItem("stock1.hadSession.v1", "1"));
     }
+    // 手機底部導覽（M5）預設 5 籤，盤中選股／處置看板收進「更多」；既有 browser 測試都用 visibleNav 直接點這兩籤，
+    // 所以 fixture 先種 7 籤。M5 的測試（mobile-shell）自己清掉旗標驗預設 5 籤。
+    await page.addInitScript(() => localStorage.setItem("stock1.navTabs.v1", "7"));
     const allowedOrigin = new URL(server.baseUrl).origin;
     await page.route("**/*", async (route) => {
       const request = route.request();
