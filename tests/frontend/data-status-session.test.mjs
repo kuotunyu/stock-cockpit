@@ -65,7 +65,7 @@ test("S4 open：四個出口的盤中字串與舊版完全相同", () => {
   const view = renderWithPhase("open");
   assert.equal(view.status, "官方行情 ・ 即時 118 檔（2 檔為收盤價） ・ 10:12:33 更新");
   assert.match(view.title, /每 10 秒自動更新/);
-  assert.equal(view.sourceMeta, "官方 / 即時 118 / 備援 2 / 10:12:33");
+  assert.equal(view.sourceMeta, "官方 / 即時 118 檔 / 備援 2 檔 / 10:12:33");
   assert.match(view.trust, /即時 118 檔 \/ 收盤備援 2 檔/);
   assert.equal(view.more, "118 檔即時 / 2 檔收盤備援");
   restorePhase();
@@ -96,7 +96,7 @@ test("S2 after-close（多數行情日是今天）：改稱今日收盤與取得
   assert.doesNotMatch(view.status, /10:12:33 更新/);
   assert.match(view.title, /已收盤/);
   assert.doesNotMatch(view.title, /每 10 秒自動更新/);
-  assert.equal(view.sourceMeta, "官方 / 今日收盤 118 / 備援 2 / 10:12:33");
+  assert.equal(view.sourceMeta, "官方 / 今日收盤 118 檔 / 備援 2 檔 / 10:12:33");
   assert.match(view.trust, /今日收盤 118 檔 \/ 收盤備援 2 檔/);
   assert.equal(view.more, "118 檔今日收盤 / 2 檔收盤備援");
   restorePhase();
@@ -111,7 +111,7 @@ test("S2b after-close 但整批未更新（多數行情日是三天前）：按�
   assert.match(view.status, /最近行情 07\/08 ・ 120 檔/);
   assert.doesNotMatch(view.status, /今日收盤/);
   assert.match(view.title, /不是今天/);
-  assert.equal(view.sourceMeta, "官方 / 最近行情 07/08 120 / 10:12:33");
+  assert.equal(view.sourceMeta, "官方 / 最近行情 07/08 120 檔 / 10:12:33");
   assert.match(view.more, /120 檔最近行情（07\/08）/);
   restorePhase();
 });
@@ -136,7 +136,7 @@ test("S3 pre-open／weekend：顯示最近行情與多數行情日，不出現�
   assert.match(pre.status, /10:12:33 取得/);
   assert.doesNotMatch(pre.status, /即時/);
   assert.match(pre.title, /尚未開盤/);
-  assert.match(pre.sourceMeta, /最近行情 07\/08 120/);
+  assert.match(pre.sourceMeta, /最近行情 07\/08 120 檔/);
   assert.match(pre.trust, /最近行情 07\/08 ・ 120 檔/);
   assert.equal(pre.more, "120 檔最近行情（07/08）");
   const weekend = renderWithPhase("weekend", {}, seed);

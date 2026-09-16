@@ -10499,6 +10499,8 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 .detail-surv-link:hover { color: var(--text); border-color: var(--muted); }
 .detail-surv p { margin: 0; font-size: var(--fs-body); line-height: 1.55; color: var(--text); }
 .detail-surv p strong { display: inline-block; margin-right: 6px; color: var(--warn-text); font-weight: 800; }
+.detail-surv-list { margin: -2px 0 0; padding-left: 1.3em; display: grid; gap: 4px; font-size: var(--fs-body); line-height: 1.55; color: var(--text); }
+.detail-surv-list li b { margin-right: 6px; color: var(--warn-text); font-weight: 800; }
 .detail-surv:has(.surv-tag.is-disposition) p strong { color: var(--up-text); }
 @media (max-width: 760px) {
   .detail-surv { margin: 0 10px 6px; padding: 8px 10px; }

@@ -55,3 +55,29 @@ test("明細面板：注意股列「為什麼」（官方原文）與「要注�
   const escaped = json(`(() => { renderDetailSurveillance({ code: "1", surveillance: { kind: "attention", label: "注意", reason: "<img src=x onerror=alert(1)>" } }); return el.detailSurveillance.querySelectorAll("img").length; })()`);
   assert.equal(escaped, 0, "官方原文一律 escapeHtml");
 });
+
+test("注意理由逐條：在「(第X款)」處切開、全形括號也認、沒有款號原樣一段；兩款以上明細改成一款一條", () => {
+  const multi = "最近六個營業日(含當日)累積之最後成交價漲幅達35.88%(第一款)最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達110.4%(第二款)當日週轉率達47.57%(第四款)";
+  assert.deepEqual(json(`splitAttentionReason(${JSON.stringify(multi)})`), [
+    { clause: "第一款", text: "最近六個營業日(含當日)累積之最後成交價漲幅達35.88%" },
+    { clause: "第二款", text: "最近三十個營業日(含當日)起迄兩個營業日之最後成交價漲幅達110.4%" },
+    { clause: "第四款", text: "當日週轉率達47.57%" },
+  ]);
+  assert.deepEqual(json(`splitAttentionReason("最近六個營業日之當日沖銷成交量占總成交量比率達61.24%，前一日達65.03%（第十三款)")`), [
+    { clause: "第十三款", text: "最近六個營業日之當日沖銷成交量占總成交量比率達61.24%，前一日達65.03%" },
+  ]);
+  assert.deepEqual(json(`splitAttentionReason("當日週轉率達 10.03%(第六款)")`), [{ clause: "第六款", text: "當日週轉率達 10.03%" }]);
+  assert.deepEqual(json(`splitAttentionReason("沒有款號的說明")`), [{ clause: "", text: "沒有款號的說明" }]);
+  assert.deepEqual(json(`splitAttentionReason("")`), []);
+  const rendered = json(`(() => {
+    renderDetailSurveillance({ code: "3467", surveillance: { kind: "attention", label: "注意", reason: ${JSON.stringify(multi)}, count: 1 } });
+    const box = el.detailSurveillance;
+    return { items: [...box.querySelectorAll(".detail-surv-list li")].map((li) => li.textContent), whyText: box.querySelector(".detail-surv-why").textContent.trim() };
+  })()`);
+  assert.equal(rendered.items.length, 3);
+  assert.match(rendered.items[0], /^第一款最近六個營業日/);
+  assert.equal(rendered.whyText, "為什麼", "多款時標籤列只留「為什麼」，內容在清單裡");
+  const single = json(`(() => { renderDetailSurveillance({ code: "2330", surveillance: { kind: "attention", label: "注意", reason: "當日週轉率達 10.03%(第六款)" } }); return { list: el.detailSurveillance.querySelectorAll(".detail-surv-list").length, text: el.detailSurveillance.querySelector(".detail-surv-why").textContent }; })()`);
+  assert.equal(single.list, 0, "只有一款維持一段");
+  assert.match(single.text, /第六款/);
+});

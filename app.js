@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v68";
+const APP_SHELL_VERSION = "stock1-shell-v69";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -4875,7 +4875,7 @@ function describeQuoteBatch(phase = getQuoteSessionPhase()) {
     return {
       phase, noun: "即時", count: realtime, fallback, fallbackNoun: "收盤價", verb: "更新", dateLabel: "",
       statusCount: `即時 ${realtime} 檔${fallback ? `（${fallback} 檔為收盤價）` : ""}`,
-      sourceMeta: `即時 ${realtime}${fallback ? ` / 備援 ${fallback}` : ""}`,
+      sourceMeta: `即時 ${realtime} 檔${fallback ? ` / 備援 ${fallback} 檔` : ""}`,
       trustDetail: `即時 ${realtime} 檔 / 收盤備援 ${fallback} 檔`,
       moreDetail: `${realtime} 檔即時 / ${fallback} 檔收盤備援`,
     };
@@ -4884,7 +4884,7 @@ function describeQuoteBatch(phase = getQuoteSessionPhase()) {
     return {
       phase, noun: "今日收盤", count: realtime, fallback, fallbackNoun: "收盤備援", verb: "取得", dateLabel: compactDateLabel(todayIso),
       statusCount: `今日收盤 ${realtime} 檔${fallback ? `（${fallback} 檔為收盤備援）` : ""}`,
-      sourceMeta: `今日收盤 ${realtime}${fallback ? ` / 備援 ${fallback}` : ""}`,
+      sourceMeta: `今日收盤 ${realtime} 檔${fallback ? ` / 備援 ${fallback} 檔` : ""}`,
       trustDetail: `今日收盤 ${realtime} 檔 / 收盤備援 ${fallback} 檔`,
       moreDetail: `${realtime} 檔今日收盤 / ${fallback} 檔收盤備援`,
     };
@@ -4895,7 +4895,7 @@ function describeQuoteBatch(phase = getQuoteSessionPhase()) {
   return {
     phase, noun, count, fallback: 0, fallbackNoun: "", verb: "取得", dateLabel,
     statusCount: `${noun} ・ ${count} 檔`,
-    sourceMeta: `${noun} ${count}`,
+    sourceMeta: `${noun} ${count} 檔`,
     trustDetail: `${noun} ・ ${count} 檔`,
     moreDetail: `${count} 檔最近行情${dateLabel ? `（${dateLabel}）` : ""}`,
   };
@@ -6097,7 +6097,7 @@ function renderMorePanel() {
       key: "mobile",
       icon: "smartphone",
       title: "手機介面",
-      desc: "底部導覽籤數、滑動切頁、加到主畫面",
+      desc: "底部籤數、滑動切頁、加到主畫面",
       status: `${navTabsMode()} 籤・${pwaInstallSummary().status}`,
     },
   ];
@@ -11685,6 +11685,24 @@ function getDetailScreenContext(stock) {
 
 // 明細面板的「注意／處置／全額交割」說明（2026-09-16 使用者問「為什麼注意？要注意什麼？」）：
 // 為什麼＝交易所公布的原文（注意交易資訊／處置期間），要注意什麼＝白話講交易限制與升級風險。只顯示、不下判斷。
+// 交易所的注意交易資訊原文常把多款黏成一段（「…漲幅達35.88%(第一款)最近三十個營業日…(第二款)…(第四款)」），
+// 在「(第X款)」處切成一款一條；沒有款號的原文原樣一段。只切字串、不改內容。
+function splitAttentionReason(text) {
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  if (!source) return [];
+  const marker = /[（(]第[一二三四五六七八九十百]+款[)）]/g;
+  const trim = (part) => part.replace(/^[、，,;；。 ]+|[、，,;；。 ]+$/g, "");
+  const items = [];
+  let last = 0;
+  for (const match of source.matchAll(marker)) {
+    items.push({ clause: match[0].slice(1, -1), text: trim(source.slice(last, match.index)) });
+    last = match.index + match[0].length;
+  }
+  const tail = trim(source.slice(last));
+  if (tail) items.push({ clause: "", text: tail });
+  return items.filter((item) => item.text || item.clause);
+}
+
 function renderDetailSurveillance(stock) {
   const box = el.detailSurveillance;
   if (!box) return;
@@ -11697,13 +11715,21 @@ function renderDetailSurveillance(stock) {
   box.hidden = false;
   const stats = [];
   let why = "";
+  let whyList = "";
   let what = "";
   if (info.kind === "attention") {
     if (Number(info.count) > 1) stats.push(`累計 ${info.count} 次`);
     if (Number(info.daysOnList) > 1) stats.push(`連 ${info.daysOnList} 天`);
-    why = info.reason
-      ? escapeHtml(info.reason)
-      : "交易所今天把它列入「注意交易資訊」（這筆名單沒附具體條款文字）。";
+    const reasonItems = splitAttentionReason(info.reason);
+    if (reasonItems.length >= 2) {
+      // 多款：標籤列只留「為什麼」，下面一款一條
+      whyList = `<ol class="detail-surv-list">${reasonItems.map((item) => `<li>${item.clause ? `<b>${escapeHtml(item.clause)}</b>` : ""}${escapeHtml(item.text)}</li>`).join("")}</ol>`;
+      why = " ";
+    } else {
+      why = info.reason
+        ? escapeHtml(info.reason)
+        : "交易所今天把它列入「注意交易資訊」（這筆名單沒附具體條款文字）。";
+    }
     what = "注意股本身還沒有交易限制，但它是「處置」的前一步：累計次數多或連續多日，交易所可能改列處置——分盤撮合（每 5 或 20 分鐘才成交一次）、買賣先預收款券、多半不能當沖，到時想賣不一定賣得到你要的價位。追高前先想好停損。";
   } else if (info.kind === "disposition") {
     if (Number.isFinite(info.daysToRelease)) stats.push(info.releaseOnNextTradingDay ? "下一交易日出關" : `還有 ${info.daysToRelease} 天出關`);
@@ -11721,7 +11747,7 @@ function renderDetailSurveillance(stock) {
       ${stats.length ? `<small>${escapeHtml(stats.join("・"))}</small>` : ""}
       <button type="button" class="detail-surv-link" data-go-screen="surveillance">處置看板 ›</button>
     </div>
-    ${why ? `<p class="detail-surv-why"><strong>為什麼</strong>${why}</p>` : ""}
+    ${why ? `<p class="detail-surv-why"><strong>為什麼</strong>${why.trim()}</p>` : ""}${whyList}
     ${what ? `<p class="detail-surv-what"><strong>要注意什麼</strong>${what}</p>` : ""}`;
 }
 

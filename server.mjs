@@ -6977,6 +6977,20 @@ function attentionEntry(code, count, date, reason) {
   const text = String(reason || "").replace(/\s+/g, " ").trim();
   return `${code}|${Math.max(1, Number(count) || 1)}|${toCompactDate(date) || ""}|${text}`;
 }
+// 連續被列天數：只沿著相鄰「排定交易日」的歷史快照往回數（處置看板與風險名單共用）；漏開一天或週末快照都不虛增。
+function consecutiveListDays(history, today, holidayRows, code, field) {
+  let n = 1;
+  let cursor = today;
+  for (let step = 0; step < 45; step += 1) {
+    cursor = previousScheduledTradingDate(cursor, holidayRows || []);
+    if (!cursor) break;
+    const snap = history?.[cursor];
+    if (!snap) break;
+    const inIt = field === "attention" ? !!(snap.attention && code in snap.attention) : (snap[field] || []).includes(code);
+    if (inIt) n += 1; else break;
+  }
+  return n;
+}
 function attentionInfoFromEntry(info, parts) {
   const count = Math.max(1, Number(parts[1]) || 1);
   const noticeDate = /^\d{8}$/.test(parts[2] || "") ? parts[2] : "";
@@ -7171,6 +7185,17 @@ async function loadRiskSets(riskDate) {
     }),
   ]);
   saveRiskSourceMemory();
+  // 注意股「連 N 天」（2026-09-16）：與處置看板同一套算法，只讀已落盤的歷史快照（不寫、不抓網路）；
+  // 交易日曆沒快取就只用週末規則。以前只有從技術分析頁進明細才看得到，清單頁進來只有累計次數。
+  try {
+    const history = await loadSurveillanceHistory();
+    const holidayRows = tradingCalendarCache.value?.holidayRows || [];
+    for (const [code, info] of surveillance) {
+      if (info.kind === "attention") surveillance.set(code, { ...info, daysOnList: consecutiveListDays(history, riskDate, holidayRows, code, "attention") });
+    }
+  } catch {
+    // 歷史快照讀不到就沒有連續天數，其餘標籤照常
+  }
 
   riskCache = {
     key,
@@ -7650,19 +7675,7 @@ async function getSurveillanceBoard(dateCompact) {
     comparisonAsOf && resolveNextTradingDate(comparisonAsOf, tradingCalendar).date === today
   );
   // 連續天數只沿著相鄰「排定交易日」快照往回數；漏開一天或週末快照都不能虛增連續日。
-  const consecutiveDays = (code, field) => {
-    let n = 1;
-    let cursor = today;
-    for (let step = 0; step < 45; step += 1) {
-      cursor = previousScheduledTradingDate(cursor, tradingCalendar.holidayRows);
-      if (!cursor) break;
-      const snap = history[cursor];
-      if (!snap) break;
-      const inIt = field === "attention" ? !!(snap.attention && code in snap.attention) : (snap[field] || []).includes(code);
-      if (inIt) n += 1; else break;
-    }
-    return n;
-  };
+  const consecutiveDays = (code, field) => consecutiveListDays(history, today, tradingCalendar.holidayRows, code, field);
   const dispItems = [...aboutToDispose, ...inDisposition]; // aboutToRelease 與 inDisposition 共用同一批物件
   const dispCodesToday = new Set(dispItems.map((i) => i.code));
   const newLabelFor = () => (comparisonIsPreviousTradingDay ? "今日新進" : `較 ${compactToIsoDate(comparisonAsOf)} 新增`);
@@ -17064,7 +17077,7 @@ export {
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime, taiexPeriodBenchmark, REGIME_NEAR_MA60_BAND, openEntryReturnOf, dedupeRowsByCode, openEntryNetSummary, overnightMetricCoverage, aggregateOvernightRecords,
-  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureEvidence, publicSignalsView, resolveTradePlanSource, authoritativeBenchmarkCaptures, attentionEntry, attentionInfoFromEntry,
+  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureEvidence, publicSignalsView, resolveTradePlanSource, authoritativeBenchmarkCaptures, attentionEntry, attentionInfoFromEntry, consecutiveListDays,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
   runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,
