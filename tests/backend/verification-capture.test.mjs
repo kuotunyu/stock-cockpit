@@ -7,6 +7,8 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { SERVER_PATH } from '../helpers/test-server.mjs';
 import { importServer } from '../helpers/test-server.mjs';
+import { readCaptureCandidates } from '../../verification-evidence.mjs';
+const cands=m=>readCaptureCandidates(m);
 import { surveillanceRoutes, fundamentalsRoutes, stockDayAllRow, tpexDailyCloseRow, compactTradingDay, compactToday, rocSlash } from '../helpers/fixtures.mjs';
 const {mod,mock,dataDir}=await importServer();
 after(async()=>{await mod.flushPersistence();mock.restore();await rm(dataDir,{recursive:true,force:true});});
@@ -21,7 +23,7 @@ test('完整零訊號保留掃描候選；後到revision不能取代首次manife
   const db={};const body=source(); const p=mod.publishVerification(db,'overnight',body);
   assert.ok(db.verificationCaptures?.[p.captureId],'同次發布應寫入manifest');
   const m=structuredClone(db.verificationCaptures[p.captureId]);
-  assert.equal(m.status,'complete-zero');assert.equal(m.candidates[0].price,100);assert.equal(m.candidates[0].candidateRank,1);
+  assert.equal(m.status,'complete-zero');assert.equal(cands(m)[0].price,100);assert.equal(cands(m)[0].candidateRank,1);
   body.candidatePool[0].price=200;
   const correction=mod.publishVerification(db,'overnight',body);
   assert.equal(correction.kind,'correction');assert.deepEqual(db.verificationCaptures[p.captureId],m);
@@ -52,7 +54,7 @@ test('兩個真實builder把全上游失敗保留failed manifest，不以附加�
  try { const scheduled=await mod.runScheduledCloseTasks({lastRunDay:''});const db=await mod.loadDb();console.log(JSON.stringify(['overnight','swing'].map(strategy=>{const manifest=Object.values(db.verificationCaptures).find(m=>m.strategy===strategy&&m.kind==='provisional');return {kind:manifest?.kind,manifest,captureStatus:scheduled.captureStatus[strategy]};}))); }
  finally {await mod.flushPersistence();mock.restore();await rm(dataDir,{recursive:true,force:true});}`;
  const results=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8'}).trim().split('\n').at(-1));
- for(const r of results){assert.equal(r.kind,'provisional');assert.equal(r.manifest.status,'failed');assert.equal(r.captureStatus,'failed','排程回應應與真builder保存證據一致');assert.equal(r.manifest.issued.length,0);assert.equal(r.manifest.candidates.length,1);}
+ for(const r of results){assert.equal(r.kind,'provisional');assert.equal(r.manifest.status,'failed');assert.equal(r.captureStatus,'failed','排程回應應與真builder保存證據一致');assert.equal(r.manifest.issued.length,0);assert.equal(cands(r.manifest).length,1);}
 });
 test('I2：reference失敗只原子保存一筆共享輸入證據，不假稱兩策略已開始採集',async()=>{
   await assert.rejects(mod.runScheduledCloseTasks({lastRunDay:'',getReferenceData:async()=>{throw Object.assign(new Error('shared input failed'),{code:'TEST_REFERENCE_FAILURE'});}}),/shared input failed/);
@@ -128,13 +130,13 @@ test('真正builder在preselection保存原排序及來源，不取字碼排序�
   ].map(route=>mock.override(route));
   try {
     const b=await mod.buildOvernightSignals();const m=(await mod.loadDb()).verificationCaptures[b.publication.captureId];
-    assert.equal(m.candidates.length,2);assert.deepEqual(m.candidates.map(x=>x.code),['2330','2301']);
-    assert.deepEqual(m.candidates.map(x=>x.candidateRank),[1,2]);assert.equal(m.candidates[0].source,'TWSE OpenAPI');
-    assert.equal(m.candidates[0].price,100);
+    assert.equal(cands(m).length,2);assert.deepEqual(cands(m).map(x=>x.code),['2330','2301']);
+    assert.deepEqual(cands(m).map(x=>x.candidateRank),[1,2]);assert.equal(cands(m)[0].source,'TWSE OpenAPI');
+    assert.equal(cands(m)[0].price,100);
     const swing=await mod.buildSwingBoard({scenarioKey:'midBandDefense',limit:1});
     const sm=(await mod.loadDb()).verificationCaptures[swing.publication.captureId];
-    assert.deepEqual(sm.candidates.map(x=>x.code),['2330','2301']);
-    assert.equal(sm.candidates.length,2);assert.equal(sm.status,'complete');assert.ok(swing.picks.length < sm.candidates.length);
+    assert.deepEqual(cands(sm).map(x=>x.code),['2330','2301']);
+    assert.equal(cands(sm).length,2);assert.equal(sm.status,'complete');assert.ok(swing.picks.length < cands(sm).length);
     const historicalDate=dates[3].slice(0,4)+'-'+dates[3].slice(4,6)+'-'+dates[3].slice(6);
     await mod.commitDbMutation(db=>mod.publishVerification(db,'swing',{...source(historicalDate),formulaVersion:mod.SWING_FORMULA_VERSION,
       requestScope:{maxCandidates:240,scenarioKey:'',limit:40},candidatePool:[],inputEvidence:[],scanQuality:{candidateCount:0,completedCount:0,reliable:true},picks:[]}));

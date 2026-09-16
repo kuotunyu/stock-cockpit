@@ -177,6 +177,8 @@ npm start
 
 啟動後開 <http://127.0.0.1:5174>。Windows 也可以直接雙擊專案根目錄的 **`start.bat`**，把它「傳送到 → 桌面（建立捷徑）」就不用每次開終端機。啟動器先檢查 runtime Node 範圍（22.13 以上的 22.x 或 24+）、lock 與已安裝 runtime 套件。缺套件、檔案消失或 lock 更新時以 `npm ci` 修復；一般使用只安裝 runtime 套件，原本已有開發套件時則保留開發安裝。開發／測試的 jsdom Node 要求仍較高。
 
+想讓它在登入 Windows 時自己開（伺服器沒開的交易日不會有收盤快照）：在 PowerShell 跑一次 `powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1`，會登記工作排程「Stock1-server」並立刻啟動；`-Unregister` 可移除。這是「登入才啟動」，電腦關機時仍不會採集。
+
 `start.bat` 透過 `scripts/start-local.mjs` 啟動真正的 `server.mjs`，載入 `.env`，等本次子程序的 IPC 與 `/api/health` 身份都確認 ready 才開瀏覽器，使用實際綁定埠（含自訂 `PORT`）。port 已被使用、初始化或安裝失敗會保留錯誤訊息，不會把另一個服務當成啟動成功。Ctrl+C 或關閉啟動器會停止子程序；正常關閉會排空寫入並釋放資料租約。強制終止或作業系統強制關窗仍不保證完成尚未落盤的工作。
 
 **第一次啟動的預設帳號是 `admin` / `admin1234`**（未指定管理密碼且資料庫為空時建立）。登入後到「更多 → 帳號管理」修改；預設綁 `127.0.0.1`。既有帳號的密碼不會因為修改 `.env` 而自動重設。

@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import './portfolio-risk.js';
-import { prepareCompletedBenchmark, packCaptureOutcomes, readCaptureOutcomes } from './verification-evidence.mjs';
+import { prepareCompletedBenchmark, packCaptureOutcomes, readCaptureOutcomes, packCaptureCandidates, readCaptureCandidates, hasCaptureCandidates,
+  packPublicationSignals, readPublicationSignals, writePublicationSignals, publicationSignalCount, unpackPublicationView } from './verification-evidence.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
@@ -2531,8 +2532,9 @@ async function loadDbOnce() {
   let changed = recoveredFromCorruption || verificationChanged;
   // 2026-09-12：發布紀錄裡與擷取清單重複的 260 列證據剝掉（每策略每天 177 KB、無讀取端）。
   if (stripDuplicatedPublicationEvidence(dbCache)) changed = true;
-  // 2026-09-12：inline 的 outcomes 壓成 outcomesBlob（先剝重複再壓，剝除的比對走 readCaptureOutcomes 兩種格式都認）。
-  if (packStoredCaptureOutcomes(dbCache)) changed = true;
+  // 2026-09-12：inline 的 outcomes 壓成 outcomesBlob（先剝重複再壓，剝除的比對走 readCaptureOutcomes 兩種格式都認）；
+  // 2026-09-16 起同一步也壓 candidates 與發布紀錄的 signals。
+  if (packStoredCaptureEvidence(dbCache)) changed = true;
   // 既有 DB 補標 passwordSource：這個欄位是 2026-07-31 才加的，在那之前建立的帳號沒有。
   // 唯一可靠的判準就是實際驗一次 hash——不能用 createdAt === updatedAt 這種啟發式，
   // 那只說明「沒改過任何欄位」，不代表密碼是哪一組。
@@ -2871,8 +2873,10 @@ function tradePlanIdentity(raw) {
 function resolveTradePlanSource(identity, db) {
   if (!identity.signalId) return null;
   const capture = db?.verificationPublications?.captures?.[identity.sourceCaptureId];
-  const matches = capture?.signals?.filter(signal => signal.signalId === identity.signalId && signal.code === identity.code
-    && signal.exchange === identity.exchange && (signal.scenario?.key || signal.group || null) === identity.scenario) || [];
+  let storedSignals = [];
+  try { storedSignals = readPublicationSignals(capture) || []; } catch { storedSignals = []; }
+  const matches = storedSignals.filter(signal => signal.signalId === identity.signalId && signal.code === identity.code
+    && signal.exchange === identity.exchange && (signal.scenario?.key || signal.group || null) === identity.scenario);
   if (capture?.strategy !== identity.strategy || matches.length !== 1) throw tradePlanError('PLAN_SOURCE_INVALID', '來源訊號與已保存的發布版本不符，請改以手動計畫建立');
   const signal = matches[0];
   return { captureId: identity.sourceCaptureId, signalId: identity.signalId, verification: 'verified-local',
@@ -9611,8 +9615,8 @@ function buildCaptureManifest({ capture, body }) {
   const outcomes = cloneJson(body.inputEvidence || []);
   const { terminal, marketsComplete, allFailed } = verificationScanAccounting(body, capture.tradeDate);
   const complete = capture.complete && terminal && marketsComplete && !allFailed;
-  // outcomes 沒有執行期讀取端：直接以 packed 形式存（deflate＋sha256），讀取走 readCaptureOutcomes。
-  return packCaptureOutcomes({
+  // outcomes 與 candidates 直接以 packed 形式存（deflate＋sha256）：讀取走 readCaptureOutcomes／readCaptureCandidates。
+  return packCaptureCandidates(packCaptureOutcomes({
     manifestVersion: 1, captureId: capture.captureId, strategy: capture.strategy, tradeDate: capture.tradeDate,
     kind: capture.kind, identity: cloneJson(capture.identity), revision: capture.revision,
     requestScope: cloneJson(capture.requestScope), canonical: stableJson(capture.requestScope) === stableJson(canonicalVerificationScope(capture.strategy)),
@@ -9631,7 +9635,7 @@ function buildCaptureManifest({ capture, body }) {
       signalId: signal.signalId, code: signal.code, exchange: signal.exchange || null,
       scenario: signal.group || signal.scenario?.key || 'unknown', fillRisk: signal.fillRisk || null,
     }])).values()] : [],
-  });
+  }));
 }
 
 // 固定期間候選池是獨立價格觀察，不能借用提前退出或含息現金模型。
@@ -9772,7 +9776,7 @@ function buildMatchedBenchmark({ capture, observations = [], benchmarkSpec }) {
 function authoritativeBenchmarkCaptures(db, strategy = null) {
   const ids = new Set(Object.values(db.verificationPublications?.current || {}));
   return Object.values(db.verificationCaptures || {}).filter(c => ids.has(c.captureId) && c.fullRecord && c.kind === 'formal'
-    && c.canonical && Array.isArray(c.candidates) && (!strategy || c.strategy === strategy))
+    && c.canonical && hasCaptureCandidates(c) && (!strategy || c.strategy === strategy))
     .map(c => ({ ...c, publicationStartedAt:db.verificationPublications.captures?.[c.captureId]?.publicationStartedAt || c.publicationStartedAt,
       availableConfirmedAt:db.verificationPublications.captures?.[c.captureId]?.availableConfirmedAt || null }))
     .sort((a,b)=>String(a.tradeDate).localeCompare(String(b.tradeDate)) || a.captureId.localeCompare(b.captureId));
@@ -9835,7 +9839,7 @@ async function runVerificationBenchmarkBatch() {
     const period=benchmarkPeriod(frozen,memo.calendar,spec);
     const months=[];
     for(let month=period.entryDate.slice(0,6);month<=period.exitDate.slice(0,6);month=addMonthsCompact(month+'01',1).slice(0,6))months.push(month);
-    const candidates=frozen.candidates;
+    const candidates=readCaptureCandidates(frozen)||[];
     const jobs=[];
     for(let walked=0;walked<candidates.length && jobs.length<4;walked++) {
       const index=(memo.cursor+walked)%candidates.length,candidate=candidates[index];
@@ -10268,23 +10272,31 @@ function stripDuplicatedPublicationEvidence(db) {
   return changed;
 }
 
-// 舊資料遷移：擷取清單 inline 的 outcomes 壓成 outcomesBlob（含 pending benchmark memo 內嵌的 capture 副本）。
-// 新發布由 buildCaptureManifest 直接產生 packed 版；這裡只處理啟動時還是 inline 的舊紀錄。
-function packStoredCaptureOutcomes(db) {
+// 舊資料遷移：擷取清單 inline 的 outcomes／candidates 壓成 blob（含 pending benchmark memo 內嵌的 capture 副本）、
+// 發布紀錄 inline 的 signals 壓成 signalsBlob。新發布由 buildCaptureManifest／publishVerification 直接產生 packed 版；
+// 這裡只處理啟動時還是 inline 的舊紀錄，冪等。
+function packStoredCaptureEvidence(db) {
   let changed = false;
+  const packManifest = (manifest) => packCaptureCandidates(packCaptureOutcomes(manifest));
   const captures = db?.verificationCaptures || {};
   for (const [id, manifest] of Object.entries(captures)) {
-    if (!Array.isArray(manifest?.outcomes)) continue;
-    const packed = packCaptureOutcomes(manifest);
+    const packed = packManifest(manifest);
     if (packed === manifest) continue;
     captures[id] = packed;
     changed = true;
   }
   for (const memo of Object.values(db?.verificationBenchmarks?.memos || {})) {
-    if (!Array.isArray(memo?.capture?.outcomes)) continue;
-    const packed = packCaptureOutcomes(memo.capture);
+    if (!memo?.capture || typeof memo.capture !== 'object') continue;
+    const packed = packManifest(memo.capture);
     if (packed === memo.capture) continue;
     memo.capture = packed;
+    changed = true;
+  }
+  const publications = db?.verificationPublications?.captures || {};
+  for (const [id, capture] of Object.entries(publications)) {
+    const packed = packPublicationSignals(capture);
+    if (packed === capture) continue;
+    publications[id] = packed;
     changed = true;
   }
   return changed;
@@ -10325,7 +10337,7 @@ function publishVerification(db, strategy, body) {
   if (reusable) {
     const manifest = db.verificationCaptures?.[reusable.captureId];
     if (manifest && reusable.kind !== 'formal') markVerificationAttempt(db, manifest);
-    return cloneJson(reusable);
+    return cloneJson(unpackPublicationView(reusable));
   }
   const revision = revisions.length + 1;
   const first = store.current[key];
@@ -10352,7 +10364,8 @@ function publishVerification(db, strategy, body) {
       captureId, exchange: pick.exchange || 'legacy-unknown', code: pick.code, group: pick.group || pick.scenario?.key || 'unknown',
     })).digest('hex') })),
   };
-  store.captures[captureId] = capture;
+  // 存進 DB 的是 signals 壓成 signalsBlob 的版本（≈58 KB → ≈8 KB／策略／日）；下面與回傳值仍用 inline 的 capture。
+  store.captures[captureId] = packPublicationSignals(capture);
   db.verificationCaptures ||= {};
   db.verificationCaptures[captureId] = buildCaptureManifest({ capture, body });
   markVerificationAttempt(db, db.verificationCaptures[captureId], publicationStartedAt);
@@ -10374,7 +10387,7 @@ function publishVerification(db, strategy, body) {
 // 首次落盤後才有「此刻已可讀」的上界證據；時間補證不是訊號清單修訂。
 // 只在最新 draft 補空白時間，不能用第一次建立時的 entry 覆蓋已推進結果。
 async function confirmVerificationPublication(publication) {
-  if (publication?.availableConfirmedAt) return publication;
+  if (publication?.availableConfirmedAt) return unpackPublicationView(publication);
   const availableConfirmedAt = new Date().toISOString();
   try {
     return await commitDbMutation(db => {
@@ -10382,9 +10395,9 @@ async function confirmVerificationPublication(publication) {
       if (!capture || capture.inputFingerprint !== publication.inputFingerprint) {
         throw Object.assign(new Error('發布尚未提交或輸入已不同'), { code: 'PUBLICATION_NOT_COMMITTED' });
       }
-      if (capture.availableConfirmedAt) return skipDbMutation(cloneJson(capture));
+      if (capture.availableConfirmedAt) return skipDbMutation(cloneJson(unpackPublicationView(capture)));
       // 系統時鐘倒退時不能編造上界；保持未知，待真實時間追上下界後再補證。
-      if (Date.parse(availableConfirmedAt) < Date.parse(capture.publicationStartedAt)) return skipDbMutation(cloneJson(capture));
+      if (Date.parse(availableConfirmedAt) < Date.parse(capture.publicationStartedAt)) return skipDbMutation(cloneJson(unpackPublicationView(capture)));
       const timing = {
         publicationStartedAt: capture.publicationStartedAt,
         availableConfirmedAt, publishedAt: availableConfirmedAt, decisionAvailableAt: availableConfirmedAt,
@@ -10398,7 +10411,10 @@ async function confirmVerificationPublication(publication) {
       };
       fillTiming(capture);
       if (db.verificationCaptures?.[capture.captureId]) fillTiming(db.verificationCaptures[capture.captureId]);
-      for (const signal of capture.signals || []) fillTiming(signal);
+      // 訊號清單存的是 blob：解回、補時間、重新壓回同一個 draft 物件
+      const storedSignals = readPublicationSignals(capture) || [];
+      for (const signal of storedSignals) fillTiming(signal);
+      writePublicationSignals(capture, storedSignals);
       for (const snapshot of db.signalSnapshots || []) {
         if (snapshot.captureId !== capture.captureId) continue;
         fillTiming(snapshot);
@@ -10412,13 +10428,13 @@ async function confirmVerificationPublication(publication) {
         fillTiming(snapshot.body.publication);
         for (const signal of snapshot.body.publication.signals || []) fillTiming(signal);
       }
-      return cloneJson(capture);
+      return cloneJson(unpackPublicationView(capture));
     });
   } catch (error) {
     if (error?.code !== 'PERSISTENCE_FAILED') throw error;
     // 清單本身已成功落盤；補證失敗不撤銷正式身份，也不回傳失敗 draft 的時間。
     const committed = (await loadDb()).verificationPublications?.captures?.[publication.captureId];
-    return cloneJson(committed);
+    return cloneJson(unpackPublicationView(committed));
   }
 }
 
@@ -16648,7 +16664,7 @@ function summarizeOperationalStatus(db, { today = toTaipeiCompactDate() } = {}) 
     : item?.status === 'failed' ? 'source-unavailable' : item?.status === 'incomplete' ? 'input-incomplete' : null;
   const formal = capture => capture?.kind === 'formal' && capture.complete === true;
   const publication = capture => ({ status: 'published', tradeDate: compactToIsoDate(toCompactDate(capture.tradeDate)),
-    signalCount: Array.isArray(capture.signals) ? capture.signals.length : null,
+    signalCount: publicationSignalCount(capture),
     availableConfirmedAt: timestamp(capture.availableConfirmedAt) });
   const captures = Object.fromEntries(['overnight', 'swing'].map(strategy => {
     const version = currentVerificationIdentity(strategy).selectionVersion;
@@ -16672,7 +16688,7 @@ function summarizeOperationalStatus(db, { today = toTaipeiCompactDate() } = {}) 
   const currentIds = new Set(Object.values(store.current || {}));
   for (const capture of manifests) {
     if (!currentIds.has(capture.captureId) || !capture.fullRecord || capture.kind !== 'formal' || !capture.canonical
-      || !Array.isArray(capture.candidates)) continue;
+      || !hasCaptureCandidates(capture)) continue;
     const memo = db.verificationBenchmarks?.memos?.[benchmarkMemoKey(capture)];
     benchmarkCounts.total += 1;
     const blocked = memo?.status === 'unavailable' || memo?.reason === 'official-calendar-source-unavailable';
@@ -17027,7 +17043,7 @@ export {
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime, taiexPeriodBenchmark, REGIME_NEAR_MA60_BAND, openEntryReturnOf, dedupeRowsByCode, openEntryNetSummary, overnightMetricCoverage, aggregateOvernightRecords,
-  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureOutcomes, publicSignalsView,
+  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureEvidence, publicSignalsView, resolveTradePlanSource, authoritativeBenchmarkCaptures,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
   runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,

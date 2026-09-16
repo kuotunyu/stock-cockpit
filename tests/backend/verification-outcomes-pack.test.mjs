@@ -7,7 +7,7 @@ import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importServer } from "../helpers/test-server.mjs";
-import { packCaptureOutcomes, readCaptureOutcomes } from "../../verification-evidence.mjs";
+import { packCaptureOutcomes, readCaptureOutcomes, readCaptureCandidates, readPublicationSignals } from "../../verification-evidence.mjs";
 
 const bytes = (v) => Buffer.byteLength(JSON.stringify(v));
 const rows = (n) => Array.from({ length: n }, (_, i) => ({
@@ -55,7 +55,12 @@ test("loadDb 遷移：先剝發布紀錄的相同副本（比對認得兩種格�
   assert.equal(db.verificationPublications.captures["cap-1"].inputEvidence, undefined, "剝除比對要能讀 packed 的擷取清單");
   assert.equal(db.verificationBenchmarks.memos.m1.capture.outcomes, undefined, "pending memo 內嵌的 capture 副本也壓");
   assert.deepEqual(readCaptureOutcomes(db.verificationBenchmarks.memos.m1.capture), same);
-  assert.deepEqual(stored.candidates, [{ code: "1101", exchange: "TWSE" }], "candidates 有執行期讀取端，維持 inline");
+  assert.equal(stored.candidates, undefined, "2026-09-16 起 candidates 也壓成 blob");
+  assert.deepEqual(readCaptureCandidates(stored), [{ code: "1101", exchange: "TWSE" }], "讀取走 readCaptureCandidates");
+  const publication = db.verificationPublications.captures["cap-1"];
+  assert.equal(publication.signals, undefined, "發布紀錄的 signals 也壓成 signalsBlob");
+  assert.equal(publication.signalCount, 0, "fixture 的發布紀錄是空清單，也照壓");
+  assert.deepEqual(readPublicationSignals(publication), []);
   await mod.flushPersistence();
   const disk = JSON.parse(await readFile(join(dataDir, "stock1-db.json"), "utf8"));
   assert.ok(disk.verificationCaptures["cap-1"].outcomesBlob, "遷移要落盤");
@@ -78,4 +83,13 @@ test("publishVerification：新發布的擷取清單直接是 packed，讀回等
   assert.equal(stored.outcomes, undefined);
   assert.equal(stored.outcomesBlob.rows, 5);
   assert.deepEqual(readCaptureOutcomes(stored), inputEvidence);
+  assert.equal(stored.candidates, undefined);
+  assert.equal(stored.candidatesBlob.rows, 5);
+  assert.deepEqual(readCaptureCandidates(stored), body.candidatePool);
+  const record = db.verificationPublications.captures[publication.captureId];
+  assert.equal(record.signals, undefined, "DB 裡的發布紀錄是 packed");
+  assert.equal(record.signalsBlob.rows, 1);
+  assert.equal(publication.signals.length, 1, "回呼叫端（API）的仍是 inline signals");
+  assert.equal(publication.signalsBlob, undefined);
+  assert.deepEqual(readPublicationSignals(record), publication.signals);
 });
