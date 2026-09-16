@@ -5,7 +5,7 @@ import { prepareCompletedBenchmark, packCaptureOutcomes, readCaptureOutcomes, pa
   packPublicationSignals, readPublicationSignals, writePublicationSignals, publicationSignalCount, unpackPublicationView } from './verification-evidence.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
-import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
 import { constants as fsConstants, appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { format as formatLogArgs } from "node:util";
 import { createRequire } from "node:module";
@@ -2062,7 +2062,7 @@ async function resolveBrokerCertPath(input) {
 
 function safeBrokerCredentialStatus(credentials, savedPayload) {
   const certFile = brokerCertFilePath(credentials);
-  let certPathExists = false;
+  let certPathExists;
   try {
     certPathExists = Boolean(certFile) && existsSync(certFile);
   } catch {
@@ -2874,7 +2874,7 @@ function tradePlanIdentity(raw) {
 function resolveTradePlanSource(identity, db) {
   if (!identity.signalId) return null;
   const capture = db?.verificationPublications?.captures?.[identity.sourceCaptureId];
-  let storedSignals = [];
+  let storedSignals;
   try { storedSignals = readPublicationSignals(capture) || []; } catch { storedSignals = []; }
   const matches = storedSignals.filter(signal => signal.signalId === identity.signalId && signal.code === identity.code
     && signal.exchange === identity.exchange && (signal.scenario?.key || signal.group || null) === identity.scenario);
@@ -3209,7 +3209,7 @@ function validatePortableQuarantine(value) {
   if (value.length > MAX_TRADE_RECORDS) throw portableError("BACKUP_CAPACITY_EXCEEDED", "交易隔離區超過容量上限");
   value.forEach((item, index) => {
     const reasons = item?.reasons;
-    let recordSize = Infinity;
+    let recordSize;
     try {
       recordSize = Buffer.byteLength(JSON.stringify(item?.record ?? item), "utf8");
     } catch {
@@ -4185,7 +4185,7 @@ async function fetchJson(url, options = {}) {
     });
   } catch (error) {
     if (error?.name === "TimeoutError" || error?.cause?.name === "TimeoutError") {
-      throw new Error(`上游回應逾時（超過 ${Math.round(timeoutMs / 1000)} 秒）：${new URL(url).host}`);
+      throw new Error(`上游回應逾時（超過 ${Math.round(timeoutMs / 1000)} 秒）：${new URL(url).host}`, { cause: error });
     }
     throw error;
   }
@@ -4614,7 +4614,7 @@ function readPackedRef(gitDir, ref) {
 
 function readGitHubRepo(gitDir) {
   // 只認 github.com 的 origin：沒有可比對的上游就不做更新檢查，也不猜其他 host 的 API 形狀。
-  let config = "";
+  let config;
   try {
     config = readFileSync(join(gitDir, "config"), "utf8");
   } catch {
@@ -4666,7 +4666,7 @@ function readAppBuildInfo(buildRoot = root) {
   if (!gitDir) return empty;
   let commonDir = gitDir;
   try { commonDir = resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()); } catch { /* 一般 repo */ }
-  let head = "";
+  let head;
   try {
     head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
   } catch {
@@ -4681,7 +4681,7 @@ function readAppBuildInfo(buildRoot = root) {
   const ref = head.slice(4).trim();
   if (!GIT_REF_PATTERN.test(ref) || ref.includes("..")) return { ...empty, repo };
   const branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : "";
-  let commit = "";
+  let commit;
   try {
     commit = readFileSync(join(gitDir, ref), "utf8").trim();
   } catch {
@@ -6595,7 +6595,7 @@ async function fetchStockHistoryMonth(code, exchange, monthCompact, name = "", o
   if (historyInFlight.has(cacheKey)) return historyInFlight.get(cacheKey);
 
   const task = (async () => {
-    let rows = [];
+    let rows;
     if (exchange === "TPEx") {
       const url = `https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?code=${encodeURIComponent(code)}&date=${compactToSlashDate(monthCompact)}&id=&response=json`;
       const payload = await fetchJsonWithRetry(url, {}, 1);
@@ -8102,7 +8102,7 @@ async function getConfiguredBrokerQuotes(codes, auth) {
     });
   }
 
-  let officialReference = null;
+  let officialReference;
   try {
     officialReference = await getQuotes(requestedCodes);
   } catch {
@@ -8997,7 +8997,6 @@ function classifyCohort(capture, { asOf, tradingDates, maxSessions = 15 }) {
   const days = unique((array ? tradingDates : tradingDates?.tradingDays || []).map(toCompactDate).filter(isValidCompactCalendarDate)).sort();
   const knownSessions = days.filter(day => day > start && day <= end).length;
   const unknown = { mature: null, ageSessions: null, reason: 'official-calendar-coverage-unknown' };
-  const lowerBound = { mature: true, ageSessions: null, reason: 'known-sessions-lower-bound', knownSessions };
   if (!isValidCompactCalendarDate(start) || !isValidCompactCalendarDate(end) || end < start) return unknown;
   if (array) return knownSessions >= maxSessions
     ? { mature: true, ageSessions: null, reason: 'known-sessions-lower-bound', knownSessions } : unknown;
@@ -16370,7 +16369,6 @@ function acquireDataDirLease() {
       await closeWriterLeaseServer(parentGuardLease).catch((guardError) => {
         console.error("[Stock1] 啟動失敗後釋放 DATA_DIR parent guard 失敗：", guardError);
       });
-      parentGuardLease = null;
       await releaseDataDirLease().catch((releaseError) => {
         console.error("[Stock1] 啟動失敗後釋放部分 DATA_DIR leases 失敗：", releaseError);
       });

@@ -107,7 +107,6 @@ test("D-01：官方昨收缺值時退回訊號日收盤，維持既有行為", (
 
 test("D-10：同一檔命中兩個分群時，整體 summary 的分母只算一次", async () => {
   const D0 = compactTradingDay(-1);
-  const D1 = compactTradingDay(0);
   const iso = (d) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
   // 同一檔同時進「強勢續攻」與「回檔轉強」——三段 if 沒有 else，這是引擎常態不是異常輸入。
   const pick = (group, groupName, score) => ({

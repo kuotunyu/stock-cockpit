@@ -7,7 +7,6 @@ import { createAppWindow } from "../helpers/dom-harness.mjs";
 const apps = [];
 after(() => apps.forEach((app) => app.cleanup()));
 
-const json = (app, expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 
 const BUNDLE = {
   format: "stock1-machine-export", version: 1, createdAt: "2026-09-13T01:02:03.456Z", consistency: "live-committed",

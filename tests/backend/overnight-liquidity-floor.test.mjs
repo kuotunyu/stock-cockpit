@@ -15,7 +15,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { importServer } from "../helpers/test-server.mjs";
-import { compactToday, stockDayAllRow } from "../helpers/fixtures.mjs";
+import { compactToday } from "../helpers/fixtures.mjs";
 
 const today = compactToday(0);
 const { mod, mock, dataDir } = await importServer({ routes: [] });

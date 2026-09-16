@@ -12,6 +12,7 @@
     "secret": "node scripts/print-secret.mjs",
     "backup": "node --env-file-if-exists=.env scripts/backup.mjs",
     "preflight": "node --env-file-if-exists=.env scripts/preflight.mjs",
+    "lint": "eslint .",
     "test": "node --test tests/backend/*.test.mjs tests/frontend/*.test.mjs",
     "test:browser": "node --test --test-concurrency=1 tests/browser/*.test.mjs",
     "test:backend": "node --test tests/backend/*.test.mjs",
@@ -24,6 +25,9 @@
     "fubon-neo": "^2.2.2"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
     "jsdom": "^30.0.1",
     "playwright": "1.63.0"
   }

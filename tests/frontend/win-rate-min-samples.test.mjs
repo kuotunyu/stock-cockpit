@@ -70,7 +70,7 @@ test("後端沒給 winRateMinSamples 時前端仍要有安全預設", () => {
 const backtestChip = (backtest) => JSON.parse(app.evalIn(`JSON.stringify((() => {
   const host = document.createElement("div");
   host.innerHTML = renderBacktestChips(${JSON.stringify(backtest)});
-  return { text: host.textContent.replace(/\s+/g, " ").trim() };
+  return { text: host.textContent.replace(/\\s+/g, " ").trim() };
 })())`));
 
 test("個股回測 chip：觸發次數太少時不給達成率百分比，但次數要照顯示", () => {

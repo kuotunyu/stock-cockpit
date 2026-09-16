@@ -2,6 +2,7 @@
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
 // 外殼版本由伺服器送出 app.js 時代入（所有外殼資產內容的雜湊，見 server.mjs computeShellVersion）；
 // 下面這行的值只是佔位，直接用磁碟上的檔（jsdom 測試）才會看到它。以前要手動同步兩檔遞增 vN。
+// eslint-disable-next-line no-unused-vars -- 外殼身份：瀏覽器測試與舊分頁比對透過 global 讀，app.js 本身不用
 const APP_SHELL_VERSION = "stock1-shell-dev";
 
 if (window.location.protocol === "file:") {
@@ -701,9 +702,6 @@ function buildIndicatorDetail(stock) {
   const totalValue = finiteNumberOrNull(stock.total);
   const avgVol = avgVolValue ?? 0;
   const turnover = Number(stock.turnover) || 0;
-  const flow = Number(stock.flow) || 0;
-  const total = totalValue ?? 0;
-  const unit = unitValue ?? 0;
   const unitShare = totalValue !== null && totalValue > 0 && unitValue !== null ? (unitValue / totalValue) * 100 : null;
   const volumePartial = avgVolValue === null || unitValue === null || totalValue === null;
   const dailyCloses = getDailyClosesForStock(stock);
@@ -2590,12 +2588,14 @@ async function syncWatchListsToServer() {
     }
     if (!handleAuthRequired(error)) showToast(`自選股儲存失敗：${error.message}`);
   } finally {
-    if (runId !== watchListSyncRunId) return;
-    watchListSyncInFlight = false;
-    if (watchListSyncPending && authState.user && !watchListWrite.pending) {
-      watchListSyncPending = false;
-      window.clearTimeout(watchListSyncTimer);
-      watchListSyncTimer = window.setTimeout(syncWatchListsToServer, 0);
+    // 只有仍是最新一輪才收尾；不用 return（finally 裡 return 會吞掉 try/catch 丟出的例外）
+    if (runId === watchListSyncRunId) {
+      watchListSyncInFlight = false;
+      if (watchListSyncPending && authState.user && !watchListWrite.pending) {
+        watchListSyncPending = false;
+        window.clearTimeout(watchListSyncTimer);
+        watchListSyncTimer = window.setTimeout(syncWatchListsToServer, 0);
+      }
     }
   }
 }
@@ -2693,12 +2693,13 @@ async function syncAlertsToServer() {
     }
     if (!handleAuthRequired(error)) showToast(`到價提醒儲存失敗：${error.message}`);
   } finally {
-    if (runId !== alertSyncRunId) return;
-    alertSyncInFlight = false;
-    if (alertSyncPending && authState.user && !alertWrite.pending) {
-      alertSyncPending = false;
-      window.clearTimeout(alertSyncTimer);
-      alertSyncTimer = window.setTimeout(syncAlertsToServer, 0);
+    if (runId === alertSyncRunId) {
+      alertSyncInFlight = false;
+      if (alertSyncPending && authState.user && !alertWrite.pending) {
+        alertSyncPending = false;
+        window.clearTimeout(alertSyncTimer);
+        alertSyncTimer = window.setTimeout(syncAlertsToServer, 0);
+      }
     }
   }
 }
@@ -5363,13 +5364,14 @@ async function loadSourceStatus() {
     if (handleAuthRequired(error)) return;
     sourceState.error = error.message;
   } finally {
-    if (requestId !== sourceStatusRequestSeq || (scope && !isCurrentAuthScope(scope))) return;
-    sourceState.loading = false;
-    if (getSelectedSource() === "broker" && !isBrokerSourceReady()) {
-      switchToOfficialFallback(sourceState.sources?.broker?.message || "券商 API 未設定");
-      return;
+    if (requestId === sourceStatusRequestSeq && !(scope && !isCurrentAuthScope(scope))) {
+      sourceState.loading = false;
+      if (getSelectedSource() === "broker" && !isBrokerSourceReady()) {
+        switchToOfficialFallback(sourceState.sources?.broker?.message || "券商 API 未設定");
+      } else {
+        renderSourceSwitch();
+      }
     }
-    renderSourceSwitch();
   }
 }
 
@@ -5387,9 +5389,10 @@ async function loadBrokerSettings() {
     if (!isCurrentAuthScope(scope)) return;
     if (!handleAuthRequired(error)) brokerSettingsState.error = error.message;
   } finally {
-    if (!isCurrentAuthScope(scope)) return;
-    brokerSettingsState.loading = false;
-    renderMorePanel();
+    if (isCurrentAuthScope(scope)) {
+      brokerSettingsState.loading = false;
+      renderMorePanel();
+    }
   }
 }
 
@@ -5422,9 +5425,10 @@ async function saveBrokerSettingsFromForm(form) {
     if (!isCurrentAuthScope(scope)) return;
     if (!handleAuthRequired(error)) brokerSettingsState.error = error.message;
   } finally {
-    if (!isCurrentAuthScope(scope)) return;
-    brokerSettingsState.saving = false;
-    renderMorePanel();
+    if (isCurrentAuthScope(scope)) {
+      brokerSettingsState.saving = false;
+      renderMorePanel();
+    }
   }
 }
 
@@ -5448,9 +5452,10 @@ async function deleteBrokerSettings() {
     if (!isCurrentAuthScope(scope)) return;
     if (!handleAuthRequired(error)) brokerSettingsState.error = error.message;
   } finally {
-    if (!isCurrentAuthScope(scope)) return;
-    brokerSettingsState.saving = false;
-    renderMorePanel();
+    if (isCurrentAuthScope(scope)) {
+      brokerSettingsState.saving = false;
+      renderMorePanel();
+    }
   }
 }
 
@@ -5477,9 +5482,10 @@ async function testBrokerSettings() {
       brokerSettingsState.error = error.message;
     }
   } finally {
-    if (!isCurrentAuthScope(scope)) return;
-    brokerSettingsState.testing = false;
-    renderMorePanel();
+    if (isCurrentAuthScope(scope)) {
+      brokerSettingsState.testing = false;
+      renderMorePanel();
+    }
   }
 }
 
@@ -5601,9 +5607,10 @@ async function loadAdminUsers() {
     if (!isCurrentAuthScope(scope)) return;
     if (!handleAuthRequired(error)) adminUsersState.error = error.message;
   } finally {
-    if (!isCurrentAuthScope(scope)) return;
-    adminUsersState.loading = false;
-    renderMorePanel();
+    if (isCurrentAuthScope(scope)) {
+      adminUsersState.loading = false;
+      renderMorePanel();
+    }
   }
 }
 
@@ -5631,9 +5638,10 @@ async function createAdminUserFromForm(form) {
     if (!isCurrentAuthScope(scope)) return;
     if (!handleAuthRequired(error)) adminUsersState.error = error.message;
   } finally {
-    if (!isCurrentAuthScope(scope)) return;
-    adminUsersState.creating = false;
-    renderMorePanel();
+    if (isCurrentAuthScope(scope)) {
+      adminUsersState.creating = false;
+      renderMorePanel();
+    }
   }
 }
 
@@ -6690,7 +6698,7 @@ function renderOvernightGroups() {
   // 展開狀態依同一個 data 鍵跨行情重繪保留（同 verificationFoldAttributes 的做法），⚠ 按鈕 toast 與摘要條單一 wrap 流不變。
   const warningList = (overnightState.warnings || []).filter(Boolean);
   const warningSpan = (warning) => `<span class="overnight-warning">⚠ ${escapeHtml(warning)}</span>`;
-  let warnings = "";
+  let warnings;
   if (warningList.length > 2) {
     const previousFold = el.overnightGroups.querySelector("details[data-overnight-warnings-fold]");
     warnings = warningList.slice(0, 2).map(warningSpan).join("")
@@ -7717,6 +7725,7 @@ function formatTaipeiDate(iso) {
 // 策略頁與全站輪詢共用同一個盤中邊界，避免 13:31–13:35 一處顯示盤中、另一處卻顯示已收盤。
 // 2026-09-09（CUA-02）策略 meta 列改依發布身份顯示後，產品碼暫無呼叫端；保留為 market-clock 測試釘住的
 // 公開時鐘 helper，供 CUA-04 的時段口徑沿用，不另發明第二個盤中判斷。
+// eslint-disable-next-line no-unused-vars -- tests/frontend/market-clock 透過 global 讀
 function isTaiwanMarketOpenNow(date = new Date()) {
   return isTaiwanMarketSession(date);
 }
@@ -8943,7 +8952,7 @@ function renderTechnicalSurveillance() {
     `;
     return;
   }
-  let detail = "";
+  let detail;
   if (surv.status === "aboutToDispose") {
     detail = `${surv.startSlash ? `${surv.startSlash.slice(5)} 起` : "即將"}處置${surv.startSlash ? `（期間 ${surv.startSlash.slice(5)}–${surv.endSlash.slice(5)}）` : ""}`;
   } else if (surv.status === "inDisposition") {
@@ -11720,7 +11729,7 @@ function renderDetailSurveillance(stock) {
   }
   box.hidden = false;
   const stats = [];
-  let why = "";
+  let why;
   let whyList = "";
   let what = "";
   if (info.kind === "attention") {

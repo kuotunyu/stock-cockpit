@@ -3,7 +3,7 @@
 // 極值，掛在停損／目標的單未必真的撮得到——觸價判定隱含的「連續競價」前提在這些樣本上不成立。
 // 本批刻意**不改判定口徑**（那要另外決策），只把事實記進樣本並讓它數得出來。
 // 沒有這一欄的話，使用者就算在「更多→風險規則」關掉處置股，成績單也過濾不掉它們。
-import test, { before, after } from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { importServer } from "../helpers/test-server.mjs";

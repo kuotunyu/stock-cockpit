@@ -70,15 +70,15 @@ test('real ledger correction/deletion invalidates saved evidence and final metad
  trades=await api('/api/trades',{...trades,records:[{...trades.records[0],shares:50}]});
  plans=await api('/api/trade-plans');assert.equal(plans.linkEvidence[plans.plans[0].planId].links[0].status,'source-changed');assert.deepEqual(plans.plans[0].tradeLinks,frozen);
  plans=await api('/api/trade-plans',{...plans,plans:[{...plans.plans[0],status:'closed',review:{decision:'insufficient-data',reason:'成交股數已修正'}}]});
- plans=await api('/api/trade-plans',{...plans,plans:[{...plans.plans[0],tradeLinks:[{tradeId:'http-buy',allocatedShares:50}]}]});
- trades=await api('/api/trades',{...trades,records:[]});plans=await api('/api/trade-plans');assert.equal(plans.linkEvidence[plans.plans[0].planId].links[0].status,'source-deleted');
+ await api('/api/trade-plans',{...plans,plans:[{...plans.plans[0],tradeLinks:[{tradeId:'http-buy',allocatedShares:50}]}]});
+ await api('/api/trades',{...trades,records:[]});plans=await api('/api/trade-plans');assert.equal(plans.linkEvidence[plans.plans[0].planId].links[0].status,'source-deleted');
  plans=await api('/api/trade-plans',{...plans,plans:[{...plans.plans[0],tradeLinks:[],review:{...plans.plans[0].review,reason:'來源刪除，解除關聯'}}]});assert.equal(plans.plans[0].metadataRevisions[0].tradeLinks[0].allocatedShares,100);
 });
 test('cross-account trade IDs rejected; source changes and auth are revalidated inside queue',async()=>{
  const db=await mod.loadDb(),uid=db.users[0].id;
  const other=(await json(await srv.api('/api/admin/users',{method:'POST',body:JSON.stringify({username:'t11other',password:'t11other-password',role:'user'})}),201)).user;
  const login=await srv.raw('/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:'t11other',password:'t11other-password'})});const cookie=login.headers.get('set-cookie').split(';')[0];await json(login);
- let trades=await api('/api/trades');trades=await api('/api/trades',{...trades,records:[trade('queue-buy','buy',100,{executedAt:'',instrumentType:'stock'})]});
+ const trades=await api('/api/trades');await api('/api/trades',{...trades,records:[trade('queue-buy','buy',100,{executedAt:'',instrumentType:'stock'})]});
  const foreign={schemaVersion:1,rev:0,plans:[plan({tradeLinks:[{tradeId:'queue-buy',allocatedShares:1}]})]};
  const rejection=await json(await srv.api('/api/trade-plans',{method:'PUT',headers:{cookie},body:JSON.stringify(foreign)}),422);assert.equal(rejection.code,'PLAN_LINK_SOURCE_MISSING');
  let plans=await api('/api/trade-plans');const raw=plan();plans=await api('/api/trade-plans',{...plans,plans:[...plans.plans,raw]});
@@ -101,7 +101,7 @@ test('metadata capacity includes archived snapshots and source chronology uses T
  const bundle=mod.validatePortableTradePlans(p,now);assert.deepEqual(build(bundle.plans,bundle,records),bundle);
 });
 test('actual personal restore validates against restored ledger; old v2 absence and immutable audits survive',async()=>{
- let plans=await api('/api/trade-plans'),trades=await api('/api/trades');const id=plans.plans.at(-1).planId;
+ let plans=await api('/api/trade-plans');await api('/api/trades');const id=plans.plans.at(-1).planId;
  plans=await api('/api/trade-plans',{...plans,plans:plans.plans.map(p=>p.planId===id?{...p,tradeLinks:[{tradeId:'queue-buy',allocatedShares:10}]}:p)});
  const exported=(await api('/api/personal-data/export')).bundle;
  const stable=value=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?`[${value.map(stable).join(',')}]`:`{${Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+stable(value[key])).join(',')}}`;

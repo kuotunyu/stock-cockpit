@@ -1,7 +1,7 @@
 // O08 離線合成量測：沿用診斷 fixture、正式 transaction 與 Chromium helper，不載入正式 DB。
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {readFile, mkdir, rm, readdir, stat} from 'node:fs/promises';
+import {mkdir, rm, readdir, stat} from 'node:fs/promises';
 import {resolve, dirname, basename, join} from 'node:path';
 import {tmpdir, cpus, totalmem} from 'node:os';
 import {execFileSync} from 'node:child_process';

@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { bootServer, SERVER_PATH } from '../helpers/test-server.mjs';
-const day='20260803',next='20260804';
+const day='20260803';
 let release, entered;let revised=false;
 const gate=new Promise(r=>release=r),started=new Promise(r=>entered=r);
 const srv=await bootServer({routes:[

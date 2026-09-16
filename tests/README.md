@@ -47,6 +47,7 @@ Node 內建 `node --test`＋ `jsdom`（前端 DOM 測試）。使用 **Node 22.2
 ## 怎麼跑
 
 ```powershell
+npm run lint          # ESLint：只開幾乎一定是 bug 的規則（未使用變數、未定義、finally 裡 return…），無風格規則；CI 也跑
 npm test              # 後端 + 前端（全離線、臨時埠，絕不碰 5174）
 npm run test:backend  # 只跑後端
 npm run test:frontend # 只跑前端（jsdom）

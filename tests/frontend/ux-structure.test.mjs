@@ -236,7 +236,7 @@ test("場景勝率面板：chips 包在可收合的 details（桌機預設展開
       scenarios: [{ scenario: "midBandDefense", samples: 30, wins: 11, losses: 12, expired: 0, pending: 7, resolved: 23, continuousResolved: 23, winRate: 47.8, winRateMinSamples: 20, avgResultPct: 0.83 }] };
     renderSwingVerifyPanel();
     const fold = document.querySelector("#swingVerify details.sv-fold");
-    const out = { exists: Boolean(fold), open: fold ? fold.open : null, summary: fold?.querySelector("summary")?.textContent.replace(/\s+/g, " ").trim() || "", chipsInside: Boolean(fold?.querySelector(".sv-chips")) };
+    const out = { exists: Boolean(fold), open: fold ? fold.open : null, summary: fold?.querySelector("summary")?.textContent.replace(/\\s+/g, " ").trim() || "", chipsInside: Boolean(fold?.querySelector(".sv-chips")) };
     state.screen = prevScreen;
     swingVerifyState.data = prevData;
     return out;

@@ -46,7 +46,6 @@ function stockDayMonthRoute() {
 
 // TWT49U 全部失敗 → ensureCorporateActionResults 回 degraded: true
 const failingResultRoute = { match: /www\.twse\.com\.tw\/rwd\/zh\/exRight\/TWT49U/, reply: () => { throw new Error("上游 503"); } };
-const okResultRoute = { match: /www\.twse\.com\.tw\/rwd\/zh\/exRight\/TWT49U/, reply: { stat: "OK", data: [] } };
 
 async function boot(resultRoute) {
   return importServer({

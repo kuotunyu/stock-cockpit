@@ -66,7 +66,7 @@ test("拿到 writer lease 之前不碰 DATA_DIR：先暫存，armServerLogFile �
   const files = readdirSync(logDir).filter(name => /^server-\d{8}\.log$/.test(name));
   assert.equal(files.length, 1);
   const text = readFileSync(join(logDir, files[0]), "utf8");
-  assert.match(text, /LOG   第一行 buffered\n.*WARN  第二行\n$/s);
+  assert.match(text, /LOG {3}第一行 buffered\n.*WARN {2}第二行\n$/s);
   mod.appendServerLog("error", ["第三行直接落地"]);
   assert.match(readFileSync(join(logDir, files[0]), "utf8"), /ERROR 第三行直接落地\n$/);
 });

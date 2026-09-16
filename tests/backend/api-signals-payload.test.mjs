@@ -4,7 +4,7 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { bootServer } from "../helpers/test-server.mjs";
-import { stockDayAllRow, tpexDailyCloseRow, misQuoteRow, compactToday, rocCompact } from "../helpers/fixtures.mjs";
+import { stockDayAllRow, tpexDailyCloseRow, compactToday, rocCompact } from "../helpers/fixtures.mjs";
 
 let srv;
 before(async () => {
