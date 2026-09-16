@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v67";
+const APP_SHELL_VERSION = "stock1-shell-v68";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -279,18 +279,6 @@ const sourceState = {
   selected: restoreDataSource(),
   sources: {},
   loading: false,
-  error: "",
-};
-
-// 版本與更新檢查：三個人各自 git pull、各自 npm start，畫面上要看得到「我跑的是哪一份」。
-// 只在「更多 → 版本與更新」被打開時抓一次，刻意不進 10 秒輪詢——這不是行情資料。
-const appVersionState = {
-  loading: false,
-  loaded: false,
-  version: "",
-  build: null,
-  update: null,
-  identity: null,
   error: "",
 };
 
@@ -5969,98 +5957,6 @@ function renderOperationalStatus() {
   </details>`;
 }
 
-async function loadAppVersion({ force = false } = {}) {
-  if (appVersionState.loading) return;
-  if (appVersionState.loaded && !force) return;
-  appVersionState.loading = true;
-  appVersionState.error = "";
-  try {
-    const payload = await fetchApi("/api/app-version");
-    appVersionState.version = String(payload?.version || "");
-    appVersionState.build = payload?.build || null;
-    appVersionState.update = payload?.update || null;
-    appVersionState.identity = payload?.identity || null;
-    appVersionState.loaded = true;
-  } catch (error) {
-    appVersionState.error = error?.message || "版本資訊讀取失敗";
-  } finally {
-    appVersionState.loading = false;
-    // 背景重繪一律走受保護提交，避免清掉正在輸入的密碼／券商金鑰。
-    renderLiveDataUpdate();
-  }
-}
-
-// 把 /api/app-version 的 update.state 翻成畫面文案。
-// 刻意把「不知道」跟「已是最新」分開講：更新檢查連不上 GitHub 是常態（離線、限流、
-// 還沒 push），那時候說「已是最新」就是在騙人。
-function appBuildIdentityLabel(build) {
-  if (!build) return "未知";
-  const git = build.commit ? String(build.commit).slice(0, 7) : "無 Git commit";
-  const changes = build.dirty === true ? " · 未提交修改" : build.dirty === false ? "" : " · Git 狀態未知";
-  return `${git}${changes}`;
-}
-
-function appVersionSummary() {
-  const build = appVersionState.build;
-  const update = appVersionState.update;
-  const stamp = build?.available
-    ? `${build.branch ? `${build.branch}@` : ""}${build.commit}`
-    : "無法辨識";
-  if (appVersionState.error) return { badge: "讀取失敗", tone: "is-warn", headline: appVersionState.error, hint: "", stamp };
-  if (!appVersionState.loaded) {
-    return { badge: appVersionState.loading ? "查詢中" : "查看", tone: "", headline: "", hint: "", stamp };
-  }
-  const identity = appVersionState.identity;
-  if (!identity) return { badge: "身份未確認", tone: "is-warn", headline: "舊版後端未提供執行身份，無法確認是否已載入磁碟更新。", hint: "更新後請重新啟動伺服器，再按重新檢查。", stamp };
-  if (identity.restartRequired === true) return { badge: "需要重啟", tone: "is-warn", headline: "執行中後端與磁碟來源不同，需要重新啟動伺服器。", hint: "先停止原伺服器並等它完整結束，再執行 start.bat；頁面以 Ctrl+F5 重新載入。", stamp };
-  if (identity.shellVersion && identity.shellVersion !== APP_SHELL_VERSION) return { badge: "需要刷新", tone: "is-warn", headline: "本分頁外殼與磁碟外殼宣告版本不同。", hint: "請按 Ctrl+F5，重新載入前端資產。", stamp };
-  if (identity.restartRequired !== false || !identity.shellVersion) return { badge: "身份未確認", tone: "is-warn", headline: "來源指紋或磁碟外殼宣告不足，無法確認更新狀態。", hint: "請確認專案檔案完整，再重新檢查。", stamp };
-  const behindBy = Number(update?.behindBy) || 0;
-  const localAhead = Number(update?.localAhead) || 0;
-  const diskMatchesRuntime = Boolean(identity.runtime?.commit && identity.runtime.commit === identity.disk?.commit);
-  switch (String(update?.state || "")) {
-    case "current":
-      if (identity.runtime?.dirty !== false) return { badge: "來源有限", tone: "is-warn", headline: "執行來源包含未提交修改，或 Git 工作目錄狀態未知；commit 不能精確代表這份來源。", hint: "GitHub 比對只涵蓋 commit。", stamp };
-      return { badge: "最新", tone: "is-good", headline: "已是 GitHub 上的最新版本。", hint: "", stamp };
-    case "behind":
-      return {
-        badge: `${diskMatchesRuntime ? "落後" : "啟動版落後"} ${behindBy}`,
-        tone: "is-warn",
-        headline: `相對啟動 commit，GitHub 上有 ${behindBy} 個新 commit。`,
-        hint: diskMatchesRuntime
-          ? "磁碟仍是啟動時的 commit，可在專案資料夾執行 git pull；下載後重新檢查，依新的來源身份判斷是否需要重啟或刷新。"
-          : "本次比對未確認磁碟是否追上 GitHub。後端來源一致，目前不需重啟。",
-        stamp,
-      };
-    case "ahead":
-      return {
-        badge: "本機較新",
-        tone: "",
-        headline: `這台有 ${localAhead} 個 commit 還沒推上 GitHub。`,
-        hint: "朋友的機器要拿到這些修改，得先 git push。",
-        stamp,
-      };
-    case "diverged":
-      return {
-        badge: "已分岔",
-        tone: "is-warn",
-        headline: `與 GitHub 分岔了：上游有 ${behindBy} 個新 commit，本機有 ${localAhead} 個沒推上去。`,
-        hint: "先確認本機的修改要不要保留，再決定 git pull --rebase 或捨棄。",
-        stamp,
-      };
-    case "disabled":
-      return { badge: "已關閉", tone: "", headline: "更新檢查已用 UPDATE_CHECK=off 關閉。", hint: "", stamp };
-    default:
-      return {
-        badge: "無法確認",
-        tone: "",
-        headline: `目前無法跟 GitHub 對版：${update?.reason || "未知原因"}`,
-        hint: "這不影響任何看盤功能；執行與磁碟身份請看上方來源資訊。",
-        stamp,
-      };
-  }
-}
-
 // 加到主畫面的狀態：已是獨立視窗＝已安裝；瀏覽器給了 beforeinstallprompt＝可安裝；iOS 只能走 Safari 分享；其餘瀏覽器沒提供入口。
 function pwaInstallSummary() {
   const standalone = (typeof window.matchMedia === "function" && window.matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
@@ -6139,8 +6035,6 @@ function renderMorePanel() {
     default: "尚未開啟",
   }[notificationPermission] || "尚未開啟";
   const notificationTone = notificationPermission === "granted" ? "is-good" : notificationPermission === "denied" ? "is-warn" : "";
-  const versionSummary = appVersionSummary();
-  const versionDetailsOpen = Boolean(detail.querySelector('.version-details')?.open);
   const activePanel = state.morePanel || "source";
   const items = [
     {
@@ -6200,13 +6094,6 @@ function renderMorePanel() {
       status: alertStatus,
     },
     {
-      key: "version",
-      icon: "git-branch",
-      title: "版本與更新",
-      desc: "確認三台機器跑同一份 code",
-      status: versionSummary.badge,
-    },
-    {
       key: "mobile",
       icon: "smartphone",
       title: "手機介面",
@@ -6233,10 +6120,11 @@ function renderMorePanel() {
     </div>
   `;
 
-  // 十顆 tile 分兩組：觀察者天天會碰的「看盤設定」在前，維護者才需要的「帳號與維護」在後。
+  // 九顆 tile 分兩組：觀察者天天會碰的「看盤設定」在前，維護者才需要的「帳號與維護」在後。
+  // 「版本與更新」tile 2026-09-16 依使用者要求移除（三個人各自 git pull 的情境已由伺服器啟動提示與 CI 取代）；/api/app-version 端點保留。
   const MORE_GROUPS = [
     { title: "看盤設定", keys: ["glossary", "source", "risk", "alerts", "mobile"] },
-    { title: "帳號與維護", keys: ["system", "backup", "brokerGuide", "notesFeed", "version"] },
+    { title: "帳號與維護", keys: ["system", "backup", "brokerGuide", "notesFeed"] },
   ];
   const renderTile = (item) => `
         <button class="${activePanel === item.key ? "is-active" : ""}" data-setting="${item.key}" type="button">
@@ -6303,35 +6191,6 @@ function renderMorePanel() {
       ${notificationPermission === "denied"
         ? `<p class="more-note">瀏覽器已封鎖這個網站的通知權限，App 這邊無法自己打開；要恢復請到瀏覽器網址列左側的鎖頭圖示 → 網站設定 → 通知，改成「允許」。</p>`
         : ""}
-    `,
-    version: `
-      <header>
-        <span class="more-kicker">這台機器</span>
-        <h2>版本與更新</h2>
-      </header>
-      ${versionSummary.headline ? `<p>${escapeHtml(versionSummary.headline)}</p>` : ""}
-      ${versionSummary.hint ? `<p>${escapeHtml(versionSummary.hint)}</p>` : ""}
-      <dl class="version-identities">
-        <div><dt>執行中後端</dt><dd>${escapeHtml(appBuildIdentityLabel(appVersionState.identity?.runtime))}</dd></div>
-        <div><dt>磁碟後端</dt><dd>${escapeHtml(appBuildIdentityLabel(appVersionState.identity?.disk))}</dd></div>
-        <div><dt>本分頁外殼</dt><dd>${escapeHtml(APP_SHELL_VERSION)}</dd></div>
-        <div><dt>更新狀態</dt><dd class="${versionSummary.tone}">${escapeHtml(versionSummary.badge)}</dd></div>
-      </dl>
-      ${appVersionState.identity?.restartRequired === false ? '<p>後端來源一致；純文件或 commit 變更不要求重啟。</p>' : ''}
-      <button class="more-primary" data-action="refresh-app-version" type="button"${appVersionState.loading ? " disabled" : ""}>${appVersionState.loading ? "查詢中…" : "重新檢查"}</button>
-      <details class="version-details"${versionDetailsOpen ? " open" : ""}>
-        <summary id="appVersionDetailsToggle">版本來源與比對詳情</summary>
-        <dl class="version-identities">
-          <div><dt>版本號</dt><dd>${escapeHtml(appVersionState.version || "—")}</dd></div>
-          <div><dt>本機 commit</dt><dd>${escapeHtml(versionSummary.stamp)}</dd></div>
-          <div><dt>磁碟外殼宣告</dt><dd>${escapeHtml(appVersionState.identity?.shellVersion || "未知")}</dd></div>
-          <div><dt>執行來源指紋</dt><dd>${escapeHtml(appVersionState.identity?.runtime?.fingerprint || "未知")}</dd></div>
-          <div><dt>磁碟來源指紋</dt><dd>${escapeHtml(appVersionState.identity?.disk?.fingerprint || "未知")}</dd></div>
-        </dl>
-        <p class="more-note">執行中後端在程序載入時固定；磁碟資訊在本次查詢讀取。本分頁外殼是載入 app.js 時固定的發行宣告，不是全部資產逐 byte 驗證。</p>
-        <p class="more-note">後端指紋涵蓋 server.mjs、portfolio-risk.js、verification-evidence.mjs、package.json、package-lock.json 的載入時磁碟快照；不含環境設定、實際套件 bytes，也不保證更新過程中跨檔案同時載入。更新程式前應先停止服務。dirty 或未知狀態下，commit 僅供追溯。</p>
-        <p class="more-note">上游：${escapeHtml(appVersionState.build?.repo || "沒有 GitHub origin，無法比對")}。GitHub 比對以啟動時 commit 為起點，每 6 小時最多查詢一次，除此之外不送出任何資料；要完全關掉就在 .env 設 <code>UPDATE_CHECK=off</code> 再重啟伺服器。</p>
-      </details>
     `,
     risk: `
       <header>
@@ -13672,7 +13531,7 @@ document.addEventListener("click", async (event) => {
     renderLiveDataUpdate();
     return;
   }
-  const moreAction = event.target.closest('[data-action="refresh-data"], [data-action="refresh-app-version"], [data-action="enable-alert-notifications"], [data-action="open-filter"], [data-action="test-broker"], [data-action="delete-broker"], [data-action="reload-users"], [data-action="logout"], [data-action="toggle-surveillance"]');
+  const moreAction = event.target.closest('[data-action="refresh-data"], [data-action="enable-alert-notifications"], [data-action="open-filter"], [data-action="test-broker"], [data-action="delete-broker"], [data-action="reload-users"], [data-action="logout"], [data-action="toggle-surveillance"]');
   if (moreAction) {
     if (moreAction.dataset.action === "refresh-data") {
       loadMarketSummary({ notify: true });
@@ -13684,13 +13543,6 @@ document.addEventListener("click", async (event) => {
     if (moreAction.dataset.action === "enable-alert-notifications") {
       moreAction.blur();
       void requestPriceAlertNotifications().then(() => render());
-    }
-    if (moreAction.dataset.action === "refresh-app-version") {
-      // 伺服器端有 6 小時快取，這裡按下去多半拿到同一份結果——刻意不做前端強制重查，
-      // 免得變成對 GitHub 的手動洪水閘門。
-      moreAction.blur();
-      loadAppVersion({ force: true });
-      render();
     }
     if (moreAction.dataset.action === "toggle-surveillance") {
       setShowSurveillance(!state.showSurveillance);
@@ -13796,11 +13648,6 @@ document.addEventListener("click", async (event) => {
       return;
     }
     state.morePanel = settingName;
-    if (settingName === "version") {
-      loadAppVersion();
-      render();
-      return;
-    }
     if (settingName === "backup" && !authState.user) {
       setLoginGateVisible(true, "登入後才能備份或復原個人資料");
       render();

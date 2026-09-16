@@ -47,16 +47,11 @@ test('A 安裝後 B 資產失敗仍可重開 A，重試 B 不清舊分頁計畫�
     assert.equal(await quantity.evaluate(node => node === document.activeElement), true);
     assert.equal(await page.evaluate(() => APP_SHELL_VERSION), 'stock1-shell-test-a');
     await page.locator('[data-trade-plan-close]').click();
-    await visibleNav(page, 'more').click();
-    await page.locator('[data-setting=version]').click();
-    await page.locator('#moreDetail').getByText('需要刷新', { exact: true }).waitFor();
-    assert.match(await page.locator('#moreDetail').textContent(), /stock1-shell-test-a/);
+    await visibleNav(page, 'more').click(); // 2026-09-16：「版本與更新」tile 已移除，舊分頁仍宣告 A 由上一行 APP_SHELL_VERSION 斷言覆蓋
 
     const nextPage = await f.newPage();
     assert.equal(await nextPage.evaluate(() => APP_SHELL_VERSION), 'stock1-shell-test-b');
-    await visibleNav(nextPage, 'more').click();
-    await nextPage.locator('[data-setting=version]').click();
-    await nextPage.locator('#moreDetail').getByText('最新', { exact: true }).waitFor();
+    await visibleNav(nextPage, 'more').click(); // 新分頁載入 B 由上一行 APP_SHELL_VERSION 斷言覆蓋（版本 tile 已移除）
     assert.deepEqual(await nextPage.evaluate(() => caches.keys()), ['stock1-shell-test-b']);
     assert.equal(await page.evaluate(() => APP_SHELL_VERSION), 'stock1-shell-test-a');
     assert.deepEqual(f.externalRequests, []);
