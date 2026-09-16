@@ -17116,13 +17116,16 @@ function handleFatalError(kind, error, { shutdown = () => shutdownServer({ reaso
   console.error(`[Stock1] ${kind}，服務將退出（守門腳本會在 10 分鐘內重新啟動）：`, error?.stack || error?.message || error);
   let exited = false;
   const leave = () => { if (exited) return; exited = true; exit(1); };
+  // 寬限計時器刻意**不 unref**：關機卡住而事件迴圈已無其他工作時，unref 會讓程序在沒呼叫 exit(1) 的情況下自然結束
+  // （退出碼 0、守門看不出是當機）——Node 22 的 CI 抓到的。頂多多活 graceMs。
   const timer = setTimeout(leave, graceMs);
-  timer.unref?.();
   Promise.resolve().then(() => shutdown()).catch(() => {}).finally(() => { clearTimeout(timer); leave(); });
 }
 function installFatalErrorHandlers() {
-  process.on("uncaughtException", error => handleFatalError("uncaughtException", error));
-  process.on("unhandledRejection", reason => handleFatalError("unhandledRejection", reason));
+  // 先標退出碼：即使後面任何路徑讓程序自然結束，也不會以 0 退出。
+  const onFatal = kind => error => { process.exitCode = 1; handleFatalError(kind, error); };
+  process.on("uncaughtException", onFatal("uncaughtException"));
+  process.on("unhandledRejection", onFatal("unhandledRejection"));
 }
 
 // 測試（node --test）import 本檔時設 STOCK1_SKIP_LISTEN=1，改用 startServer(0) 綁臨時埠。

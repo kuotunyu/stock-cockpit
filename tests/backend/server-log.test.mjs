@@ -42,7 +42,8 @@ test("handleFatalError：先關機再退出；關機卡住 graceMs 後仍退出�
   assert.equal(shutdowns, 1, "第二次不再嘗試關機");
   assert.deepEqual(exits, [1, 1]);
 
-  // 關機卡住：graceMs 到了照樣退出，而且只退一次
+  // 關機卡住：graceMs 到了照樣退出，而且只退一次。這段同時釘住「寬限計時器不能 unref」——unref 的話這裡的事件迴圈
+  // 沒別的東西，程序會在沒呼叫 exit 前自然結束（Node 22 CI 實際發生：Promise resolution is still pending）。
   mod.resetFatalErrorStateForTest();
   const stuckExits = [];
   await new Promise(resolve => {
