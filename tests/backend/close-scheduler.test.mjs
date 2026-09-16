@@ -14,10 +14,11 @@ const referenceFor = (twse, tpex, coverageComplete = true) => ({
   markets: { twse: { asOf: iso(twse) }, tpex: { asOf: iso(tpex) } },
 });
 
-function withFormal(db) {
+function withFormal(db, day = today, strategies = ['overnight', 'swing']) {
   for (const [strategy,formulaVersion] of [['overnight',mod.OVERNIGHT_FORMULA_VERSION],['swing',mod.SWING_FORMULA_VERSION]]) {
-    mod.publishVerification(db,strategy,{asOf:iso(today),formulaVersion,requestScope:mod.canonicalVerificationScope(strategy),
-      coverage:{complete:true,markets:referenceFor(today,today).markets},candidatePool:[],inputEvidence:[],scanQuality:{candidateCount:0,completedCount:0,reliable:true},groups:{},picks:[]});
+    if (!strategies.includes(strategy)) continue;
+    mod.publishVerification(db,strategy,{asOf:iso(day),formulaVersion,requestScope:mod.canonicalVerificationScope(strategy),
+      coverage:{complete:true,markets:referenceFor(day,day).markets},candidatePool:[],inputEvidence:[],scanQuality:{candidateCount:0,completedCount:0,reliable:true},groups:{},picks:[]});
   }
   return db;
 }
@@ -31,7 +32,7 @@ test("closeTasksDue：今天跑過、資料未對齊、覆蓋不完整 → 不�
   assert.equal(mod.closeTasksDue({ today: "", reference: referenceFor(today, today), db: {}, lastRunDay: "" }).reason, "no-date");
 
   const nothing = mod.closeTasksDue({ today, reference: referenceFor(today, today), db: {}, lastRunDay: "" });
-  assert.deepEqual(nothing, { due: true, reason: "ok", needOvernight: true, needSwing: true });
+  assert.deepEqual(nothing, { due: true, reason: "ok", tradeDate: today, needOvernight: true, needSwing: true });
 
   const both = mod.closeTasksDue({
     today,
@@ -42,7 +43,7 @@ test("closeTasksDue：今天跑過、資料未對齊、覆蓋不完整 → 不�
     }),
     lastRunDay: "",
   });
-  assert.deepEqual(both, { due: true, reason: "ok", needOvernight: false, needSwing: false });
+  assert.deepEqual(both, { due: true, reason: "ok", tradeDate: today, needOvernight: false, needSwing: false });
 
   const staleVersion = mod.closeTasksDue({
     today,
@@ -68,7 +69,7 @@ test("runScheduledCloseTasks：缺什麼跑什麼，都有則只推進驗證；�
     lastRunDay: "",
   });
   let result = await mod.runScheduledCloseTasks(deps({}));
-  assert.deepEqual(result, { ran: ["overnight", "swing"], skipped: "", persisted: false, captureStatus: {overnight:"incomplete",swing:"incomplete"} }, "loadDb 永遠回 {} → 沒落盤");
+  assert.deepEqual(result, { ran: ["overnight", "swing"], skipped: "", persisted: false, tradeDate: today, captureStatus: {overnight:"incomplete",swing:"incomplete"} }, "loadDb 永遠回 {} → 沒落盤");
   assert.deepEqual(calls[0], ["overnight", { persistSnapshot: true }]);
   assert.deepEqual(calls[1], ["swing"]);
 
@@ -77,7 +78,7 @@ test("runScheduledCloseTasks：缺什麼跑什麼，都有則只推進驗證；�
     signalSnapshots: [{ asOf: iso(today), formulaVersion: mod.OVERNIGHT_FORMULA_VERSION, picks: [] }],
     swingSnapshots: { [`${today}:all`]: { body: { formulaVersion: mod.SWING_FORMULA_VERSION } } },
   })));
-  assert.deepEqual(result, { ran: ["advance"], skipped: "", persisted: true, captureStatus:{overnight:"complete-zero",swing:"complete-zero"} });
+  assert.deepEqual(result, { ran: ["advance"], skipped: "", persisted: true, tradeDate: today, captureStatus:{overnight:"complete-zero",swing:"complete-zero"} });
   assert.deepEqual(calls, [["advance"]]);
 
   calls.length = 0;
@@ -185,7 +186,7 @@ test("provisional 不算已跑：builder 跑完 db 仍缺快照 → persisted=fa
     advanceSwingVerification: async () => { calls.push("advance"); },
   };
   const first = await mod.runScheduledCloseTasks(deps);
-  assert.deepEqual(first, { ran: ["overnight", "swing"], skipped: "", persisted: false, captureStatus: {overnight:"incomplete",swing:"incomplete"} });
+  assert.deepEqual(first, { ran: ["overnight", "swing"], skipped: "", persisted: false, tradeDate: today, captureStatus: {overnight:"incomplete",swing:"incomplete"} });
   assert.equal(mod.closeSchedulerStateForTest().lastRunDay, "", "沒落盤不可標記今天已跑");
   const second = await mod.runScheduledCloseTasks(deps);
   assert.equal(second.skipped, "", "沒落盤就該重跑，不是 already-ran");
@@ -245,4 +246,70 @@ test("失敗退避：10→20→40 分鐘後才重試、退避期間不打上游�
   });
   assert.equal(ok.skipped, "reference-not-today");
   assert.equal(mod.closeSchedulerStateForTest().failures, 0);
+});
+
+// ---- 2026-09-16：證交所整批收盤檔（STOCK_DAY_ALL）當晚 20 點多還是前一日、隔天早上才更新 → 補採前一個排定交易日 ----
+test("closeTasksDue 補採：對齊日是今天的前一個排定交易日且缺正式快照才跑；更早、已落盤、未對齊、今天跑過都不跑", () => {
+  // 2026-09-16 是週三；09-15（二）、09-14（一）、09-11（五）
+  const at = (today, day, extra = {}) => mod.closeTasksDue({ today, reference: referenceFor(day, day), db: {}, lastRunDay: "", ...extra });
+  assert.deepEqual(at("20260916", "20260915"), { due: true, reason: "backfill", tradeDate: "20260915", needOvernight: true, needSwing: true });
+  assert.equal(at("20260916", "20260915", { db: withFormal({}, "20260915") }).reason, "reference-not-today", "前一日已落盤 → 只是今天的檔還沒到");
+  const half = at("20260916", "20260915", { db: withFormal({}, "20260915", ["swing"]) });
+  assert.deepEqual(half, { due: true, reason: "backfill", tradeDate: "20260915", needOvernight: true, needSwing: false }, "缺哪個補哪個");
+  assert.equal(at("20260916", "20260914").reason, "reference-not-today", "對齊在兩個交易日前不回補（整批收盤檔也回不了）");
+  assert.equal(at("20260914", "20260911").reason, "backfill", "週一早上對齊在週五 → 跨週末照補");
+  assert.equal(at("20260912", "20260911").reason, "backfill", "週六也補得到週五的");
+  const holidayRows = [{ date: "2026-09-15", name: "測試休市" }];
+  assert.equal(at("20260916", "20260914", { holidayRows }).reason, "backfill", "日曆說 09-15 休市 → 09-16 的前一個排定交易日是 09-14");
+  assert.equal(at("20260916", "20260915", { holidayRows }).reason, "reference-not-today", "休市日的檔不可能出現，出現了也不認");
+  assert.equal(mod.closeTasksDue({ today: "20260916", reference: referenceFor("20260915", "20260916"), db: {}, lastRunDay: "" }).reason, "reference-not-today", "未對齊照舊");
+  assert.equal(at("20260916", "20260915", { lastRunDay: "20260916" }).reason, "already-ran", "今天跑過照舊");
+  assert.equal(at("20260916", "20260916").reason, "ok", "對齊日是今天照舊");
+});
+
+test("runScheduledCloseTasks 補採：隔天早上對齊在昨天 → 跑缺的 builder、以昨天推進驗證、落盤後記昨天已跑；今天收盤後照常跑今天", async () => {
+  mod.resetCloseSchedulerStateForTest();
+  const calls = [];
+  const attempts = [];
+  let db = withFormal({}, "20260916", ["swing"]); // 09-16 只有波段落盤（例如有人開過 App），隔日沖缺
+  const deps = {
+    now: new Date("2026-09-17T00:05:00Z"), // 台北 09-17 08:05
+    getReferenceData: async () => referenceFor("20260916", "20260916"),
+    loadDb: async () => db,
+    buildOvernightSignals: async () => { calls.push("overnight"); withFormal(db, "20260916", ["overnight"]); },
+    buildSwingBoard: async () => { calls.push("swing"); },
+    advanceSwingVerification: async (_reference, day) => { calls.push(`advance:${day}`); },
+    recordCaptureAttempt: async (strategy, day, evidence) => attempts.push({ strategy, day, ...evidence }),
+  };
+  const result = await mod.runScheduledCloseTasks(deps);
+  assert.deepEqual(result, { ran: ["overnight", "advance"], skipped: "", persisted: true, tradeDate: "20260916",
+    captureStatus: { overnight: "complete-zero", swing: "complete-zero" } });
+  assert.deepEqual(calls, ["overnight", "advance:20260916"], "以被補的收盤日推進波段驗證，不是今天");
+  assert.equal(mod.closeSchedulerStateForTest().lastRunDay, "20260916", "記的是被補的收盤日，不是今天");
+  assert.deepEqual(attempts, [], "成功不寫失敗嘗試");
+
+  // 下一輪：09-16 已落盤、今天（09-17）的檔還沒到 → 當「今天資料未齊」，reference attempt 記在今天
+  const again = await mod.runScheduledCloseTasks({ ...deps, now: new Date("2026-09-17T00:15:00Z") });
+  assert.equal(again.skipped, "reference-not-today");
+  assert.equal(attempts.at(-1).day, "20260917");
+  assert.equal(attempts.at(-1).stage, "reference");
+
+  // 今天收盤後兩市場對齊到今天 → 照常跑今天（不會被早上的補採擋成 already-ran）
+  const evening = await mod.runScheduledCloseTasks({ ...deps, now: new Date("2026-09-17T09:00:00Z"),
+    getReferenceData: async () => referenceFor("20260917", "20260917"),
+    buildOvernightSignals: async () => { withFormal(db, "20260917", ["overnight"]); },
+    buildSwingBoard: async () => { withFormal(db, "20260917", ["swing"]); } });
+  assert.deepEqual(evening, { ran: ["overnight", "swing"], skipped: "", persisted: true, tradeDate: "20260917",
+    captureStatus: { overnight: "complete-zero", swing: "complete-zero" } });
+  assert.equal(mod.closeSchedulerStateForTest().lastRunDay, "20260917");
+  assert.equal((await mod.runScheduledCloseTasks({ ...deps, now: new Date("2026-09-17T09:10:00Z"),
+    getReferenceData: async () => referenceFor("20260917", "20260917") })).skipped, "already-ran");
+
+  // 補採途中 builder 失敗 → 失敗嘗試記在被補的收盤日（coverage 才看得到是「試過失敗」不是「沒採」）
+  mod.resetCloseSchedulerStateForTest();
+  db = {};
+  await assert.rejects(mod.runScheduledCloseTasks({ ...deps, lastRunDay: "", buildOvernightSignals: async () => { throw new Error("backfill boom"); } }), /backfill boom/);
+  assert.equal(attempts.at(-1).day, "20260916");
+  assert.equal(attempts.at(-1).strategy, "overnight");
+  assert.equal(attempts.at(-1).status, "failed");
 });

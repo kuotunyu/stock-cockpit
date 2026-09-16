@@ -16748,22 +16748,32 @@ function resetCloseSchedulerStateForTest() {
   schedulerFailureDay = "";
 }
 
+// 某策略在某個收盤日是否已有 canonical formal capture（排程「該不該跑」與「跑完有沒有落盤」共用同一個判準）。
+function hasFormalCapture(db, strategy, tradeDate) {
+  const key = verificationPublicationKey(strategy, tradeDate, strategy === 'swing' ? SWING_FORMULA_VERSION : OVERNIGHT_FORMULA_VERSION);
+  const store = db?.verificationPublications;
+  const capture = store?.captures?.[store?.current?.[key]];
+  return capture?.kind === 'formal' && capture.complete === true;
+}
+
 // 純決策：這一輪該不該跑、缺什麼。reference 的 asOf 是 ISO 日期字串。
-function closeTasksDue({ today, reference, db, lastRunDay }) {
+// 2026-09-16 起認「兩市場對齊的收盤日」，不再只認「今天」：那天證交所整批收盤檔（STOCK_DAY_ALL）到 20 點多還是前一日、
+// 隔天早上才更新，以前這種日子伺服器明明開著也永遠沒有正式快照（隔天看到「對齊日 ≠ 今天」就跳過）。
+// 對齊日是今天 → 照舊；是今天的前一個排定交易日且還缺正式快照 → 補採（builder 本來就以資料日落盤、不看牆上日期，
+// 發布時刻另有 publicationStartedAt 如實記錄，畫面上有人開 App 本來就會這樣補）；更早的不回補——整批收盤檔只有最新一天，也回不了。
+function closeTasksDue({ today, reference, db, lastRunDay, holidayRows = [] }) {
   if (!today) return { due: false, reason: "no-date" };
   if (lastRunDay === today) return { due: false, reason: "already-ran" };
   const twse = toCompactDate(reference?.markets?.twse?.asOf || "") || "";
   const tpex = toCompactDate(reference?.markets?.tpex?.asOf || "") || "";
-  if (!reference?.coverageComplete || twse !== today || tpex !== today) return { due: false, reason: "reference-not-today" };
-  const hasFormal = (strategy, version) => {
-    const key = verificationPublicationKey(strategy, today, version);
-    const store = db?.verificationPublications;
-    const capture = store?.captures?.[store?.current?.[key]];
-    return capture?.kind === 'formal' && capture.complete === true;
-  };
-  const hasOvernight = hasFormal('overnight', OVERNIGHT_FORMULA_VERSION);
-  const hasSwing = hasFormal('swing', SWING_FORMULA_VERSION);
-  return { due: true, reason: "ok", needOvernight: !hasOvernight, needSwing: !hasSwing };
+  if (!reference?.coverageComplete || !twse || twse !== tpex) return { due: false, reason: "reference-not-today" };
+  const backfill = twse !== today;
+  if (backfill && twse !== previousScheduledTradingDate(today, holidayRows)) return { due: false, reason: "reference-not-today" };
+  const needOvernight = !hasFormalCapture(db, 'overnight', twse);
+  const needSwing = !hasFormalCapture(db, 'swing', twse);
+  // 前一日已經落盤、今天的檔還沒到：跟以前一樣當「今天的資料還沒齊」（會記今天的 reference attempt）。
+  if (backfill && !needOvernight && !needSwing) return { due: false, reason: "reference-not-today" };
+  return { due: true, reason: backfill ? "backfill" : "ok", tradeDate: twse, needOvernight, needSwing };
 }
 
 // 編排：deps 可注入（測試用）；正式路徑用模組內的 builder。
@@ -16785,15 +16795,19 @@ async function runScheduledCloseTasks(deps = {}) {
     if (now.getTime() < schedulerRetryAt) return { ran: [], skipped: "backoff", persisted: false };
   }
   const lastRunDay = useModuleState ? lastScheduledRunDay : deps.lastRunDay;
+  // 補採前一個排定交易日要靠日曆判斷「前一個」是哪天；日曆沒快取就只用週末規則（連假隔天可能不補，收盤後照常跑今天）。
+  const holidayRows = deps.holidayRows || tradingCalendarCache.value?.holidayRows || [];
+  // 這一輪實際在採的收盤日：今天，或補採時的前一個排定交易日。reference／DB 階段失敗記在今天。
+  let tradeDate = today;
   const loadDbFn = deps.loadDb || loadDb;
   const saveAttempt = deps.recordCaptureAttempt || (deps.loadDb ? async () => {} : async (strategy, day, evidence) =>
     commitDbMutation(db => recordCaptureAttempt(db, strategy, day, evidence) ? true : skipDbMutation(false)));
-  const captureStatusFor = (db, absent = 'incomplete') => Object.fromEntries(['overnight','swing'].map(strategy => {
-    const key = verificationPublicationKey(strategy, today, currentVerificationIdentity(strategy).selectionVersion);
+  const captureStatusFor = (db, absent = 'incomplete', day = today) => Object.fromEntries(['overnight','swing'].map(strategy => {
+    const key = verificationPublicationKey(strategy, day, currentVerificationIdentity(strategy).selectionVersion);
     const id = db.verificationPublications?.current?.[key];
     if (id) return [strategy, db.verificationCaptures?.[id]?.status || 'legacy-unknown'];
     const manifest = Object.values(db.verificationCaptures || {}).filter(item => item.strategy === strategy
-      && toCompactDate(item.tradeDate) === today && item.canonical && item.status !== 'not-captured').sort(compareVerificationAttempts)[0];
+      && toCompactDate(item.tradeDate) === day && item.canonical && item.status !== 'not-captured').sort(compareVerificationAttempts)[0];
     return [strategy, manifest?.status || absent];
   }));
   let activePhase = { stage: 'reference', strategy: null };
@@ -16801,7 +16815,8 @@ async function runScheduledCloseTasks(deps = {}) {
     const reference = await (deps.getReferenceData || getReferenceData)();
     activePhase = null;
     const db = await loadDbFn();
-    const decision = closeTasksDue({ today, reference, db, lastRunDay });
+    const decision = closeTasksDue({ today, reference, db, lastRunDay, holidayRows });
+    if (decision.tradeDate) tradeDate = decision.tradeDate;
     const ran = [];
     if (!decision.due) {
       if (decision.reason === 'reference-not-today') {
@@ -16829,24 +16844,24 @@ async function runScheduledCloseTasks(deps = {}) {
       activePhase = null;
       ran.push("swing");
     } else {
-      // closeTasksDue 已要求兩市場整批收盤都是今天，收盤日就是今天（不需要再算眾數）。
-      await (deps.advanceSwingVerification || advanceSwingVerification)(reference, today);
+      // closeTasksDue 已要求兩市場整批收盤對齊在 tradeDate，收盤日就是它（不需要再算眾數）。
+      await (deps.advanceSwingVerification || advanceSwingVerification)(reference, tradeDate);
       ran.push("advance");
     }
-    // 跑完再看一次 DB：builder 在歷史覆蓋不足時只回 provisional、絕不落盤，這種日子不可標記「今天已跑」，
+    // 跑完再看一次 DB：builder 在歷史覆蓋不足時只回 provisional、絕不落盤，這種日子不可標記「已跑」，
     // 否則 README 說的「每日收盤後自動凍結」會靜默失敗、當天不再重試。
     const afterDb = await loadDbFn();
-    const after = closeTasksDue({ today, reference, db: afterDb, lastRunDay: "" });
-    const persisted = after.due && !after.needOvernight && !after.needSwing;
+    const persisted = ['overnight', 'swing'].every(strategy => hasFormalCapture(afterDb, strategy, tradeDate));
     if (useModuleState) {
-      if (persisted) lastScheduledRunDay = today;
+      // 補採記的是被補的那個收盤日（09/17 早上補 09/16 → 09/16），今天收盤後照常再跑今天。
+      if (persisted) lastScheduledRunDay = tradeDate;
       schedulerFailures = 0;
       schedulerRetryAt = 0;
     }
-    return { ran, skipped: "", persisted, captureStatus: captureStatusFor(afterDb) };
+    return { ran, skipped: "", persisted, tradeDate, captureStatus: captureStatusFor(afterDb, 'incomplete', tradeDate) };
   } catch (error) {
     // 只記真正失敗的階段；未開始／已完成的策略、DB讀取及獨立驗證推進都不是採集失敗。
-    if (activePhase) await saveAttempt(activePhase.strategy, today,
+    if (activePhase) await saveAttempt(activePhase.strategy, tradeDate,
       { stage: activePhase.stage, status: 'failed', reason: error?.code || 'capture-source-unavailable', attemptedAt: now.toISOString() }).catch(() => {});
     if (useModuleState) {
       schedulerFailures += 1;
@@ -16864,7 +16879,11 @@ function startCloseScheduler() {
   const tick = () => {
     // 關機中或尚未 ready 不跑：lease 釋放後再寫 DB 正是 writer lease 要擋的雙 writer。
     if (shutdownRequested || lifecycleStatus !== "ready") return;
-    runScheduledCloseTasks().catch((error) => {
+    runScheduledCloseTasks().then((result) => {
+      if (!result?.ran?.length) return;
+      const label = { overnight: "隔日沖", swing: "波段", advance: "推進波段驗證" };
+      console.log(`[Stock1] 收盤排程 ${compactToSlashDate(result.tradeDate)}${result.tradeDate !== toTaipeiCompactDate() ? "（補採前一交易日）" : ""}：${result.ran.map(item => label[item] || item).join("、")}${result.persisted ? "，正式快照已落盤" : "，尚未落盤（下一輪再試）"}`);
+    }).catch((error) => {
       console.warn(`[Stock1] 收盤排程這一輪失敗（第 ${schedulerFailures} 次，${schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY ? "今天不再重試" : `${Math.round((schedulerRetryAt - Date.now()) / 60000)} 分鐘後重試`}）：`, error?.message || error);
     });
   };
@@ -17160,7 +17179,7 @@ export {
   // 靜態資產快取（api-data.test 的 ETag／gzip 契約）
   loadStaticAsset,
   // 收盤後排程（close-scheduler.test）
-  closeTasksDue, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
+  closeTasksDue, hasFormalCapture, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
   summarizeOperationalStatus, benchmarkMemoKey, recordCaptureAttempt,
   SCHEDULER_MAX_FAILURES_PER_DAY, closeSchedulerStateForTest, resetCloseSchedulerStateForTest,
   // 事件日曆／市場位階（market-events.test）
