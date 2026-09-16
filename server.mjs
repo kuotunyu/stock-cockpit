@@ -6970,6 +6970,19 @@ async function resolveRiskSource(name, fetcher, warnings) {
 // 把來源名稱（"…注意股"/"…處置股"/"…變更交易"）正規化成統一的監視標籤。
 // 同一檔多重命中時取嚴重度較高者（處置 > 全額交割 > 注意）當主標籤。
 const SURVEILLANCE_RANK = { attention: 1, changed: 2, disposition: 3 };
+// 注意股的風險名單條目：`code|累計次數|公布日|理由`。理由是交易所公布的「注意交易資訊」原文
+//（例：最近六個營業日累積漲幅達 27.11%…(第三款)），使用者要知道「為什麼注意」就靠它；放最後一段，裡面有 | 也不會切壞。
+function attentionEntry(code, count, date, reason) {
+  if (!/^\d{4}$/.test(code)) return null;
+  const text = String(reason || "").replace(/\s+/g, " ").trim();
+  return `${code}|${Math.max(1, Number(count) || 1)}|${toCompactDate(date) || ""}|${text}`;
+}
+function attentionInfoFromEntry(info, parts) {
+  const count = Math.max(1, Number(parts[1]) || 1);
+  const noticeDate = /^\d{8}$/.test(parts[2] || "") ? parts[2] : "";
+  const reason = parts.slice(3).join("|").trim();
+  return { ...info, count, noticeDate, reason };
+}
 function classifySurveillance(sourceName) {
   if (sourceName.includes("處置")) {
     return { kind: "disposition", label: "處置", note: "分盤撮合・預收款券・多不可當沖" };
@@ -7002,8 +7015,10 @@ async function loadRiskSets(riskDate) {
         const usable = twseNoticeRowsOrNull(rows);
         // 拿不到就要拋，讓 resolveRiskSource 走 last-good ＋ 警告；靜默回 [] 等於宣稱「沒有注意股」。
         if (usable === null) throw new Error("官方今天還沒公布名單（或已清空），這一類先留空、稍後自動重試");
-        return usable.map((r) => cleanCode(r.Code)).filter((code) => /^\d{4}$/.test(code));
+        // 2026-09-16：帶著官方「注意交易資訊」原文（為什麼被列注意），格式 code|累計次數|公布日|理由；理由放最後。
+        return usable.map((r) => attentionEntry(cleanCode(r.Code), r.NumberOfAnnouncement, r.Date, r.TradingInfoForAttention)).filter(Boolean);
       },
+      detailed: true,
     },
     {
       // 處置公告清單同時含「已結束」與「尚未開始」的列——看板自己就把它切成即將處置／
@@ -7035,8 +7050,9 @@ async function loadRiskSets(riskDate) {
       name: "TPEx 注意股",
       fetcher: async () => {
         const rows = await fetchJsonWithRetry("https://www.tpex.org.tw/openapi/v1/tpex_trading_warning_information");
-        return rows.map((row) => cleanCode(row.SecuritiesCompanyCode)).filter((code) => /^\d{4}$/.test(code));
+        return rows.map((row) => attentionEntry(cleanCode(row.SecuritiesCompanyCode), 1, row.Date, row.TradingInformation)).filter(Boolean);
       },
+      detailed: true,
     },
     {
       name: "TPEx 處置股",
@@ -7120,20 +7136,24 @@ async function loadRiskSets(riskDate) {
   ];
 
   await Promise.all([
-    ...sources.map(async ({ name, fetcher, windowed = false }) => {
+    ...sources.map(async ({ name, fetcher, windowed = false, detailed = false }) => {
       const entries = await resolveRiskSource(name, fetcher, warnings);
       const info = classifySurveillance(name);
       for (const entry of entries) {
-        // 一般來源存純代號；windowed 來源存 `code|起日|迄日`（沿用停牌來源的 `|` 慣例）。
-        // 舊的 risk-cache.json 只有純代號，讀到時 start/end 為空 → 保留，向後相容。
-        const [code, start = "", end = ""] = String(entry).split("|");
+        // 一般來源存純代號；windowed 來源存 `code|起日|迄日`（沿用停牌來源的 `|` 慣例）；
+        // detailed（注意股）存 `code|累計次數|公布日|理由`。舊的 risk-cache.json 只有純代號，
+        // 讀到時其餘欄位為空 → 保留、理由留空，向後相容。
+        const parts = String(entry).split("|");
+        const code = parts[0];
         if (!/^\d{4}$/.test(code)) continue;
+        const [start = "", end = ""] = windowed ? parts.slice(1) : [];
         // 期間可解析且不涵蓋基準日 → 已出關或尚未開始，今天不該掛處置標籤。
         // 期間解析不出來時保守保留：對風險標籤而言，寧可多標也不要漏標。
         if (windowed && start && end && !(start <= riskDate && riskDate <= end)) continue;
+        const entryInfo = detailed ? attentionInfoFromEntry(info, parts) : info;
         const prev = surveillance.get(code);
-        if (!prev || SURVEILLANCE_RANK[info.kind] > SURVEILLANCE_RANK[prev.kind]) {
-          surveillance.set(code, info);
+        if (!prev || SURVEILLANCE_RANK[entryInfo.kind] > SURVEILLANCE_RANK[prev.kind]) {
+          surveillance.set(code, entryInfo);
         }
       }
     }),
@@ -7764,7 +7784,8 @@ function lookupStockSurveillance(code, board) {
   const chg = board.changedTrading?.find((r) => r.code === clean);
   if (chg) return { kind: "changed", label: "全額交割", status: "changedTrading", note: "預收全額款券" };
   const att = board.attention.find((r) => r.code === clean);
-  if (att) return { kind: "attention", label: "注意", status: "attention", count: att.count || 1 };
+  if (att) return { kind: "attention", label: "注意", status: "attention", count: att.count || 1,
+    reason: String(att.reason || ""), noticeDate: att.noticeDate || "", daysOnList: att.daysOnList ?? null };
   return null;
 }
 
@@ -12011,7 +12032,7 @@ async function buildTechnicalAnalysis({ code, period = "day" } = {}) {
     const riskSets = await getRiskSets();
     if (!surveillanceStatus) {
       const m = riskSets.surveillance.get(clean);
-      if (m) surveillanceStatus = { kind: m.kind, label: m.label, note: m.note, status: m.kind };
+      if (m) surveillanceStatus = { ...m, status: m.kind };
     }
     if (riskSets.halted?.has(clean)) {
       const since = riskSets.halted.get(clean) || "";
@@ -17043,7 +17064,7 @@ export {
   storedObservationFor, invalidateVerifyHistoryCacheForTest, resetHistoryCacheForTest,
   // 大盤 regime 分層（taiex-regime.test）
   parseTaiexMonthlyPayload, getTaiexHistory, taiexRegime, regimeBucket, regimeStamp, getCurrentRegime, taiexPeriodBenchmark, REGIME_NEAR_MA60_BAND, openEntryReturnOf, dedupeRowsByCode, openEntryNetSummary, overnightMetricCoverage, aggregateOvernightRecords,
-  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureEvidence, publicSignalsView, resolveTradePlanSource, authoritativeBenchmarkCaptures,
+  parseTpexHoldingActions, getTpexHoldingActionMonth, calculateHoldingOutcome, verificationIdentity, verificationModelKey, currentVerificationIdentity, migrateVerificationMetadata, publishVerification, confirmVerificationPublication, canonicalVerificationScope, stripDuplicatedPublicationEvidence, packStoredCaptureEvidence, publicSignalsView, resolveTradePlanSource, authoritativeBenchmarkCaptures, attentionEntry, attentionInfoFromEntry,
   buildCaptureManifest, summarizeCaptureCoverage, recordCaptureGaps, summarizeVerificationPopulation,
   getSwingHistoricalCalendar, fixedBenchmarkSpec, benchmarkModelKey, buildFixedHorizonObservation, buildMatchedBenchmark,
   runVerificationBenchmarkBatch, queueVerificationBenchmark, summarizeVerificationBenchmarks,

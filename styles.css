@@ -10490,3 +10490,20 @@ details[data-overnight-warnings-fold] > .overnight-warning {
 .mobile-settings h3 em.is-good { color: var(--ok-text); }
 .mobile-nav-mode, .mobile-go-screens { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
 .mobile-nav-mode .watch-secondary-action.is-active { border-color: var(--orange); color: var(--orange-2); }
+
+/* ===== 明細面板的注意／處置說明（2026-09-16）===== */
+.detail-surv { margin: 0 10px 8px; padding: 10px 12px; border: 1px solid rgba(245, 196, 90, 0.4); background: rgba(245, 196, 90, 0.08); display: grid; gap: 6px; }
+.detail-surv[hidden] { display: none; }
+.detail-surv:has(.surv-tag.is-disposition) { border-color: rgba(255, 90, 84, 0.5); background: rgba(255, 90, 84, 0.08); }
+.detail-surv:has(.surv-tag.is-changed) { border-color: rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.04); }
+.detail-surv-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.detail-surv-head small { color: var(--muted-2); font-size: var(--fs-note); font-weight: 700; }
+.detail-surv-link { margin-left: auto; min-height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted-2); font-size: var(--fs-note); font-weight: 700; cursor: pointer; }
+.detail-surv-link:hover { color: var(--text); border-color: var(--muted); }
+.detail-surv p { margin: 0; font-size: var(--fs-body); line-height: 1.55; color: var(--text); }
+.detail-surv p strong { display: inline-block; margin-right: 6px; color: var(--warn-text); font-weight: 800; }
+.detail-surv:has(.surv-tag.is-disposition) p strong { color: var(--up-text); }
+@media (max-width: 760px) {
+  .detail-surv { margin: 0 10px 6px; padding: 8px 10px; }
+  .detail-surv-link { min-height: 44px; }
+}

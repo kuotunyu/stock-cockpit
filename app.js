@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v66";
+const APP_SHELL_VERSION = "stock1-shell-v67";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -911,6 +911,7 @@ const el = {
   companyProfile: document.getElementById("companyProfile"),
   fundamentalsPanel: document.getElementById("fundamentalsPanel"),
   priceAlertBox: document.getElementById("priceAlertBox"),
+  detailSurveillance: document.getElementById("detailSurveillance"),
   holdingsPanel: document.getElementById("holdingsPanel"),
   swingVerify: document.getElementById("swingVerify"),
   technicalSummary: document.getElementById("technicalSummary"),
@@ -8508,7 +8509,10 @@ function getStockReason(stock, screen = state.screen) {
 function renderSurveillanceBadge(info) {
   if (!info) return "";
   const shortNote = info.kind === "disposition" ? "分盤・預收" : info.kind === "changed" ? "預收全額" : "";
-  const tip = info.label + (info.note ? `：${info.note}` : "");
+  // 注意股的 title 直接講「為什麼」（交易所公布的注意交易資訊原文）；完整說明在明細面板的「注意／處置」區。
+  const tip = info.kind === "attention"
+    ? `注意股${Number(info.count) > 1 ? `（累計 ${info.count} 次）` : ""}：${info.reason || "交易所今天列入注意交易資訊；點開明細看說明"}`
+    : info.label + (info.note ? `：${info.note}` : "");
   return `<span class="surv-tag is-${info.kind}" title="${escapeHtml(tip)}">${escapeHtml(info.label)}</span>${shortNote ? `<small class="surv-note">${escapeHtml(shortNote)}</small>` : ""}`;
 }
 
@@ -8755,8 +8759,9 @@ function survStatusLine(item, tab) {
     return `<span class="surv-when is-block">鉅額 ${item.count} 筆 · 共 ${item.valueYi} 億</span>`;
   }
   if (tab === "attention") {
-    const reason = String(item.reason || "").replace(/\s+/g, "").slice(0, 24);
-    return `<span class="surv-when is-attn">注意 · 累計 ${item.count} 次</span>${reason ? `<span class="surv-period surv-reason">${escapeHtml(reason)}</span>` : ""}`;
+    const fullReason = String(item.reason || "").replace(/\s+/g, " ").trim();
+    const reason = fullReason.replace(/\s+/g, "").slice(0, 24);
+    return `<span class="surv-when is-attn">注意 · 累計 ${item.count} 次</span>${reason ? `<span class="surv-period surv-reason" title="${escapeHtml(fullReason)}">${escapeHtml(reason)}</span>` : ""}`;
   }
   if (tab === "changedTrading") {
     const extra = item.periodic ? " · 兼分盤" : "";
@@ -11819,9 +11824,52 @@ function getDetailScreenContext(stock) {
   return visible.some((item) => item.code === stock.code) ? "" : "不在目前篩選";
 }
 
+// 明細面板的「注意／處置／全額交割」說明（2026-09-16 使用者問「為什麼注意？要注意什麼？」）：
+// 為什麼＝交易所公布的原文（注意交易資訊／處置期間），要注意什麼＝白話講交易限制與升級風險。只顯示、不下判斷。
+function renderDetailSurveillance(stock) {
+  const box = el.detailSurveillance;
+  if (!box) return;
+  const info = stock?.surveillance;
+  if (!info || !info.kind) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  const stats = [];
+  let why = "";
+  let what = "";
+  if (info.kind === "attention") {
+    if (Number(info.count) > 1) stats.push(`累計 ${info.count} 次`);
+    if (Number(info.daysOnList) > 1) stats.push(`連 ${info.daysOnList} 天`);
+    why = info.reason
+      ? escapeHtml(info.reason)
+      : "交易所今天把它列入「注意交易資訊」（這筆名單沒附具體條款文字）。";
+    what = "注意股本身還沒有交易限制，但它是「處置」的前一步：累計次數多或連續多日，交易所可能改列處置——分盤撮合（每 5 或 20 分鐘才成交一次）、買賣先預收款券、多半不能當沖，到時想賣不一定賣得到你要的價位。追高前先想好停損。";
+  } else if (info.kind === "disposition") {
+    if (Number.isFinite(info.daysToRelease)) stats.push(info.releaseOnNextTradingDay ? "下一交易日出關" : `還有 ${info.daysToRelease} 天出關`);
+    why = `交易所已把它列為處置股${info.periodText ? `（${escapeHtml(info.periodText)}）` : ""}：價量連續異常被列管。`;
+    what = `${escapeHtml(info.note || "分盤撮合・預收款券・多不可當沖")}。分盤代表每 5 或 20 分鐘才撮合一次，掛單不會即時成交；買賣要先把款券交給券商。處置期滿若未延長，從下一交易日起解除。`;
+  } else if (info.kind === "changed") {
+    why = "交易所把它列為全額交割（變更交易方法），多因財務或營運疑慮。";
+    what = `${escapeHtml(info.note || "預收全額款券")}：買進要先全額付款、賣出要先交付股票，流動性通常較差。`;
+  } else {
+    why = escapeHtml(info.note || "");
+  }
+  box.innerHTML = `
+    <div class="detail-surv-head">
+      <span class="surv-tag is-${escapeHtml(info.kind)}">${escapeHtml(info.label || "")}</span>
+      ${stats.length ? `<small>${escapeHtml(stats.join("・"))}</small>` : ""}
+      <button type="button" class="detail-surv-link" data-go-screen="surveillance">處置看板 ›</button>
+    </div>
+    ${why ? `<p class="detail-surv-why"><strong>為什麼</strong>${why}</p>` : ""}
+    ${what ? `<p class="detail-surv-what"><strong>要注意什麼</strong>${what}</p>` : ""}`;
+}
+
 function renderDetail() {
   const stock = getSelectedStock();
   renderPriceAlertBox(stock);
+  renderDetailSurveillance(stock);
   if (!stock) {
     // 無股票時依實際請求狀態顯示；失敗或終止的空資料不可持續宣稱載入中。
     const loading = !dataState.loadedOnce && !dataState.error;
