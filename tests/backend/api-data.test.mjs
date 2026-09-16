@@ -670,7 +670,7 @@ test("靜態檔：app shell 有安全標頭且只公開 allowlist，後端源碼
   }
   const worker = await srv.raw("/sw.js");
   const workerBody = await worker.text();
-  assert.match(workerBody, /stock1-shell-v\d+/);
+  assert.match(workerBody, /stock1-shell-[0-9a-f]{12}/, "伺服器送出的 sw.js 已代入內容雜湊版本");
   assert.match(workerBody, /\.\/lucide\.min\.js/);
   assert.match(workerBody, /IBMPlexMono-Medium-Latin1\.woff2/);
   assert.match(workerBody, /ignoreSearch:\s*true/);

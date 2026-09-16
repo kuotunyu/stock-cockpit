@@ -22,7 +22,7 @@ function command(dir, args) { return execFileSync('git', ['-C', dir, ...args], {
 function commit(dir) { command(dir, ['add', '.']); command(dir, ['commit', '-m', 'fixture']); }
 async function load(dir) {
   const helper = join(dir, 'query-helper.mjs');
-  await writeFile(helper, `import * as mod from './server.mjs'; process.send({ loaded: true }); process.on('message', () => process.send(mod.getAppIdentity()));`);
+  await writeFile(helper, `import * as mod from './server.mjs'; process.send({ loaded: true }); process.on('message', async () => process.send(await mod.getAppIdentity()));`);
   const child = fork(helper, [], { cwd: dir, execArgv: [], env: { ...process.env, STOCK1_SKIP_LISTEN: '1', DATA_DIR: join(dir, 'data'), PORT: '0', UPDATE_CHECK: 'off', SCHEDULER: 'off' }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true });
   await once(child, 'message');
   return { query: async () => { const next = once(child, 'message'); child.send('query'); return (await next)[0]; }, close: async () => { const exit = once(child, 'exit'); child.kill(); await exit; } };

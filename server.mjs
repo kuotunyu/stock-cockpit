@@ -4698,10 +4698,10 @@ function getAppBuild() {
   return appBuild;
 }
 
-function getAppIdentity() {
+async function getAppIdentity() {
   const disk = readAppBuildInfo();
   let shellVersion = "";
-  try { shellVersion = /const APP_SHELL_VERSION = "([A-Za-z0-9._-]+)";/.exec(readFileSync(join(root, "app.js"), "utf8"))?.[1] || ""; } catch { /* 未知 */ }
+  try { shellVersion = await computeShellVersion(); } catch { /* 未知 */ }
   return {
     runtime: getAppBuild(), disk, shellVersion,
     restartRequired: appBuild.fingerprint && disk.fingerprint ? appBuild.fingerprint !== disk.fingerprint : null,
@@ -14722,7 +14722,7 @@ async function handleApi(request, requestUrl, response) {
         repo: build.repo ? `${build.repo.owner}/${build.repo.repo}` : "",
       },
       update,
-      identity: getAppIdentity(),
+      identity: await getAppIdentity(),
       generatedAt: new Date().toISOString(),
     });
     return true;
@@ -15898,6 +15898,43 @@ async function handleApi(request, requestUrl, response) {
 const COMPRESSIBLE_STATIC_TYPES = /^(text\/|application\/(javascript|json)|image\/svg\+xml)/;
 const staticFileCache = new Map();
 
+// ===== 外殼版本（2026-09-17）=====
+// 以前 app.js 的 APP_SHELL_VERSION 與 sw.js 的 CACHE_NAME 是手寫的 vN，每次改前端都要兩檔同步遞增
+// （最近 60 次 commit 有 43 次在做這件事）。現在版本＝所有外殼資產（publicStaticFiles 列的檔）內容雜湊的前 12 碼，
+// 伺服器送出 app.js／sw.js 時把佔位字串換掉：任何一個資產一改，快取名就換；什麼都沒改，重啟也不會換。
+// 不靠 git（Zeabur 那種沒有 .git 的環境也一樣），也不需要 build 步驟。每次請求 lstat 十來個檔，成本可忽略。
+const SHELL_VERSION_FILES = new Set(["app.js", "sw.js"]);
+const SHELL_VERSION_PLACEHOLDER = /(const (?:APP_SHELL_VERSION|CACHE_NAME) = ")[^"]+(";)/;
+const shellScriptCache = new Map();
+function shellVersionFromParts(parts) {
+  return `stock1-shell-${createHash("sha1").update(parts.join("\n")).digest("hex").slice(0, 12)}`;
+}
+async function computeShellVersion() {
+  const names = [...new Set(publicStaticFiles.values())].sort();
+  const parts = [];
+  for (const name of names) parts.push(`${name}:${(await loadStaticAsset(join(root, name))).etag}`);
+  return shellVersionFromParts(parts);
+}
+// 純函式：把佔位字串換成實際版本（app.js 與 sw.js 各一行）。
+function applyShellVersion(source, version) {
+  return source.replace(SHELL_VERSION_PLACEHOLDER, `$1${version}$2`);
+}
+// app.js／sw.js 代入版本後的資產：ETag 必須反映代入後的內容——只改 styles.css 時 app.js 原文沒變，
+// 若沿用原文 ETag，瀏覽器會拿到 304、手上那份還是舊版本字串，Service Worker 就不會換快取。
+async function loadShellScript(candidate, base, version) {
+  const cached = shellScriptCache.get(candidate);
+  if (cached?.baseVersion === base.version && cached.shellVersion === version) return cached;
+  const raw = Buffer.from(applyShellVersion(base.raw.toString("utf8"), version), "utf8");
+  const entry = {
+    version: `${base.version}:${version}`, baseVersion: base.version, shellVersion: version, type: base.type,
+    etag: `"${createHash("sha1").update(raw).digest("base64url")}"`,
+    raw,
+    gzip: raw.length >= 1024 ? gzipSync(raw, { level: 6 }) : null,
+  };
+  shellScriptCache.set(candidate, entry);
+  return entry;
+}
+
 async function loadStaticAsset(candidate) {
   const stats = await lstat(candidate);
   const version = `${stats.mtimeMs}:${stats.size}`;
@@ -15934,7 +15971,8 @@ async function serveStatic(request, requestUrl, response) {
     return;
   }
   const candidate = join(root, fileName);
-  const asset = await loadStaticAsset(candidate);
+  let asset = await loadStaticAsset(candidate);
+  if (SHELL_VERSION_FILES.has(fileName)) asset = await loadShellScript(candidate, asset, await computeShellVersion());
   const headers = {
     ...securityHeaders,
     "content-type": asset.type,
@@ -17275,6 +17313,7 @@ export {
   // 收盤後排程（close-scheduler.test）
   closeTasksDue, hasFormalCapture, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
   formatServerLogLine, staleServerLogFiles, appendServerLog, armServerLogFile, handleFatalError, resetFatalErrorStateForTest, SERVER_LOG_KEEP_DAYS,
+  computeShellVersion, applyShellVersion, shellVersionFromParts,
   summarizeOperationalStatus, benchmarkMemoKey, recordCaptureAttempt,
   SCHEDULER_MAX_FAILURES_PER_DAY, closeSchedulerStateForTest, resetCloseSchedulerStateForTest,
   // 事件日曆／市場位階（market-events.test）

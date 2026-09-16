@@ -9,7 +9,7 @@ const workerUrl = new URL("../../sw.js", import.meta.url);
 test("service worker activation only removes old Stock1 shell caches", async () => {
   const source = await readFile(workerUrl, "utf8");
   // 現役版號從 sw.js 動態讀出，bump CACHE_NAME 時測試不必再手動同步
-  const currentCache = source.match(/CACHE_NAME = "(stock1-shell-v\d+)"/)?.[1];
+  const currentCache = source.match(/CACHE_NAME = "(stock1-shell-[A-Za-z0-9-]+)"/)?.[1]; // 原始碼裡是佔位 stock1-shell-dev
   assert.ok(currentCache, "sw.js 應宣告 CACHE_NAME");
   const listeners = new Map();
   const deleted = [];

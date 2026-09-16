@@ -196,7 +196,7 @@ npm install
 
 後端身份在模組載入時固定，指紋涵蓋 `server.mjs`、`portfolio-risk.js`、`verification-evidence.mjs`、`package.json`、`package-lock.json` 的來源快照，並附當時的 Git commit／dirty。它不涵蓋環境設定、實際 node_modules bytes 或 V8 bytecode，也不保證邊更新邊載入時各檔案一致；dirty、無 Git 或 Git 狀態未知時，commit 不能精確代表全部來源。GitHub 比對以啟動時 commit 為起點，不代表磁碟或本分頁已更新。
 
-前端 `APP_SHELL_VERSION` 是載入 `app.js` 時固定的外殼發行宣告，不是後來重新抓檔案算出的身份，也不是逐 byte 校驗。維護 HTML／CSS／JS／其他外殼資產時，須同時遞增 `app.js` 的 `APP_SHELL_VERSION` 與 `sw.js` 的 `CACHE_NAME`，保持相同版號。啟動器的 runtime 安裝 stamp 同樣不是完整性認證：它比對 lock metadata、套件版本／入口與實際檔案清單及大小；不替代 npm tarball integrity 或安全稽核。
+前端 `APP_SHELL_VERSION` 是載入 `app.js` 時固定的外殼發行宣告：伺服器送出 `app.js` 與 `sw.js` 時，把原始碼裡的佔位字串換成「所有外殼資產內容雜湊」（`stock1-shell-` 加 12 碼），任何一個外殼資產改了版本就換、Service Worker 快取名跟著換；維護 HTML／CSS／JS 不需要再手動遞增版號。啟動器的 runtime 安裝 stamp 同樣不是完整性認證：它比對 lock metadata、套件版本／入口與實際檔案清單及大小；不替代 npm tarball integrity 或安全稽核。
 
 ### 3. 從手機／平板看盤（同一個 Wi-Fi）
 

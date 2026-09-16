@@ -2,7 +2,8 @@
 // 我們的更新方式是 git pull（早期是整包複製 code）——network-first 保證重整一次就是新版，
 // 不會發生朋友被 cache-first 卡在舊版的災難。快取在離線／伺服器或外殼資產失敗時當備援。
 const CACHE_PREFIX = "stock1-shell-";
-const CACHE_NAME = "stock1-shell-v70";
+// 由伺服器送出 sw.js 時代入（所有外殼資產內容的雜湊）；任何外殼資產一改，快取名就換，不用再手動 bump。
+const CACHE_NAME = "stock1-shell-dev";
 const SHELL = [
   "./",
   "./index.html",

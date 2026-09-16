@@ -1,6 +1,8 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v70";
+// 外殼版本由伺服器送出 app.js 時代入（所有外殼資產內容的雜湊，見 server.mjs computeShellVersion）；
+// 下面這行的值只是佔位，直接用磁碟上的檔（jsdom 測試）才會看到它。以前要手動同步兩檔遞增 vN。
+const APP_SHELL_VERSION = "stock1-shell-dev";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
