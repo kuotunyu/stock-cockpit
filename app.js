@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v65";
+const APP_SHELL_VERSION = "stock1-shell-v66";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -7544,7 +7544,10 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
   strategyState.startedAt = Date.now();
   renderStrategyBoard();
   try {
-    const refreshParam = refresh ? "&refresh=1" : "";
+    // 強制重掃（refresh=1）伺服器要登入。訪客按「重新整理」只重新載入榜單、不帶 refresh=1——
+    // 以前會拿到 401 → handleAuthRequired 直接跳出登入畫面（2026-09-16 使用者回報：按重新整理不該被要求登入）。
+    const forceRescan = refresh && Boolean(authState.user);
+    const refreshParam = forceRescan ? "&refresh=1" : "";
     void loadMarketBreadth();
     const payload = await fetchApi(`/api/swing?scenario=${encodeURIComponent(requestedScenario)}&limit=40${refreshParam}`);
     if (requestId !== strategyLoadSeq) return; // 已過期：有更新的請求接手了
@@ -7560,7 +7563,7 @@ async function loadStrategyBoard({ notify = false, refresh = false } = {}) {
     strategyState.generatedAt = payload.generatedAt || "";
     strategyState.riskPolicy = payload.riskPolicy || "";
     strategyState.warnings = payload.warnings || [];
-    if (notify) showToast("策略雷達已更新");
+    if (notify) showToast(refresh && !forceRescan ? "策略雷達已重新載入（重新掃描要登入後才會做）" : "策略雷達已更新");
   } catch (error) {
     if (requestId !== strategyLoadSeq) return; // 過期的錯誤不要覆蓋目前場景的狀態
     if (handleAuthRequired(error)) return;
