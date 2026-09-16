@@ -1,8 +1,6 @@
-// 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
-// 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-// 外殼版本由伺服器送出 app.js 時代入（所有外殼資產內容的雜湊，見 server.mjs computeShellVersion）；
-// 下面這行的值只是佔位，直接用磁碟上的檔（jsdom 測試）才會看到它。以前要手動同步兩檔遞增 vN。
-// eslint-disable-next-line no-unused-vars -- 外殼身份：瀏覽器測試與舊分頁比對透過 global 讀，app.js 本身不用
+// 外殼發行宣告：伺服器送出 app.js 時把下一行的佔位換成所有外殼資產的內容雜湊（server.mjs computeShellVersion），
+// 不再手動同步 sw.js 遞增 vN；直接用磁碟上的檔（jsdom 測試）才看得到佔位值。這行要留在前 300 字元內（pwa-lifecycle 釘住）。
+// eslint-disable-next-line no-unused-vars -- 瀏覽器測試與舊分頁比對透過 global 讀
 const APP_SHELL_VERSION = "stock1-shell-dev";
 
 if (window.location.protocol === "file:") {
