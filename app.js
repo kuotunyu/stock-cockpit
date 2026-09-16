@@ -1,6 +1,6 @@
 // 載入此 app.js 時固定的外殼發行宣告；更新 HTML/CSS/JS 等外殼時與 SW 一起遞增。
 // 不代表逐 byte 驗證全部資產，也不是稍後 API 讀到的磁碟版本。
-const APP_SHELL_VERSION = "stock1-shell-v69";
+const APP_SHELL_VERSION = "stock1-shell-v70";
 
 if (window.location.protocol === "file:") {
   window.location.replace("http://127.0.0.1:5174/");
@@ -5928,6 +5928,10 @@ function renderOperationalStatus() {
       : scheduler?.failures ? '最近一輪排程受阻，等待後續重試；已正式發布的清單仍保留。'
         : scheduler?.running ? '排程開啟，會在來源完整後採集；無紀錄的原因不能由此判定。'
           : scheduler?.running === false ? '排程目前未運行；請管理者確認啟動狀態。' : '排程狀態未知；請重新查詢。';
+  // 2026-09-17：排程本程序最近一次落盤的收盤日（補採前一交易日時會早於今天）；null＝本程序啟動後排程還沒落盤過（先前程序或畫面請求存的不算）。
+  const lastRunDay = String(scheduler?.lastRunDay || '');
+  const lastRunLabel = /^\d{8}$/.test(lastRunDay) ? ` 排程本程序最近落盤：${lastRunDay.slice(0, 4)}-${lastRunDay.slice(4, 6)}-${lastRunDay.slice(6, 8)}。`
+    : scheduler?.running ? ' 排程本程序啟動後尚未落盤（先前程序或畫面請求存的清單不算在內）。' : '';
   const history = data?.history?.overnight && data?.history?.swing && data?.history?.benchmarks ? data.history : null;
   const historyLabel = history ? `隔日 ${history.overnight.withoutFinal} 份未存完整結果・波段 ${history.swing.pending} 筆待觀察`
     : '待補數量未知';
@@ -5940,7 +5944,7 @@ function renderOperationalStatus() {
     <dl class="operational-rows">
       <div><dt>行情讀取</dt><dd><strong>${quote}</strong><p>${quoteNext}</p></dd></div>
       <div><dt>資料保存</dt><dd class="${saveBlocked || readOnly.length ? 'is-warn' : ''}"><strong>${saveLabel}</strong><p>${saveNext}</p></dd></div>
-      <div><dt>兩策略正式採集</dt><dd>隔日沖：${escapeHtml(captureLabel(data?.captures?.overnight?.today))}<br>波段：${escapeHtml(captureLabel(data?.captures?.swing?.today))}<p>${scheduleNext}</p></dd></div>
+      <div><dt>兩策略正式採集</dt><dd>隔日沖：${escapeHtml(captureLabel(data?.captures?.overnight?.today))}<br>波段：${escapeHtml(captureLabel(data?.captures?.swing?.today))}<p>${scheduleNext}${lastRunLabel}</p></dd></div>
       <div><dt>歷史驗證待補</dt><dd>${escapeHtml(historyLabel)}${benchmarkLabel ? `<br>${escapeHtml(benchmarkLabel)}` : ''}<p>待觀察可能尚未到期；來源受阻可待來源恢復後續補，不會撤銷正式發布。</p></dd></div>
     </dl>
     <button class="more-primary" data-action="refresh-operational-status" type="button"${loading ? ' disabled' : ''}>${loading ? '查詢中…' : '重新查詢狀態'}</button>

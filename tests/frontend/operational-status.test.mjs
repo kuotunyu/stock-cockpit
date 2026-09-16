@@ -46,6 +46,12 @@ test('前日排程失敗留作歷史，不能稱今日受阻或承諾舊重試�
     panel = show(app, { ...payload, scheduler: { ...scheduler, failureDay: '20260908', failures: 1 } });
     assert.match(panel.textContent, /最近一輪排程受阻/);
     assert.match(panel.textContent, /最早重試/);
+    // 2026-09-17：排程本程序最近落盤日（補採時早於今天）；沒有就講清楚是「本程序啟動後」尚未落盤，不暗示沒採集過
+    panel = show(app, { ...payload, scheduler: { enabled: true, running: true, failures: 0, lastRunDay: '20260916' } });
+    assert.match(panel.textContent, /排程本程序最近落盤：2026-09-16/);
+    panel = show(app, { ...payload, scheduler: { enabled: true, running: true, failures: 0, lastRunDay: null } });
+    assert.match(panel.textContent, /本程序啟動後尚未落盤/);
+    assert.doesNotMatch(panel.textContent, /最近落盤：/);
   } finally { app.cleanup(); }
 });
 test('來源暫缺、正式後補驗失敗、排程關閉和查不到各自說明，不臆測停機', async () => {

@@ -6,7 +6,8 @@ import { prepareCompletedBenchmark, packCaptureOutcomes, readCaptureOutcomes, pa
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, writeFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
-import { constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
+import { constants as fsConstants, appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { format as formatLogArgs } from "node:util";
 import { createRequire } from "node:module";
 import { networkInterfaces } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -16949,6 +16950,8 @@ function listenOnce(listenPort, listenHost) {
 async function performStart(listenPort, listenHost) {
   // lease 必須早於任何 DB I/O；HTTP port 衝突不能當成資料庫單 writer 保證。
   const leasePaths = await acquireDataDirLease();
+  // 日誌檔也算 DATA_DIR I/O：lease 到手才把暫存的啟動訊息落地。
+  armServerLogFile();
   try {
     const canonicalDbPath = await validateDbPathWithinDataDir(
       leasePaths.canonicalDataDir,
@@ -17036,8 +17039,96 @@ function startServer(listenPort = port, listenHost = host) {
   return operation;
 }
 
+// ===== 伺服器日誌檔（2026-09-17）=====
+// 常駐（工作排程＋守門腳本 scripts/stock1-watchdog.ps1）之後，視窗一關（含當機）主控台訊息就沒了：事後查不到「為什麼掛」、
+// 「補採有沒有發生」。console.log／info／warn／error 照常印到主控台，另外同步 append 到 DATA_DIR/logs/server-YYYYMMDD.log
+// （台北日期；守門腳本也寫同一個檔），保留 SERVER_LOG_KEEP_DAYS 天。只在真正當伺服器跑時裝（下面的 entry 區塊），測試 import
+// 不裝；LOG_FILE=off 可關。寫檔失敗絕不能影響服務：吞掉、一分鐘後再試。量很小（啟動、排程、警告），同步 append 就好。
+// **lease 之前不碰 DATA_DIR**：拿到 writer lease 前的行先暫存記憶體（最多 200 行），performStart 拿到 lease 後 armServerLogFile()
+// 才一起落地；被 lease 拒絕的 contender 從頭到尾不在別人的 DATA_DIR 建任何東西（tests/backend/instance-lock 釘住：DATA_DIR 可能
+// 被指到另一實例的 DB 暫存路徑，先 mkdir logs/ 會弄壞它的 atomic rename）。
+const SERVER_LOG_KEEP_DAYS = 14;
+const SERVER_LOG_PENDING_MAX = 200;
+const serverLogDir = join(dataDir, "logs");
+const serverLogState = { failedUntil: 0, prunedDay: "", armed: false, pending: [] };
+const serverLogClock = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+function serverLogPath(day = toTaipeiCompactDate()) { return join(serverLogDir, `server-${day}.log`); }
+function formatServerLogLine(level, args, now = new Date()) {
+  return `${serverLogClock.format(now)} ${String(level).toUpperCase().padEnd(5)} ${formatLogArgs(...args)}\n`;
+}
+// 純函式：目錄裡哪些日誌檔已超過保留天數（只認 server-YYYYMMDD.log 這個命名，別的檔不碰）。
+function staleServerLogFiles(fileNames, today, keepDays = SERVER_LOG_KEEP_DAYS) {
+  const cutoff = addDaysCompact(today, -keepDays);
+  return fileNames.filter(name => { const match = /^server-(\d{8})\.log$/.exec(name); return Boolean(match) && match[1] < cutoff; });
+}
+function pruneServerLogs(today) {
+  if (serverLogState.prunedDay === today) return;
+  serverLogState.prunedDay = today;
+  try { for (const name of staleServerLogFiles(readdirSync(serverLogDir), today)) unlinkSync(join(serverLogDir, name)); } catch { /* 刪不掉就留著 */ }
+}
+function appendServerLog(level, args) {
+  if (!serverLogState.armed) {
+    if (serverLogState.pending.length < SERVER_LOG_PENDING_MAX) serverLogState.pending.push({ level, args, at: new Date() });
+    return;
+  }
+  writeServerLogLine(level, args, new Date());
+}
+// 拿到 DATA_DIR writer lease 之後才呼叫：之後的行直接落地，之前暫存的一起補寫（保留原時間戳）。
+function armServerLogFile() {
+  serverLogState.armed = true;
+  for (const item of serverLogState.pending.splice(0)) writeServerLogLine(item.level, item.args, item.at);
+}
+function writeServerLogLine(level, args, at) {
+  const now = Date.now();
+  if (now < serverLogState.failedUntil) return;
+  const day = toTaipeiCompactDate(at);
+  const line = formatServerLogLine(level, args, at);
+  try {
+    try { appendFileSync(serverLogPath(day), line); }
+    catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      mkdirSync(serverLogDir, { recursive: true });
+      appendFileSync(serverLogPath(day), line);
+    }
+    pruneServerLogs(day);
+  } catch {
+    serverLogState.failedUntil = now + 60 * 1000;
+  }
+}
+const serverLogDisabled = ["off", "0", "false", "no"].includes(String(process.env.LOG_FILE || "").trim().toLowerCase());
+function installServerLogFile() {
+  if (serverLogDisabled) return false;
+  for (const level of ["log", "info", "warn", "error"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => { original(...args); appendServerLog(level, args); };
+  }
+  return true;
+}
+
+// 沒接住的例外／rejection：Node 預設直接死、原因只印在（即將消失的）主控台。先把原因寫進日誌，再盡量正常關機
+// （釋放 writer lease、排空未寫的 DB），最多等 graceMs 就退出，讓守門腳本重新啟動。關機途中又炸就直接退出。
+let fatalErrorHandled = false;
+function resetFatalErrorStateForTest() { fatalErrorHandled = false; }
+function handleFatalError(kind, error, { shutdown = () => shutdownServer({ reason: kind }), exit = code => process.exit(code), graceMs = 5000 } = {}) {
+  if (fatalErrorHandled) { exit(1); return; }
+  fatalErrorHandled = true;
+  console.error(`[Stock1] ${kind}，服務將退出（守門腳本會在 10 分鐘內重新啟動）：`, error?.stack || error?.message || error);
+  let exited = false;
+  const leave = () => { if (exited) return; exited = true; exit(1); };
+  const timer = setTimeout(leave, graceMs);
+  timer.unref?.();
+  Promise.resolve().then(() => shutdown()).catch(() => {}).finally(() => { clearTimeout(timer); leave(); });
+}
+function installFatalErrorHandlers() {
+  process.on("uncaughtException", error => handleFatalError("uncaughtException", error));
+  process.on("unhandledRejection", reason => handleFatalError("unhandledRejection", reason));
+}
+
 // 測試（node --test）import 本檔時設 STOCK1_SKIP_LISTEN=1，改用 startServer(0) 綁臨時埠。
 if (!process.env.STOCK1_SKIP_LISTEN) {
+  if (installServerLogFile()) console.log(`[Stock1] 日誌同步寫到 ${serverLogPath()}（保留 ${SERVER_LOG_KEEP_DAYS} 天；LOG_FILE=off 可關）`);
+  installFatalErrorHandlers();
   const closeFromLauncher = (reason) => {
     process.exitCode = process.exitCode || 0;
     void shutdownServer({ reason }).catch(() => {
@@ -17180,6 +17271,7 @@ export {
   loadStaticAsset,
   // 收盤後排程（close-scheduler.test）
   closeTasksDue, hasFormalCapture, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
+  formatServerLogLine, staleServerLogFiles, appendServerLog, armServerLogFile, handleFatalError, resetFatalErrorStateForTest, SERVER_LOG_KEEP_DAYS,
   summarizeOperationalStatus, benchmarkMemoKey, recordCaptureAttempt,
   SCHEDULER_MAX_FAILURES_PER_DAY, closeSchedulerStateForTest, resetCloseSchedulerStateForTest,
   // 事件日曆／市場位階（market-events.test）

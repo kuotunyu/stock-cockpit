@@ -1,0 +1,92 @@
+﻿<#
+.SYNOPSIS
+  盤勢雷達本機伺服器的守門：每 10 分鐘看一次伺服器埠有沒有在監聽，沒有就重新啟動（最小化視窗）。
+
+.DESCRIPTION
+  由 scripts/register-autostart.ps1 登記的工作排程「Stock1-server」在登入時以隱藏視窗啟動這支腳本，之後常駐。
+  伺服器當機、被誤關視窗、或登入時 node 還沒裝好，10 分鐘內會再試一次；每次啟動都寫進
+  DATA_DIR/logs/server-YYYYMMDD.log（跟 server.mjs 自己的日誌同一個檔），事後看得出「什麼時候掛、什麼時候被拉起來」。
+
+  只認 .env 裡的 PORT 與 DATA_DIR（跟 server.mjs 同一份設定）；沒有 .env 就是 5174 與 .data。
+  要停止守門：powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1 -Unregister（已在跑的伺服器不受影響）。
+
+  檔案存成 UTF-8 with BOM：Windows PowerShell 5.1 讀沒有 BOM 的 .ps1 會用系統 ANSI（Big5）解碼，中文會變亂碼、連語法都會壞。
+
+.PARAMETER IntervalSeconds
+  檢查間隔（秒），預設 600。
+
+.PARAMETER Once
+  只檢查一次就結束（register-autostart.ps1 的「立刻啟動」與手動排錯用）。
+#>
+param(
+  [int]$IntervalSeconds = 600,
+  [switch]$Once
+)
+
+$ErrorActionPreference = "Continue"
+$root = Split-Path -Parent $PSScriptRoot
+
+function Read-DotEnvValue($name, $default) {
+  $envFile = Join-Path $root ".env"
+  if (-not (Test-Path $envFile)) { return $default }
+  foreach ($line in Get-Content $envFile -Encoding UTF8) {
+    $trimmed = $line.Trim()
+    if ($trimmed -eq "" -or $trimmed.StartsWith("#")) { continue }
+    $eq = $trimmed.IndexOf("=")
+    if ($eq -lt 1) { continue }
+    if ($trimmed.Substring(0, $eq).Trim() -ne $name) { continue }
+    $value = $trimmed.Substring($eq + 1).Trim()
+    $value = $value -replace '^"(.*)"$', '$1'
+    $value = $value -replace "^'(.*)'$", '$1'
+    if ($value -eq "") { return $default }
+    return $value
+  }
+  return $default
+}
+
+$port = [int](Read-DotEnvValue "PORT" "5174")
+$dataDir = Read-DotEnvValue "DATA_DIR" ".data"
+if (-not [System.IO.Path]::IsPathRooted($dataDir)) { $dataDir = Join-Path $root $dataDir }
+$logDir = Join-Path $dataDir "logs"
+$windowTitle = "Stock1 server ({0})" -f $port
+
+function Write-GuardLog($text) {
+  try {
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $line = "{0} GUARD {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $text
+    Add-Content -Path (Join-Path $logDir ("server-{0}.log" -f (Get-Date -Format "yyyyMMdd"))) -Value $line -Encoding UTF8
+  } catch { }
+}
+
+function Test-ServerListening {
+  return [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+}
+
+function Start-Stock1Server {
+  $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $nodeCommand) {
+    Write-GuardLog "找不到 node.exe，無法啟動伺服器（請安裝 Node 24 LTS）"
+    return $false
+  }
+  # start "…" /min：另開一個最小化的主控台視窗跑伺服器（日誌看得到、也不會擋住畫面）；cmd 本身隱藏、啟動完就結束。
+  $argument = '/c start "' + $windowTitle + '" /min "' + $nodeCommand.Source + '" --env-file-if-exists=.env server.mjs'
+  Start-Process -FilePath "cmd.exe" -ArgumentList $argument -WorkingDirectory $root -WindowStyle Hidden
+  return $true
+}
+
+do {
+  if (-not (Test-ServerListening)) {
+    Write-GuardLog ("{0} 沒在監聽，啟動伺服器" -f $port)
+    if (Start-Stock1Server) {
+      $deadline = (Get-Date).AddSeconds(30)
+      do { Start-Sleep -Seconds 2 } until ((Test-ServerListening) -or ((Get-Date) -gt $deadline))
+      if (Test-ServerListening) {
+        Write-GuardLog ("伺服器已在 http://127.0.0.1:{0} 監聽" -f $port)
+      } else {
+        Write-GuardLog ("30 秒內沒看到 {0} 監聽；請看「{1}」視窗或這份日誌裡 server.mjs 的訊息，{2} 秒後再試" -f $port, $windowTitle, $IntervalSeconds)
+      }
+    }
+  }
+  if ($Once) { break }
+  Start-Sleep -Seconds $IntervalSeconds
+} while ($true)
