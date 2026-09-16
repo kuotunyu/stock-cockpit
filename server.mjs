@@ -35,7 +35,6 @@ const sessionMaxAgeMs = Number(process.env.SESSION_MAX_AGE_MS || 1000 * 60 * 60 
 // REQUIRE_LOGIN=on（對外部署用）：除了健康探針與登入本身，所有 /api 都要有登入狀態，未登入連唯讀行情也不給。
 // 本機／LAN 預設 off：看盤不必登入，登入只影響自選股同步與券商設定。
 const requireLoginMode = /^(1|on|true|yes)$/i.test(String(process.env.REQUIRE_LOGIN || "").trim());
-const requireLoginOpenPaths = new Set(["/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/me"]);
 const MAX_SESSIONS_PER_USER = 10;
 const passwordIterations = 210000;
 const unsafeExampleSecrets = new Set([
@@ -2652,19 +2651,6 @@ function requireCurrentMutationAuth(db, auth, { admin = false } = {}) {
     throw Object.assign(new Error("需要管理者權限"), { status: 403, code: "ADMIN_REQUIRED" });
   }
   return { user, session };
-}
-
-async function requireAuth(request, response) {
-  const auth = await getAuthContext(request);
-  if (!auth.user) {
-    jsonResponse(response, 401, {
-      ok: false,
-      error: "需要先登入",
-      code: "AUTH_REQUIRED",
-    });
-    return null;
-  }
-  return auth;
 }
 
 // 路由用（auth 已解析）：沒登入 → 回 401 並回 false，呼叫端直接 `return true` 結束該路由。
@@ -14610,1280 +14596,1242 @@ async function inspectSwingStock(rawCode) {
   };
 }
 
-const getOnlyApiPaths = new Set([
-  "/api/operational-status",
-  "/api/health",
-  "/api/app-version",
-  "/api/auth/me",
-  "/api/personal-data/export",
-  "/api/admin/machine-export",
-  "/api/symbols",
-  "/api/sources",
-  "/api/markets",
-  "/api/market/breadth",
-  "/api/overnight/verify",
-  "/api/overnight/verify/history",
-  "/api/notes/recent",
-  "/api/fundamentals",
-  "/api/overnight",
-  "/api/backtest/overnight",
-  "/api/swing/inspect",
-  "/api/swing/verify",
-  "/api/technical-analysis",
-]);
+// ===== API 路由表（2026-09-17）=====
+// 以前 handleApi 是 1,256 行的 if 鏈：唯讀路由的方法白名單、REQUIRE_LOGIN 例外清單、各路由的登入檢查散在三處，
+// README 的端點清單靠手寫。現在每條路由一列：方法、登入政策、handler；派發器統一回 405／401／403，
+// scripts/api-routes.mjs 從這張表產 README 的端點清單（tests/backend/api-routes 釘住不漂移）。
+// auth 政策：open＝免登入且 REQUIRE_LOGIN=on 也開放（handler 需要身份自己抓）；none＝不需身份（REQUIRE_LOGIN 下仍要登入）；
+// optional＝帶身份但訪客可用（handler 內對需要登入的分支自己 ensureAuthed）；user＝必須登入；admin＝必須管理者。
+// 行為與 if 鏈的差異只有：未宣告的方法一律 405（以前部分唯讀路由任何方法都當 GET 跑）。
+const apiRoutes = [
+  { path: "/api/operational-status", methods: ["GET"], auth: "none", handler: apiOperationalStatus },
+  { path: "/api/health", methods: ["GET"], auth: "open", handler: apiHealth },
+  { path: "/api/app-version", methods: ["GET"], auth: "none", handler: apiAppVersion },
+  { path: "/api/auth/login", methods: ["POST"], auth: "open", handler: apiAuthLogin },
+  { path: "/api/auth/logout", methods: ["POST"], auth: "open", handler: apiAuthLogout },
+  { path: "/api/auth/me", methods: ["GET"], auth: "open", handler: apiAuthMe },
+  { path: "/api/auth/password", methods: ["POST"], auth: "user", handler: apiAuthPassword },
+  { path: "/api/personal-data/export", methods: ["GET"], auth: "user", handler: apiPersonalDataExport },
+  { path: "/api/personal-data/restore/preview", methods: ["POST"], auth: "user", handler: apiPersonalDataRestorePreview },
+  { path: "/api/personal-data/restore", methods: ["POST"], auth: "user", handler: apiPersonalDataRestore },
+  { path: "/api/admin/machine-export", methods: ["GET"], auth: "admin", handler: apiAdminMachineExport },
+  { path: "/api/admin/users", methods: ["GET", "POST", "PATCH", "DELETE"], auth: "admin", handler: apiAdminUsers },
+  { path: "/api/watchlists", methods: ["GET", "PUT"], auth: "user", handler: apiWatchlists },
+  { path: "/api/alerts", methods: ["GET", "PUT"], auth: "user", handler: apiAlerts },
+  { path: "/api/instrument-profile", methods: ["GET"], auth: "none", handler: apiInstrumentProfile },
+  { path: "/api/trade-plans", methods: ["GET", "PUT"], auth: "user", handler: apiTradePlans },
+  { path: "/api/trades", methods: ["GET", "PUT"], auth: "user", handler: apiTrades },
+  { path: "/api/broker/settings", methods: ["GET", "POST", "DELETE"], auth: "user", handler: apiBrokerSettings },
+  { path: "/api/broker/test", methods: ["POST"], auth: "user", handler: apiBrokerTest },
+  { path: "/api/symbols", methods: ["GET"], auth: "none", handler: apiSymbols },
+  { path: "/api/sources", methods: ["GET"], auth: "optional", handler: apiSources },
+  { path: "/api/market-session", methods: ["GET"], auth: "none", handler: apiMarketSession },
+  { path: "/api/markets", methods: ["GET"], auth: "optional", handler: apiMarkets },
+  { path: "/api/market/breadth", methods: ["GET"], auth: "none", handler: apiMarketBreadth },
+  { path: "/api/quotes", methods: ["GET"], auth: "optional", handler: apiQuotes },
+  { path: "/api/institutional", methods: ["GET"], auth: "none", handler: apiInstitutional },
+  { path: "/api/overnight/verify", methods: ["GET"], auth: "none", handler: apiOvernightVerify },
+  { path: "/api/overnight/verify/history", methods: ["GET"], auth: "none", handler: apiOvernightVerifyHistory },
+  { path: "/api/margin", methods: ["GET"], auth: "none", handler: apiMargin },
+  { path: "/api/notes/recent", methods: ["GET"], auth: "optional", handler: apiNotesRecent },
+  { path: "/api/notes", methods: ["GET", "POST", "DELETE"], auth: "optional", handler: apiNotes },
+  { path: "/api/company", methods: ["GET", "PUT", "POST"], auth: "optional", handler: apiCompany },
+  { path: "/api/fundamentals", methods: ["GET"], auth: "none", handler: apiFundamentals },
+  { path: "/api/overnight", methods: ["GET"], auth: "none", handler: apiOvernight },
+  { path: "/api/backtest/overnight", methods: ["GET"], auth: "none", handler: apiBacktestOvernight },
+  { path: "/api/swing/inspect", methods: ["GET"], auth: "none", handler: apiSwingInspect },
+  { path: "/api/swing", methods: ["GET"], auth: "optional", handler: apiSwing },
+  { path: "/api/swing/verify", methods: ["GET"], auth: "none", handler: apiSwingVerify },
+  { path: "/api/surveillance-board", methods: ["GET"], auth: "none", handler: apiSurveillanceBoard },
+  { path: "/api/technical-analysis", methods: ["GET"], auth: "none", handler: apiTechnicalAnalysis },
+];
+const apiRoutesByPath = new Map(apiRoutes.map(route => [route.path, route]));
 
-// 固定 allowlist，只記已知路由與方法；任意 URL／query／body 不進診斷。
-const diagnosticApiPaths = new Set([...getOnlyApiPaths,
-  '/api/auth/login','/api/auth/logout','/api/auth/password','/api/personal-data/restore/preview','/api/personal-data/restore',
-  '/api/admin/users','/api/admin/machine-export','/api/watchlists','/api/alerts','/api/instrument-profile','/api/trade-plans','/api/trades',
-  '/api/broker/settings','/api/broker/test','/api/market-session','/api/quotes','/api/institutional','/api/margin',
-  '/api/notes','/api/company','/api/swing','/api/surveillance-board',
-]);
+// 固定 allowlist，只記已知路由；任意 URL／query／body 不進診斷。
+const diagnosticApiPaths = new Set(apiRoutes.map(route => route.path));
 
 async function handleApi(request, requestUrl, response) {
-  if (getOnlyApiPaths.has(requestUrl.pathname) && request.method !== "GET") {
+  const route = apiRoutesByPath.get(requestUrl.pathname);
+  if (!route) return false;
+  if (!route.methods.includes(request.method)) {
     jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
     return true;
   }
   // REQUIRE_LOGIN=on：公網上的免登入端點等於幫任何人放大對上游（證交所／櫃買）的請求，也會把訊號與
   // 成績單攤給所有人看；未登入一律 401（帶 requireLogin 讓前端直接開登入閘、不再發其他請求）。
-  if (requireLoginMode && !requireLoginOpenPaths.has(requestUrl.pathname)) {
-    const gate = await getAuthContext(request);
-    if (!gate.user) {
+  let auth = null;
+  if (requireLoginMode && route.auth !== "open") {
+    auth = await getAuthContext(request);
+    if (!auth.user) {
       jsonResponse(response, 401, { ok: false, error: "這個站台需要先登入", code: "AUTH_REQUIRED", requireLogin: true });
       return true;
     }
   }
-  if (requestUrl.pathname === "/api/operational-status") {
-    // 只投影已提交 RAM；不可走含 save、補驗 queue 或解壓證據的成績單 wrapper。
-    const now = new Date();
-    const today = toTaipeiCompactDate(now);
-    jsonResponse(response, 200, {
-      ok: true, generatedAt: now.toISOString(),
-      persistence: {
-        basis: 'known-failures-this-process', writable: !lastPersistenceFailure,
-        pendingWrites: pendingPersistenceCount(),
-        lastFailureAt: lastPersistenceFailure?.at || null, lastFailureCode: lastPersistenceFailure?.code || null,
-      },
-      sidecars: cloneJson(sidecarState),
-      scheduler: { enabled: !schedulerDisabled, running: Boolean(closeSchedulerTimer),
-        failures: schedulerFailures, failureDay: schedulerFailureDay || null,
-        retryAt: schedulerRetryAt ? new Date(schedulerRetryAt).toISOString() : null,
-        dailyLimitReached: schedulerFailureDay === today && schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY,
-        lastRunDay: lastScheduledRunDay || null },
-      ...summarizeOperationalStatus(dbCache, { today }),
-    });
+  if (!auth && route.auth !== "open" && route.auth !== "none") auth = await getAuthContext(request);
+  if ((route.auth === "user" || route.auth === "admin") && !ensureAuthed(auth, response)) return true;
+  if (route.auth === "admin" && auth.user.role !== "admin") {
+    jsonResponse(response, 403, { ok: false, error: "需要管理者權限" });
     return true;
   }
-  if (requestUrl.pathname === "/api/health") {
-    const ready = lifecycleStatus === "ready";
-    const now = Date.now();
-    const startedAtMs = Date.parse(serverStartedAt);
-    jsonResponse(response, ready ? 200 : 503, {
-      ok: ready,
-      status: lifecycleStatus,
-      requireLogin: requireLoginMode,
-      instanceId,
-      version: appVersion,
-      // build 只讀本機 .git（有快取、不打網路），符合「探針不得觸發昂貴上游」。
-      // 要比對上游有沒有新版請走 /api/app-version。
-      build: { commit: getAppBuild().shortCommit, branch: getAppBuild().branch },
-      startedAt: serverStartedAt || null,
-      uptimeSeconds: Number.isFinite(startedAtMs) ? Math.max(0, Math.floor((now - startedAtMs) / 1000)) : 0,
-      generatedAt: new Date(now).toISOString(),
-      persistence: {
-        pendingWrites: pendingPersistenceCount(),
-        // 本程序沒有尚未恢復的已知失敗；這次 GET 不做磁碟寫入探測。
-        // 刻意不改 status／HTTP 碼：磁碟滿了不是「服務沒起來」，讀行情仍然正常，
-        // 而且重啟行程也修不好磁碟。這裡只如實報告，讓看的人自己判斷。
-        writable: !lastPersistenceFailure,
-        ...(lastPersistenceFailure
-          ? { lastFailureAt: lastPersistenceFailure.at, lastFailureCode: lastPersistenceFailure.code }
-          : {}),
-      },
-      // sidecar 讀檔失敗保護：readOnly 代表這一輪不落盤（記憶體照常），reason 只放 coarse code。
-      sidecars: cloneJson(sidecarState),
+  await route.handler({ request, requestUrl, response, auth });
+  return true;
+}
+
+// ───────────── 各路由 handler（順序同路由表；方法與登入檢查已由派發器做掉） ─────────────
+async function apiOperationalStatus({ request, requestUrl, response, auth }) {
+  // 只投影已提交 RAM；不可走含 save、補驗 queue 或解壓證據的成績單 wrapper。
+  const now = new Date();
+  const today = toTaipeiCompactDate(now);
+  jsonResponse(response, 200, {
+    ok: true, generatedAt: now.toISOString(),
+    persistence: {
+      basis: 'known-failures-this-process', writable: !lastPersistenceFailure,
+      pendingWrites: pendingPersistenceCount(),
+      lastFailureAt: lastPersistenceFailure?.at || null, lastFailureCode: lastPersistenceFailure?.code || null,
+    },
+    sidecars: cloneJson(sidecarState),
+    scheduler: { enabled: !schedulerDisabled, running: Boolean(closeSchedulerTimer),
+      failures: schedulerFailures, failureDay: schedulerFailureDay || null,
+      retryAt: schedulerRetryAt ? new Date(schedulerRetryAt).toISOString() : null,
+      dailyLimitReached: schedulerFailureDay === today && schedulerFailures >= SCHEDULER_MAX_FAILURES_PER_DAY,
+      lastRunDay: lastScheduledRunDay || null },
+    ...summarizeOperationalStatus(dbCache, { today }),
+  });
+  return;
+}
+
+async function apiHealth({ request, requestUrl, response, auth }) {
+  const ready = lifecycleStatus === "ready";
+  const now = Date.now();
+  const startedAtMs = Date.parse(serverStartedAt);
+  jsonResponse(response, ready ? 200 : 503, {
+    ok: ready,
+    status: lifecycleStatus,
+    requireLogin: requireLoginMode,
+    instanceId,
+    version: appVersion,
+    // build 只讀本機 .git（有快取、不打網路），符合「探針不得觸發昂貴上游」。
+    // 要比對上游有沒有新版請走 /api/app-version。
+    build: { commit: getAppBuild().shortCommit, branch: getAppBuild().branch },
+    startedAt: serverStartedAt || null,
+    uptimeSeconds: Number.isFinite(startedAtMs) ? Math.max(0, Math.floor((now - startedAtMs) / 1000)) : 0,
+    generatedAt: new Date(now).toISOString(),
+    persistence: {
+      pendingWrites: pendingPersistenceCount(),
+      // 本程序沒有尚未恢復的已知失敗；這次 GET 不做磁碟寫入探測。
+      // 刻意不改 status／HTTP 碼：磁碟滿了不是「服務沒起來」，讀行情仍然正常，
+      // 而且重啟行程也修不好磁碟。這裡只如實報告，讓看的人自己判斷。
+      writable: !lastPersistenceFailure,
+      ...(lastPersistenceFailure
+        ? { lastFailureAt: lastPersistenceFailure.at, lastFailureCode: lastPersistenceFailure.code }
+        : {}),
+    },
+    // sidecar 讀檔失敗保護：readOnly 代表這一輪不落盤（記憶體照常），reason 只放 coarse code。
+    sidecars: cloneJson(sidecarState),
+  });
+  return;
+}
+
+async function apiAppVersion({ request, requestUrl, response, auth }) {
+  // 唯讀、免登入（比照其他唯讀端點）。更新檢查失敗一律降級成 state:"unavailable"，
+  // 不讓「查不到 GitHub」變成使用者看得到的錯誤——它不影響任何看盤功能。
+  const build = getAppBuild();
+  const update = await getUpdateStatus();
+  jsonResponse(response, 200, {
+    ok: true,
+    version: appVersion,
+    build: {
+      available: build.available,
+      commit: build.shortCommit,
+      branch: build.branch,
+      repo: build.repo ? `${build.repo.owner}/${build.repo.repo}` : "",
+    },
+    update,
+    identity: await getAppIdentity(),
+    generatedAt: new Date().toISOString(),
+  });
+  return;
+}
+
+async function apiAuthLogin({ request, requestUrl, response, auth }) {
+  try {
+    const input = await readJsonBody(request);
+    const username = String(input.username || "").trim();
+    const password = String(input.password || "");
+    if (!isValidUsername(username)) {
+      jsonResponse(response, 401, { ok: false, error: "帳號或密碼錯誤" });
+      return;
+    }
+    const usernameLower = username.toLowerCase();
+    const clientAddress = clientAddressOf(request);
+    if (isAddressBlocked(clientAddress)) {
+      jsonResponse(response, 429, { ok: false, error: "這個來源短時間內登入失敗太多次，已暫時鎖定，請 15 分鐘後再試。" });
+      return;
+    }
+    if (isLoginBlocked(usernameLower)) {
+      jsonResponse(response, 429, { ok: false, error: "嘗試次數過多，這個帳號已暫時鎖定，請 15 分鐘後再試。" });
+      return;
+    }
+    const db = await loadDb();
+    const user = db.users.find((item) => item.username.toLowerCase() === usernameLower);
+    const passwordMatches = verifyPassword(password, user?.passwordHash || LOGIN_DUMMY_PASSWORD_HASH);
+    if (!user || !passwordMatches) {
+      recordLoginFailure(usernameLower);
+      recordAddressFailure(clientAddress);
+      jsonResponse(response, 401, { ok: false, error: "帳號或密碼錯誤" });
+      return;
+    }
+    const verifiedPasswordHash = user.passwordHash;
+    loginFailures.delete(usernameLower);
+    const committed = await commitDbMutation((currentDb) => {
+      const currentUser = currentDb.users.find((item) => item.id === user.id);
+      if (!currentUser || currentUser.passwordHash !== verifiedPasswordHash) {
+        throw Object.assign(new Error("帳號或密碼錯誤"), { status: 401 });
+      }
+      const { token } = createSession(currentDb, currentUser.id);
+      return { token, user: currentUser };
     });
-    return true;
-  }
-  if (requestUrl.pathname === "/api/app-version") {
-    // 唯讀、免登入（比照其他唯讀端點）。更新檢查失敗一律降級成 state:"unavailable"，
-    // 不讓「查不到 GitHub」變成使用者看得到的錯誤——它不影響任何看盤功能。
-    const build = getAppBuild();
-    const update = await getUpdateStatus();
+    const { token } = committed;
+    setSessionCookie(response, request, token);
     jsonResponse(response, 200, {
       ok: true,
-      version: appVersion,
-      build: {
-        available: build.available,
-        commit: build.shortCommit,
-        branch: build.branch,
-        repo: build.repo ? `${build.repo.owner}/${build.repo.repo}` : "",
+      user: sanitizeUser(committed.user),
+      warnings: {
+        // 以帳號自己的 passwordSource 為準，不再看環境變數，也不再比對使用者名稱
+        // ——朋友那台若把 ADMIN_USERNAME 改掉，舊寫法連警告都不會出現。
+        defaultAdminPassword: usesSeededPassword(committed.user),
+        defaultAppSecret: usingDefaultAppSecret,
       },
-      update,
-      identity: await getAppIdentity(),
-      generatedAt: new Date().toISOString(),
     });
-    return true;
+  } catch (error) {
+    mutationErrorResponse(response, error, 400);
   }
-  if (requestUrl.pathname === "/api/auth/login") {
-    if (request.method !== "POST") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
+  return;
+}
+
+async function apiAuthLogout({ request, requestUrl, response }) {
+  const auth = await getAuthContext(request);
+  if (auth.session) {
+    await commitDbMutation((db) => {
+      const sessions = db.sessions.filter((session) => session.id !== auth.session.id);
+      if (sessions.length === db.sessions.length) return skipDbMutation();
+      db.sessions = sessions;
+      return undefined;
+    });
+  }
+  clearSessionCookie(response, request);
+  jsonResponse(response, 200, { ok: true });
+  return;
+}
+
+async function apiAuthMe({ request, requestUrl, response }) {
+  const auth = await getAuthContext(request);
+  if (!auth.user) {
+    // requireLogin 讓前端分得出「訪客可看行情」與「這個站台非登入不可」，兩者的 401 處理不同。
+    jsonResponse(response, 401, { ok: false, error: requireLoginMode ? "這個站台需要先登入" : "需要先登入", code: "AUTH_REQUIRED", requireLogin: requireLoginMode });
+    return;
+  }
+  jsonResponse(response, 200, {
+    ok: true,
+    requireLogin: requireLoginMode,
+    user: sanitizeUser(auth.user),
+    warnings: {
+      defaultAdminPassword: usesSeededPassword(auth.user),
+      defaultAppSecret: usingDefaultAppSecret,
+    },
+  });
+  return;
+}
+
+async function apiAuthPassword({ request, requestUrl, response, auth }) {
+  try {
+    const input = await readJsonBody(request);
+    const currentPassword = String(input.currentPassword || "");
+    const newPassword = String(input.newPassword || "");
+    // 「猜目前密碼」和登入是同一件事：拿到 cookie 的人不能在這裡無限次線上猜。
+    // 與登入、個人資料復原共用同一組 15 分鐘計次。
+    const usernameLower = auth.user.username.toLowerCase();
+    const clientAddress = clientAddressOf(request);
+    if (isLoginBlocked(usernameLower) || isAddressBlocked(clientAddress)) {
+      jsonResponse(response, 429, { ok: false, error: "密碼嘗試次數過多，請 15 分鐘後再試。" });
+      return;
     }
+    if (!verifyPassword(currentPassword, auth.user.passwordHash)) {
+      recordLoginFailure(usernameLower);
+      recordAddressFailure(clientAddress);
+      jsonResponse(response, 400, { ok: false, error: "目前密碼不正確" });
+      return;
+    }
+    if (newPassword.length < 8) {
+      jsonResponse(response, 400, { ok: false, error: "新密碼至少需要 8 個字。" });
+      return;
+    }
+    await commitDbMutation((db) => {
+      const { user, session } = requireCurrentMutationAuth(db, auth);
+      if (!verifyPassword(currentPassword, user.passwordHash)) {
+        recordLoginFailure(usernameLower);
+        recordAddressFailure(clientAddress);
+        throw new Error("目前密碼不正確");
+      }
+      user.passwordHash = hashPassword(newPassword);
+      user.passwordSource = PASSWORD_SOURCE_USER;
+      user.updatedAt = new Date().toISOString();
+      // 換密碼後把這個人其他裝置的 session 全登出，只留目前操作中的這個。
+      db.sessions = db.sessions.filter((s) => s.userId !== user.id || s.id === session.id);
+    });
+    loginFailures.delete(usernameLower);
+    jsonResponse(response, 200, { ok: true });
+  } catch (error) {
+    mutationErrorResponse(response, error, 400);
+  }
+  return;
+}
+
+async function apiPersonalDataExport({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  jsonResponse(response, 200, { ok: true, bundle: buildPersonalBackup(db, auth.user) });
+  return;
+}
+
+async function apiPersonalDataRestorePreview({ request, requestUrl, response, auth }) {
+  if (rejectPersonalRestoreBusy(response)) return;
+  try {
+    const input = await readJsonBody(request, PERSONAL_BACKUP_REQUEST_MAX_BYTES);
+    const db = await loadDb();
+    jsonResponse(response, 200, await buildPersonalRestorePreview(
+      db,
+      auth.user,
+      auth.session,
+      input?.bundle,
+      input?.options,
+    ));
+  } catch (error) {
+    if (error?.message === "Request body too large") {
+      portableErrorResponse(response, portableError("BACKUP_TOO_LARGE", "備份檔超過 16 MB 上限", 413));
+    } else if (error instanceof SyntaxError) {
+      portableErrorResponse(response, portableError("BACKUP_FORMAT_INVALID", "備份內容不是有效的 JSON"));
+    } else if (error?.code) {
+      portableErrorResponse(response, error);
+    } else {
+      apiFailure(response, 500, error);
+    }
+  }
+  return;
+}
+
+async function apiPersonalDataRestore({ request, requestUrl, response, auth }) {
+  if (rejectPersonalRestoreBusy(response)) return;
+  try {
+    const input = await readJsonBody(request);
+    const db = await loadDb();
+    jsonResponse(response, 200, await commitPersonalRestore(db, auth, input, clientAddressOf(request)));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      portableErrorResponse(response, portableError("BACKUP_FORMAT_INVALID", "請求內容不是有效的 JSON", 400));
+    } else if (error?.code === "PERSISTENCE_FAILED") {
+      // 還原點寫不進去＝磁碟／權限問題，統一 503 且不帶路徑（restore mutator 已把 fs 錯誤包好）。
+      mutationErrorResponse(response, error, 503);
+    } else if (error?.code) {
+      // stale 回應把 currentRevisions 提升到頂層，方便前端直接更新本機 rev。
+      if (error.code === "RESTORE_PREVIEW_STALE") {
+        jsonResponse(response, error.status, {
+          ok: false,
+          code: error.code,
+          error: error.message,
+          currentRevisions: error.details?.currentRevisions || currentPersonalRevisions(await loadDb(), auth.user.id),
+        });
+      } else {
+        portableErrorResponse(response, error);
+      }
+    } else {
+      apiFailure(response, 500, error);
+    }
+  }
+  return;
+}
+
+async function apiAdminMachineExport({ request, requestUrl, response, auth }) {
+  try {
+    const bundle = await buildMachineExport();
+    jsonResponse(response, 200, { ok: true, bundle });
+  } catch (error) {
+    apiFailure(response, 500, error);
+  }
+  return;
+}
+
+async function apiAdminUsers({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  if (request.method === "GET") {
+    jsonResponse(response, 200, {
+      ok: true,
+      users: db.users.map(sanitizeUser),
+    });
+    return;
+  }
+  if (request.method === "POST") {
     try {
       const input = await readJsonBody(request);
       const username = String(input.username || "").trim();
       const password = String(input.password || "");
+      // 顯示名會被複製進每則共享備註的 userName，設上限免得一個帳號把 DB 撐大。
+      const displayName = String(input.displayName || username).trim().slice(0, 64);
+      const role = input.role === "admin" ? "admin" : "user";
       if (!isValidUsername(username)) {
-        jsonResponse(response, 401, { ok: false, error: "帳號或密碼錯誤" });
-        return true;
+        throw new Error("帳號需為 3-32 個英數字、底線、句點或連字號。");
       }
-      const usernameLower = username.toLowerCase();
-      const clientAddress = clientAddressOf(request);
-      if (isAddressBlocked(clientAddress)) {
-        jsonResponse(response, 429, { ok: false, error: "這個來源短時間內登入失敗太多次，已暫時鎖定，請 15 分鐘後再試。" });
-        return true;
+      if (password.length < 8) {
+        throw new Error("密碼至少需要 8 個字。");
       }
-      if (isLoginBlocked(usernameLower)) {
-        jsonResponse(response, 429, { ok: false, error: "嘗試次數過多，這個帳號已暫時鎖定，請 15 分鐘後再試。" });
-        return true;
-      }
-      const db = await loadDb();
-      const user = db.users.find((item) => item.username.toLowerCase() === usernameLower);
-      const passwordMatches = verifyPassword(password, user?.passwordHash || LOGIN_DUMMY_PASSWORD_HASH);
-      if (!user || !passwordMatches) {
-        recordLoginFailure(usernameLower);
-        recordAddressFailure(clientAddress);
-        jsonResponse(response, 401, { ok: false, error: "帳號或密碼錯誤" });
-        return true;
-      }
-      const verifiedPasswordHash = user.passwordHash;
-      loginFailures.delete(usernameLower);
-      const committed = await commitDbMutation((currentDb) => {
-        const currentUser = currentDb.users.find((item) => item.id === user.id);
-        if (!currentUser || currentUser.passwordHash !== verifiedPasswordHash) {
-          throw Object.assign(new Error("帳號或密碼錯誤"), { status: 401 });
+      const user = await commitDbMutation((currentDb) => {
+        requireCurrentMutationAuth(currentDb, auth, { admin: true });
+        if (currentDb.users.some((item) => item.username.toLowerCase() === username.toLowerCase())) {
+          throw new Error("帳號已存在。");
         }
-        const { token } = createSession(currentDb, currentUser.id);
-        return { token, user: currentUser };
+        const now = new Date().toISOString();
+        const created = {
+          id: `u_${randomBytes(8).toString("hex")}`,
+          username,
+          displayName,
+          role,
+          passwordHash: hashPassword(password),
+          // 管理者手動建立的帳號，密碼是他自己輸入的，不是系統種的。
+          passwordSource: PASSWORD_SOURCE_USER,
+          createdAt: now,
+          updatedAt: now,
+        };
+        currentDb.users.push(created);
+        currentDb.watchLists ||= {};
+        currentDb.watchLists[created.id] = defaultWatchListPayload();
+        return created;
       });
-      const { token } = committed;
-      setSessionCookie(response, request, token);
-      jsonResponse(response, 200, {
-        ok: true,
-        user: sanitizeUser(committed.user),
-        warnings: {
-          // 以帳號自己的 passwordSource 為準，不再看環境變數，也不再比對使用者名稱
-          // ——朋友那台若把 ADMIN_USERNAME 改掉，舊寫法連警告都不會出現。
-          defaultAdminPassword: usesSeededPassword(committed.user),
-          defaultAppSecret: usingDefaultAppSecret,
-        },
-      });
+      jsonResponse(response, 201, { ok: true, user: sanitizeUser(user) });
     } catch (error) {
       mutationErrorResponse(response, error, 400);
     }
-    return true;
+    return;
   }
-
-  if (requestUrl.pathname === "/api/auth/logout") {
-    if (request.method !== "POST") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    const auth = await getAuthContext(request);
-    if (auth.session) {
-      await commitDbMutation((db) => {
-        const sessions = db.sessions.filter((session) => session.id !== auth.session.id);
-        if (sessions.length === db.sessions.length) return skipDbMutation();
-        db.sessions = sessions;
-        return undefined;
+  if (request.method === "PATCH") {
+    // 管理者重設任一帳號密碼（朋友忘記密碼時用，免手改資料庫檔）。
+    try {
+      const input = await readJsonBody(request);
+      const targetId = String(input.id || "");
+      const password = String(input.password || "");
+      if (password.length < 8) {
+        throw new Error("密碼至少需要 8 個字。");
+      }
+      const target = await commitDbMutation((currentDb) => {
+        requireCurrentMutationAuth(currentDb, auth, { admin: true });
+        const currentTarget = currentDb.users.find((item) => item.id === targetId);
+        if (!currentTarget) {
+          throw Object.assign(new Error("找不到這個帳號"), { status: 404 });
+        }
+        currentTarget.passwordHash = hashPassword(password);
+        currentTarget.passwordSource = PASSWORD_SOURCE_USER;
+        currentTarget.updatedAt = new Date().toISOString();
+        // 重設後強制該帳號所有裝置重新登入。
+        currentDb.sessions = currentDb.sessions.filter((s) => s.userId !== currentTarget.id);
+        return currentTarget;
       });
+      loginFailures.delete(target.username.toLowerCase());
+      jsonResponse(response, 200, { ok: true, user: sanitizeUser(target) });
+    } catch (error) {
+      mutationErrorResponse(response, error, 400);
     }
-    clearSessionCookie(response, request);
-    jsonResponse(response, 200, { ok: true });
-    return true;
+    return;
   }
-
-  if (requestUrl.pathname === "/api/auth/me") {
-    const auth = await getAuthContext(request);
-    if (!auth.user) {
-      // requireLogin 讓前端分得出「訪客可看行情」與「這個站台非登入不可」，兩者的 401 處理不同。
-      jsonResponse(response, 401, { ok: false, error: requireLoginMode ? "這個站台需要先登入" : "需要先登入", code: "AUTH_REQUIRED", requireLogin: requireLoginMode });
-      return true;
+  if (request.method === "DELETE") {
+    try {
+      const id = String(requestUrl.searchParams.get("id") || "");
+      // 連同個人資料一起清：session、自選股、到價提醒、交易紀錄、券商設定、備註、資料版本號。
+      if (rejectPersonalRestoreBusy(response)) return;
+      const result = await commitDbMutation((currentDb) => {
+        const { user: currentAdmin } = requireCurrentMutationAuth(currentDb, auth, { admin: true });
+        const target = currentDb.users.find((item) => item.id === id);
+        if (!target) throw Object.assign(new Error("找不到這個帳號"), { status: 404 });
+        if (target.id === currentAdmin.id) throw new Error("不能刪除自己正在使用的帳號。");
+        if (target.role === "admin" && currentDb.users.filter((u) => u.role === "admin").length <= 1) {
+          throw new Error("至少要保留一個管理者帳號。");
+        }
+        currentDb.users = currentDb.users.filter((u) => u.id !== id);
+        currentDb.sessions = currentDb.sessions.filter((s) => s.userId !== id);
+        if (currentDb.watchLists) delete currentDb.watchLists[id];
+        if (currentDb.priceAlerts) delete currentDb.priceAlerts[id];
+        if (currentDb.trades) delete currentDb.trades[id];
+        if (currentDb.tradePlans) delete currentDb.tradePlans[id];
+        if (currentDb.brokerCredentials) delete currentDb.brokerCredentials[id];
+        if (currentDb.dataRevs) delete currentDb.dataRevs[id];
+        let removedStockNotes = false;
+        if (currentDb.stockNotes) {
+          for (const code of Object.keys(currentDb.stockNotes)) {
+            const beforeCount = (currentDb.stockNotes[code] || []).length;
+            currentDb.stockNotes[code] = (currentDb.stockNotes[code] || []).filter((note) => note.userId !== id);
+            if (currentDb.stockNotes[code].length !== beforeCount) removedStockNotes = true;
+            if (!currentDb.stockNotes[code].length) delete currentDb.stockNotes[code];
+          }
+        }
+        if (removedStockNotes) bumpSharedRev(currentDb, "stockNotes");
+        return { username: target.username, users: currentDb.users.map(sanitizeUser) };
+      });
+      loginFailures.delete(result.username.toLowerCase());
+      await closeFubonClient(id);
+      jsonResponse(response, 200, { ok: true, users: result.users });
+    } catch (error) {
+      mutationErrorResponse(response, error, 400);
     }
+    return;
+  }
+}
+
+async function apiWatchlists({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  if (!db.watchLists[auth.user.id]) {
+    await commitDbMutation((currentDb) => {
+      const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
+      currentDb.watchLists ||= {};
+      if (currentDb.watchLists[currentUser.id]) return skipDbMutation();
+      currentDb.watchLists[currentUser.id] = defaultWatchListPayload();
+      return undefined;
+    });
+  }
+  if (request.method === "GET") {
     jsonResponse(response, 200, {
       ok: true,
-      requireLogin: requireLoginMode,
-      user: sanitizeUser(auth.user),
-      warnings: {
-        defaultAdminPassword: usesSeededPassword(auth.user),
-        defaultAppSecret: usingDefaultAppSecret,
-      },
+      rev: getDataRev(db, auth.user.id, "watchLists"),
+      lists: normalizeWatchListsPayload(db.watchLists[auth.user.id]),
     });
-    return true;
+    return;
   }
-
-  if (requestUrl.pathname === "/api/auth/password") {
-    if (request.method !== "POST") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    const authed = await requireAuth(request, response);
-    if (!authed) return true;
+  if (request.method === "PUT") {
     try {
       const input = await readJsonBody(request);
-      const currentPassword = String(input.currentPassword || "");
-      const newPassword = String(input.newPassword || "");
-      // 「猜目前密碼」和登入是同一件事：拿到 cookie 的人不能在這裡無限次線上猜。
-      // 與登入、個人資料復原共用同一組 15 分鐘計次。
-      const usernameLower = authed.user.username.toLowerCase();
-      const clientAddress = clientAddressOf(request);
-      if (isLoginBlocked(usernameLower) || isAddressBlocked(clientAddress)) {
-        jsonResponse(response, 429, { ok: false, error: "密碼嘗試次數過多，請 15 分鐘後再試。" });
-        return true;
+      if (rejectPersonalRestoreBusy(response)) return;
+      if (!input?.lists || typeof input.lists !== "object" || Array.isArray(input.lists)) {
+        jsonResponse(response, 422, capacityValidationError("lists 必須是包含三組自選股的物件", [
+          { field: "lists", message: "lists 必須是物件" },
+        ]));
+        return;
       }
-      if (!verifyPassword(currentPassword, authed.user.passwordHash)) {
-        recordLoginFailure(usernameLower);
-        recordAddressFailure(clientAddress);
-        jsonResponse(response, 400, { ok: false, error: "目前密碼不正確" });
-        return true;
+      const lists = normalizeWatchListsPayload(input.lists);
+      const overLimit = Object.entries(lists).find(([, codes]) => codes.length > MAX_WATCHLIST_CODES_PER_LIST);
+      if (overLimit) {
+        const [key, codes] = overLimit;
+        jsonResponse(response, 422, capacityValidationError(
+          `自選股清單 ${key} 最多 ${MAX_WATCHLIST_CODES_PER_LIST} 檔，目前有 ${codes.length} 檔`,
+          [{ field: `lists.${key}`, message: `清洗去重後不可超過 ${MAX_WATCHLIST_CODES_PER_LIST} 檔`, count: codes.length }],
+        ));
+        return;
       }
-      if (newPassword.length < 8) {
-        jsonResponse(response, 400, { ok: false, error: "新密碼至少需要 8 個字。" });
-        return true;
-      }
-      await commitDbMutation((db) => {
-        const { user, session } = requireCurrentMutationAuth(db, authed);
-        if (!verifyPassword(currentPassword, user.passwordHash)) {
-          recordLoginFailure(usernameLower);
-          recordAddressFailure(clientAddress);
-          throw new Error("目前密碼不正確");
+      const committed = await commitDbMutation((currentDb) => {
+        const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
+        if (rejectStaleRev(currentDb, currentUser.id, "watchLists", input?.rev, response)) {
+          return skipDbMutation(null);
         }
-        user.passwordHash = hashPassword(newPassword);
-        user.passwordSource = PASSWORD_SOURCE_USER;
-        user.updatedAt = new Date().toISOString();
-        // 換密碼後把這個人其他裝置的 session 全登出，只留目前操作中的這個。
-        db.sessions = db.sessions.filter((s) => s.userId !== user.id || s.id === session.id);
+        currentDb.watchLists ||= {};
+        currentDb.watchLists[currentUser.id] = lists;
+        const rev = bumpDataRev(currentDb, currentUser.id, "watchLists");
+        return { rev, lists: normalizeWatchListsPayload(currentDb.watchLists[currentUser.id]) };
       });
-      loginFailures.delete(usernameLower);
-      jsonResponse(response, 200, { ok: true });
+      if (!committed) return;
+      jsonResponse(response, 200, {
+        ok: true,
+        rev: committed.rev,
+        lists: committed.lists,
+      });
     } catch (error) {
       mutationErrorResponse(response, error, 400);
     }
-    return true;
+    return;
   }
+}
 
-  const auth = await getAuthContext(request);
-
-  // 行情、訊號等唯讀 API 目前開放未登入使用（本機看盤）；
-  // 自選股、券商設定、帳號管理等個人資料端點在各自的 handler 內檢查登入。
-
-  if (requestUrl.pathname === "/api/personal-data/export") {
-    if (!ensureAuthed(auth, response)) return true;
-    const db = await loadDb();
-    jsonResponse(response, 200, { ok: true, bundle: buildPersonalBackup(db, auth.user) });
-    return true;
+async function apiAlerts({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  db.priceAlerts ||= {};
+  if (request.method === "GET") {
+    jsonResponse(response, 200, {
+      ok: true,
+      rev: getDataRev(db, auth.user.id, "alerts"),
+      alerts: normalizeAlertsPayload(db.priceAlerts[auth.user.id]),
+    });
+    return;
   }
-
-  if (requestUrl.pathname === "/api/personal-data/restore/preview") {
-    if (request.method !== "POST") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    if (!ensureAuthed(auth, response)) return true;
-    if (rejectPersonalRestoreBusy(response)) return true;
-    try {
-      const input = await readJsonBody(request, PERSONAL_BACKUP_REQUEST_MAX_BYTES);
-      const db = await loadDb();
-      jsonResponse(response, 200, await buildPersonalRestorePreview(
-        db,
-        auth.user,
-        auth.session,
-        input?.bundle,
-        input?.options,
-      ));
-    } catch (error) {
-      if (error?.message === "Request body too large") {
-        portableErrorResponse(response, portableError("BACKUP_TOO_LARGE", "備份檔超過 16 MB 上限", 413));
-      } else if (error instanceof SyntaxError) {
-        portableErrorResponse(response, portableError("BACKUP_FORMAT_INVALID", "備份內容不是有效的 JSON"));
-      } else if (error?.code) {
-        portableErrorResponse(response, error);
-      } else {
-        apiFailure(response, 500, error);
-      }
-    }
-    return true;
-  }
-
-  if (requestUrl.pathname === "/api/personal-data/restore") {
-    if (request.method !== "POST") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    if (!ensureAuthed(auth, response)) return true;
-    if (rejectPersonalRestoreBusy(response)) return true;
+  if (request.method === "PUT") {
     try {
       const input = await readJsonBody(request);
-      const db = await loadDb();
-      jsonResponse(response, 200, await commitPersonalRestore(db, auth, input, clientAddressOf(request)));
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        portableErrorResponse(response, portableError("BACKUP_FORMAT_INVALID", "請求內容不是有效的 JSON", 400));
-      } else if (error?.code === "PERSISTENCE_FAILED") {
-        // 還原點寫不進去＝磁碟／權限問題，統一 503 且不帶路徑（restore mutator 已把 fs 錯誤包好）。
-        mutationErrorResponse(response, error, 503);
-      } else if (error?.code) {
-        // stale 回應把 currentRevisions 提升到頂層，方便前端直接更新本機 rev。
-        if (error.code === "RESTORE_PREVIEW_STALE") {
-          jsonResponse(response, error.status, {
-            ok: false,
-            code: error.code,
-            error: error.message,
-            currentRevisions: error.details?.currentRevisions || currentPersonalRevisions(await loadDb(), auth.user.id),
-          });
-        } else {
-          portableErrorResponse(response, error);
-        }
-      } else {
-        apiFailure(response, 500, error);
+      if (rejectPersonalRestoreBusy(response)) return;
+      if (!Array.isArray(input?.alerts)) {
+        jsonResponse(response, 422, capacityValidationError("alerts 必須是陣列", [
+          { field: "alerts", message: "alerts 必須是陣列" },
+        ]));
+        return;
       }
-    }
-    return true;
-  }
-
-  // 管理者整機匯出：放在雲端（Zeabur）時拿不到 /data 的 shell，這是把整份資料抓回本機的唯一常規出口。
-  // 讀的是磁碟上最後一次提交的三個檔（與 scripts/backup.mjs 的 SOURCES 相同），不是停機一致備份：
-  // 回應帶 pendingWrites 讓人知道有沒有還沒落盤的寫入；還原走 scripts/unpack-machine-export.mjs 再照 README 第 4 節。
-  if (requestUrl.pathname === "/api/admin/machine-export") {
-    if (!ensureAuthed(auth, response)) return true;
-    if (auth.user.role !== "admin") {
-      jsonResponse(response, 403, { ok: false, error: "需要管理者權限" });
-      return true;
-    }
-    try {
-      const bundle = await buildMachineExport();
-      jsonResponse(response, 200, { ok: true, bundle });
-    } catch (error) {
-      apiFailure(response, 500, error);
-    }
-    return true;
-  }
-
-  if (requestUrl.pathname === "/api/admin/users") {
-    if (!ensureAuthed(auth, response)) return true;
-    if (auth.user.role !== "admin") {
-      jsonResponse(response, 403, { ok: false, error: "需要管理者權限" });
-      return true;
-    }
-    const db = await loadDb();
-    if (request.method === "GET") {
-      jsonResponse(response, 200, {
-        ok: true,
-        users: db.users.map(sanitizeUser),
-      });
-      return true;
-    }
-    if (request.method === "POST") {
-      try {
-        const input = await readJsonBody(request);
-        const username = String(input.username || "").trim();
-        const password = String(input.password || "");
-        // 顯示名會被複製進每則共享備註的 userName，設上限免得一個帳號把 DB 撐大。
-        const displayName = String(input.displayName || username).trim().slice(0, 64);
-        const role = input.role === "admin" ? "admin" : "user";
-        if (!isValidUsername(username)) {
-          throw new Error("帳號需為 3-32 個英數字、底線、句點或連字號。");
-        }
-        if (password.length < 8) {
-          throw new Error("密碼至少需要 8 個字。");
-        }
-        const user = await commitDbMutation((currentDb) => {
-          requireCurrentMutationAuth(currentDb, auth, { admin: true });
-          if (currentDb.users.some((item) => item.username.toLowerCase() === username.toLowerCase())) {
-            throw new Error("帳號已存在。");
-          }
-          const now = new Date().toISOString();
-          const created = {
-            id: `u_${randomBytes(8).toString("hex")}`,
-            username,
-            displayName,
-            role,
-            passwordHash: hashPassword(password),
-            // 管理者手動建立的帳號，密碼是他自己輸入的，不是系統種的。
-            passwordSource: PASSWORD_SOURCE_USER,
-            createdAt: now,
-            updatedAt: now,
-          };
-          currentDb.users.push(created);
-          currentDb.watchLists ||= {};
-          currentDb.watchLists[created.id] = defaultWatchListPayload();
-          return created;
-        });
-        jsonResponse(response, 201, { ok: true, user: sanitizeUser(user) });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
+      const alerts = normalizeAlertsPayload(input.alerts);
+      if (alerts.length > MAX_PRICE_ALERTS) {
+        jsonResponse(response, 422, capacityValidationError(
+          `到價提醒最多 ${MAX_PRICE_ALERTS} 筆，目前有 ${alerts.length} 筆`,
+          [{ field: "alerts", message: `清洗去重後不可超過 ${MAX_PRICE_ALERTS} 筆`, count: alerts.length }],
+        ));
+        return;
       }
-      return true;
-    }
-    if (request.method === "PATCH") {
-      // 管理者重設任一帳號密碼（朋友忘記密碼時用，免手改資料庫檔）。
-      try {
-        const input = await readJsonBody(request);
-        const targetId = String(input.id || "");
-        const password = String(input.password || "");
-        if (password.length < 8) {
-          throw new Error("密碼至少需要 8 個字。");
-        }
-        const target = await commitDbMutation((currentDb) => {
-          requireCurrentMutationAuth(currentDb, auth, { admin: true });
-          const currentTarget = currentDb.users.find((item) => item.id === targetId);
-          if (!currentTarget) {
-            throw Object.assign(new Error("找不到這個帳號"), { status: 404 });
-          }
-          currentTarget.passwordHash = hashPassword(password);
-          currentTarget.passwordSource = PASSWORD_SOURCE_USER;
-          currentTarget.updatedAt = new Date().toISOString();
-          // 重設後強制該帳號所有裝置重新登入。
-          currentDb.sessions = currentDb.sessions.filter((s) => s.userId !== currentTarget.id);
-          return currentTarget;
-        });
-        loginFailures.delete(target.username.toLowerCase());
-        jsonResponse(response, 200, { ok: true, user: sanitizeUser(target) });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    if (request.method === "DELETE") {
-      try {
-        const id = String(requestUrl.searchParams.get("id") || "");
-        // 連同個人資料一起清：session、自選股、到價提醒、交易紀錄、券商設定、備註、資料版本號。
-        if (rejectPersonalRestoreBusy(response)) return true;
-        const result = await commitDbMutation((currentDb) => {
-          const { user: currentAdmin } = requireCurrentMutationAuth(currentDb, auth, { admin: true });
-          const target = currentDb.users.find((item) => item.id === id);
-          if (!target) throw Object.assign(new Error("找不到這個帳號"), { status: 404 });
-          if (target.id === currentAdmin.id) throw new Error("不能刪除自己正在使用的帳號。");
-          if (target.role === "admin" && currentDb.users.filter((u) => u.role === "admin").length <= 1) {
-            throw new Error("至少要保留一個管理者帳號。");
-          }
-          currentDb.users = currentDb.users.filter((u) => u.id !== id);
-          currentDb.sessions = currentDb.sessions.filter((s) => s.userId !== id);
-          if (currentDb.watchLists) delete currentDb.watchLists[id];
-          if (currentDb.priceAlerts) delete currentDb.priceAlerts[id];
-          if (currentDb.trades) delete currentDb.trades[id];
-          if (currentDb.tradePlans) delete currentDb.tradePlans[id];
-          if (currentDb.brokerCredentials) delete currentDb.brokerCredentials[id];
-          if (currentDb.dataRevs) delete currentDb.dataRevs[id];
-          let removedStockNotes = false;
-          if (currentDb.stockNotes) {
-            for (const code of Object.keys(currentDb.stockNotes)) {
-              const beforeCount = (currentDb.stockNotes[code] || []).length;
-              currentDb.stockNotes[code] = (currentDb.stockNotes[code] || []).filter((note) => note.userId !== id);
-              if (currentDb.stockNotes[code].length !== beforeCount) removedStockNotes = true;
-              if (!currentDb.stockNotes[code].length) delete currentDb.stockNotes[code];
-            }
-          }
-          if (removedStockNotes) bumpSharedRev(currentDb, "stockNotes");
-          return { username: target.username, users: currentDb.users.map(sanitizeUser) };
-        });
-        loginFailures.delete(result.username.toLowerCase());
-        await closeFubonClient(id);
-        jsonResponse(response, 200, { ok: true, users: result.users });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-    return true;
-  }
-
-  if (requestUrl.pathname === "/api/watchlists") {
-    if (!ensureAuthed(auth, response)) return true;
-    const db = await loadDb();
-    if (!db.watchLists[auth.user.id]) {
-      await commitDbMutation((currentDb) => {
+      const committed = await commitDbMutation((currentDb) => {
         const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
-        currentDb.watchLists ||= {};
-        if (currentDb.watchLists[currentUser.id]) return skipDbMutation();
-        currentDb.watchLists[currentUser.id] = defaultWatchListPayload();
-        return undefined;
+        if (rejectStaleRev(currentDb, currentUser.id, "alerts", input?.rev, response)) {
+          return skipDbMutation(null);
+        }
+        currentDb.priceAlerts ||= {};
+        currentDb.priceAlerts[currentUser.id] = alerts;
+        const rev = bumpDataRev(currentDb, currentUser.id, "alerts");
+        return { rev, alerts: cloneJson(currentDb.priceAlerts[currentUser.id]) };
       });
-    }
-    if (request.method === "GET") {
+      if (!committed) return;
       jsonResponse(response, 200, {
         ok: true,
-        rev: getDataRev(db, auth.user.id, "watchLists"),
-        lists: normalizeWatchListsPayload(db.watchLists[auth.user.id]),
-      });
-      return true;
-    }
-    if (request.method === "PUT") {
-      try {
-        const input = await readJsonBody(request);
-        if (rejectPersonalRestoreBusy(response)) return true;
-        if (!input?.lists || typeof input.lists !== "object" || Array.isArray(input.lists)) {
-          jsonResponse(response, 422, capacityValidationError("lists 必須是包含三組自選股的物件", [
-            { field: "lists", message: "lists 必須是物件" },
-          ]));
-          return true;
-        }
-        const lists = normalizeWatchListsPayload(input.lists);
-        const overLimit = Object.entries(lists).find(([, codes]) => codes.length > MAX_WATCHLIST_CODES_PER_LIST);
-        if (overLimit) {
-          const [key, codes] = overLimit;
-          jsonResponse(response, 422, capacityValidationError(
-            `自選股清單 ${key} 最多 ${MAX_WATCHLIST_CODES_PER_LIST} 檔，目前有 ${codes.length} 檔`,
-            [{ field: `lists.${key}`, message: `清洗去重後不可超過 ${MAX_WATCHLIST_CODES_PER_LIST} 檔`, count: codes.length }],
-          ));
-          return true;
-        }
-        const committed = await commitDbMutation((currentDb) => {
-          const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
-          if (rejectStaleRev(currentDb, currentUser.id, "watchLists", input?.rev, response)) {
-            return skipDbMutation(null);
-          }
-          currentDb.watchLists ||= {};
-          currentDb.watchLists[currentUser.id] = lists;
-          const rev = bumpDataRev(currentDb, currentUser.id, "watchLists");
-          return { rev, lists: normalizeWatchListsPayload(currentDb.watchLists[currentUser.id]) };
-        });
-        if (!committed) return true;
-        jsonResponse(response, 200, {
-          ok: true,
-          rev: committed.rev,
-          lists: committed.lists,
-        });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-    return true;
-  }
-
-  if (requestUrl.pathname === "/api/alerts") {
-    if (!ensureAuthed(auth, response)) return true;
-    const db = await loadDb();
-    db.priceAlerts ||= {};
-    if (request.method === "GET") {
-      jsonResponse(response, 200, {
-        ok: true,
-        rev: getDataRev(db, auth.user.id, "alerts"),
-        alerts: normalizeAlertsPayload(db.priceAlerts[auth.user.id]),
-      });
-      return true;
-    }
-    if (request.method === "PUT") {
-      try {
-        const input = await readJsonBody(request);
-        if (rejectPersonalRestoreBusy(response)) return true;
-        if (!Array.isArray(input?.alerts)) {
-          jsonResponse(response, 422, capacityValidationError("alerts 必須是陣列", [
-            { field: "alerts", message: "alerts 必須是陣列" },
-          ]));
-          return true;
-        }
-        const alerts = normalizeAlertsPayload(input.alerts);
-        if (alerts.length > MAX_PRICE_ALERTS) {
-          jsonResponse(response, 422, capacityValidationError(
-            `到價提醒最多 ${MAX_PRICE_ALERTS} 筆，目前有 ${alerts.length} 筆`,
-            [{ field: "alerts", message: `清洗去重後不可超過 ${MAX_PRICE_ALERTS} 筆`, count: alerts.length }],
-          ));
-          return true;
-        }
-        const committed = await commitDbMutation((currentDb) => {
-          const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
-          if (rejectStaleRev(currentDb, currentUser.id, "alerts", input?.rev, response)) {
-            return skipDbMutation(null);
-          }
-          currentDb.priceAlerts ||= {};
-          currentDb.priceAlerts[currentUser.id] = alerts;
-          const rev = bumpDataRev(currentDb, currentUser.id, "alerts");
-          return { rev, alerts: cloneJson(currentDb.priceAlerts[currentUser.id]) };
-        });
-        if (!committed) return true;
-        jsonResponse(response, 200, {
-          ok: true,
-          rev: committed.rev,
-          alerts: committed.alerts,
-        });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-    return true;
-  }
-
-  if (requestUrl.pathname === "/api/instrument-profile") {
-    if (request.method !== "GET") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    const rawCode = String(requestUrl.searchParams.get("code") || "").trim().toUpperCase();
-    if (!SECURITY_CODE_PATTERN.test(rawCode)) {
-      jsonResponse(response, 400, { ok: false, error: "證券代號必須是 4～6 碼英數字" });
-      return true;
-    }
-    try {
-      const resolved = await resolveOfficialInstruments([rawCode]);
-      const profile = resolved.profiles.get(rawCode) || null;
-      jsonResponse(response, 200, {
-        ok: true,
-        code: rawCode,
-        status: profile ? "official" : "unresolved",
-        profile,
-        warnings: resolved.warnings,
-        dataQuality: resolved.dataQuality,
+        rev: committed.rev,
+        alerts: committed.alerts,
       });
     } catch (error) {
-      apiFailure(response, 502, error);
+      mutationErrorResponse(response, error, 400);
     }
-    return true;
+    return;
   }
+}
 
-  if (requestUrl.pathname === '/api/trade-plans') {
-    if (!ensureAuthed(auth, response)) return true;
-    const db = await loadDb();
-    if (request.method === 'GET') {
-      const plans = db.tradePlans?.[auth.user.id] || emptyTradePlans();
-      jsonResponse(response, 200, { ok: true, rev: getDataRev(db, auth.user.id, 'tradePlans'), ...plans, linkEvidence:buildTradePlanLinkEvidence(plans,normalizeTradesPayload(db.trades?.[auth.user.id]).records) });
-      return true;
+async function apiInstrumentProfile({ request, requestUrl, response, auth }) {
+  const rawCode = String(requestUrl.searchParams.get("code") || "").trim().toUpperCase();
+  if (!SECURITY_CODE_PATTERN.test(rawCode)) {
+    jsonResponse(response, 400, { ok: false, error: "證券代號必須是 4～6 碼英數字" });
+    return;
+  }
+  try {
+    const resolved = await resolveOfficialInstruments([rawCode]);
+    const profile = resolved.profiles.get(rawCode) || null;
+    jsonResponse(response, 200, {
+      ok: true,
+      code: rawCode,
+      status: profile ? "official" : "unresolved",
+      profile,
+      warnings: resolved.warnings,
+      dataQuality: resolved.dataQuality,
+    });
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiTradePlans({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  if (request.method === 'GET') {
+    const plans = db.tradePlans?.[auth.user.id] || emptyTradePlans();
+    jsonResponse(response, 200, { ok: true, rev: getDataRev(db, auth.user.id, 'tradePlans'), ...plans, linkEvidence:buildTradePlanLinkEvidence(plans,normalizeTradesPayload(db.trades?.[auth.user.id]).records) });
+    return;
+  }
+  if (request.method === 'PUT') {
+    try {
+      const input = await readJsonBody(request);
+      const result = await commitDbMutation(currentDb => {
+        const { user } = requireCurrentMutationAuth(currentDb, auth);
+        if (rejectPersonalRestoreBusy(response) || rejectStaleRev(currentDb, user.id, 'tradePlans', input?.rev, response)) return skipDbMutation(null);
+        const existing = currentDb.tradePlans?.[user.id] || emptyTradePlans();
+        const payload = canonicalizeTradePlans(input, existing, { db: currentDb, records:normalizeTradesPayload(currentDb.trades?.[user.id]).records });
+        if (stableJson(payload) === stableJson(existing)) return skipDbMutation({ ok: true, rev: getDataRev(currentDb, user.id, 'tradePlans'), ...payload, linkEvidence:buildTradePlanLinkEvidence(payload,normalizeTradesPayload(currentDb.trades?.[user.id]).records) });
+        currentDb.tradePlans ||= {};
+        currentDb.tradePlans[user.id] = payload;
+        return { ok: true, rev: bumpDataRev(currentDb, user.id, 'tradePlans'), ...payload, linkEvidence:buildTradePlanLinkEvidence(payload,normalizeTradesPayload(currentDb.trades?.[user.id]).records) };
+      });
+      if (result) jsonResponse(response, 200, result);
+    } catch (error) {
+      if (error?.message === 'Request body too large') {
+        jsonResponse(response, 413, { ok: false, code: 'PLAN_BODY_TOO_LARGE', error: '計畫請求超過 128 KiB 上限；請先從個人資料備份匯出，未修改任何計畫' });
+      } else mutationErrorResponse(response, error, 400);
     }
-    if (request.method === 'PUT') {
-      try {
-        const input = await readJsonBody(request);
-        const result = await commitDbMutation(currentDb => {
-          const { user } = requireCurrentMutationAuth(currentDb, auth);
-          if (rejectPersonalRestoreBusy(response) || rejectStaleRev(currentDb, user.id, 'tradePlans', input?.rev, response)) return skipDbMutation(null);
-          const existing = currentDb.tradePlans?.[user.id] || emptyTradePlans();
-          const payload = canonicalizeTradePlans(input, existing, { db: currentDb, records:normalizeTradesPayload(currentDb.trades?.[user.id]).records });
-          if (stableJson(payload) === stableJson(existing)) return skipDbMutation({ ok: true, rev: getDataRev(currentDb, user.id, 'tradePlans'), ...payload, linkEvidence:buildTradePlanLinkEvidence(payload,normalizeTradesPayload(currentDb.trades?.[user.id]).records) });
-          currentDb.tradePlans ||= {};
-          currentDb.tradePlans[user.id] = payload;
-          return { ok: true, rev: bumpDataRev(currentDb, user.id, 'tradePlans'), ...payload, linkEvidence:buildTradePlanLinkEvidence(payload,normalizeTradesPayload(currentDb.trades?.[user.id]).records) };
+    return;
+  }
+}
+
+async function apiTrades({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  db.trades ||= {};
+  if (request.method === "GET") {
+    const payload = normalizeTradesPayload(db.trades[auth.user.id]);
+    const portfolio = buildPortfolio(payload);
+    jsonResponse(response, 200, {
+      ok: true,
+      rev: getDataRev(db, auth.user.id, "trades"),
+      ...payload,
+      portfolio,
+      // 我的成績單（帳本側）與 T+2 交割都只從帳本算、不打上游；開休市表只用已快取的那份。
+      scorecard: portfolio.ok ? buildPersonalScorecard(payload, portfolio) : null,
+      settlement: buildSettlementSchedule(payload.records, toTaipeiCompactDate(), tradingCalendarCache.value?.holidayRows || []),
+      // 官方歸檔裡有、但帳本沒登錄的除權／現增；前端據此提供事後補登。
+      missingCorporateActions: await findMissingCorporateActions(payload),
+    });
+    return;
+  }
+  if (request.method === "PUT") {
+    try {
+      const input = await readJsonBody(request);
+      if (rejectPersonalRestoreBusy(response)) return;
+      if (rejectStaleRev(db, auth.user.id, "trades", input?.rev, response)) return;
+      // official/rule/as-of 是伺服器管理欄位。先以「不信任 client provenance」的
+      // 版本做結構驗證，避免壞資料觸發上游查詢；正式 stamp 後再驗一次完整契約。
+      const untrustedInput = {
+        ...input,
+        records: Array.isArray(input?.records) ? input.records.map((record) => {
+          if (!record || typeof record !== "object" || Array.isArray(record)) return record;
+          const copy = { ...record };
+          copy.instrumentSource = copy.instrumentType == null || copy.instrumentType === "" ? "legacy" : "user";
+          delete copy.instrumentRuleId;
+          delete copy.instrumentAsOf;
+          return copy;
+        }) : input?.records,
+      };
+      const preliminaryValidation = validateTradesMutationInput(untrustedInput);
+      if (!preliminaryValidation.ok) {
+        jsonResponse(response, 422, {
+          ok: false,
+          code: "VALIDATION_ERROR",
+          error: preliminaryValidation.errors[0]?.message || "交易帳本內容不正確",
+          details: preliminaryValidation.errors,
         });
-        if (result) jsonResponse(response, 200, result);
-      } catch (error) {
-        if (error?.message === 'Request body too large') {
-          jsonResponse(response, 413, { ok: false, code: 'PLAN_BODY_TOO_LARGE', error: '計畫請求超過 128 KiB 上限；請先從個人資料備份匯出，未修改任何計畫' });
-        } else mutationErrorResponse(response, error, 400);
+        return;
       }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: 'Method not allowed' });
-    return true;
-  }
-
-  if (requestUrl.pathname === "/api/trades") {
-    if (!ensureAuthed(auth, response)) return true;
-    const db = await loadDb();
-    db.trades ||= {};
-    if (request.method === "GET") {
-      const payload = normalizeTradesPayload(db.trades[auth.user.id]);
+      const existingPayload = normalizeTradesPayload(db.trades[auth.user.id]);
+      const canonical = await canonicalizeTradeInstrumentProvenance(input, existingPayload);
+      const moneyCanonicalPayload = canonicalizeTradeMoneyProvenance(canonical.payload, existingPayload);
+      const validation = validateTradesMutationInput(moneyCanonicalPayload);
+      if (!validation.ok) {
+        jsonResponse(response, 422, {
+          ok: false,
+          code: "VALIDATION_ERROR",
+          error: validation.errors[0]?.message || "交易帳本內容不正確",
+          details: validation.errors,
+        });
+        return;
+      }
+      const payload = normalizeTradesPayload({
+        ...moneyCanonicalPayload,
+        quarantinedRecords: existingPayload.quarantinedRecords,
+      });
       const portfolio = buildPortfolio(payload);
+      if (!portfolio.ok) {
+        jsonResponse(response, 400, { ok: false, error: portfolio.error });
+        return;
+      }
+      // 官方主檔查詢可能 await 很久；提交前必須再驗一次 rev，避免兩個同 rev PUT
+      // 都通過入口檢查後相互覆蓋。重驗、bump 與 save 同在 transaction queue。
+      const committed = await commitDbMutation((currentDb) => {
+        const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
+        if (rejectPersonalRestoreBusy(response)) return skipDbMutation(null);
+        if (rejectStaleRev(currentDb, currentUser.id, "trades", input?.rev, response)) {
+          return skipDbMutation(null);
+        }
+        currentDb.trades ||= {};
+        currentDb.trades[currentUser.id] = payload;
+        return { rev: bumpDataRev(currentDb, currentUser.id, "trades") };
+      });
+      if (!committed) return;
       jsonResponse(response, 200, {
         ok: true,
-        rev: getDataRev(db, auth.user.id, "trades"),
+        rev: committed.rev,
         ...payload,
         portfolio,
-        // 我的成績單（帳本側）與 T+2 交割都只從帳本算、不打上游；開休市表只用已快取的那份。
-        scorecard: portfolio.ok ? buildPersonalScorecard(payload, portfolio) : null,
+        scorecard: buildPersonalScorecard(payload, portfolio),
         settlement: buildSettlementSchedule(payload.records, toTaipeiCompactDate(), tradingCalendarCache.value?.holidayRows || []),
-        // 官方歸檔裡有、但帳本沒登錄的除權／現增；前端據此提供事後補登。
-        missingCorporateActions: await findMissingCorporateActions(payload),
+        instrumentWarnings: canonical.warnings,
+        instrumentDataQuality: canonical.dataQuality,
       });
-      return true;
+    } catch (error) {
+      mutationErrorResponse(response, error, 400);
     }
-    if (request.method === "PUT") {
-      try {
-        const input = await readJsonBody(request);
-        if (rejectPersonalRestoreBusy(response)) return true;
-        if (rejectStaleRev(db, auth.user.id, "trades", input?.rev, response)) return true;
-        // official/rule/as-of 是伺服器管理欄位。先以「不信任 client provenance」的
-        // 版本做結構驗證，避免壞資料觸發上游查詢；正式 stamp 後再驗一次完整契約。
-        const untrustedInput = {
-          ...input,
-          records: Array.isArray(input?.records) ? input.records.map((record) => {
-            if (!record || typeof record !== "object" || Array.isArray(record)) return record;
-            const copy = { ...record };
-            copy.instrumentSource = copy.instrumentType == null || copy.instrumentType === "" ? "legacy" : "user";
-            delete copy.instrumentRuleId;
-            delete copy.instrumentAsOf;
-            return copy;
-          }) : input?.records,
-        };
-        const preliminaryValidation = validateTradesMutationInput(untrustedInput);
-        if (!preliminaryValidation.ok) {
-          jsonResponse(response, 422, {
-            ok: false,
-            code: "VALIDATION_ERROR",
-            error: preliminaryValidation.errors[0]?.message || "交易帳本內容不正確",
-            details: preliminaryValidation.errors,
-          });
-          return true;
-        }
-        const existingPayload = normalizeTradesPayload(db.trades[auth.user.id]);
-        const canonical = await canonicalizeTradeInstrumentProvenance(input, existingPayload);
-        const moneyCanonicalPayload = canonicalizeTradeMoneyProvenance(canonical.payload, existingPayload);
-        const validation = validateTradesMutationInput(moneyCanonicalPayload);
-        if (!validation.ok) {
-          jsonResponse(response, 422, {
-            ok: false,
-            code: "VALIDATION_ERROR",
-            error: validation.errors[0]?.message || "交易帳本內容不正確",
-            details: validation.errors,
-          });
-          return true;
-        }
-        const payload = normalizeTradesPayload({
-          ...moneyCanonicalPayload,
-          quarantinedRecords: existingPayload.quarantinedRecords,
-        });
-        const portfolio = buildPortfolio(payload);
-        if (!portfolio.ok) {
-          jsonResponse(response, 400, { ok: false, error: portfolio.error });
-          return true;
-        }
-        // 官方主檔查詢可能 await 很久；提交前必須再驗一次 rev，避免兩個同 rev PUT
-        // 都通過入口檢查後相互覆蓋。重驗、bump 與 save 同在 transaction queue。
-        const committed = await commitDbMutation((currentDb) => {
-          const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
-          if (rejectPersonalRestoreBusy(response)) return skipDbMutation(null);
-          if (rejectStaleRev(currentDb, currentUser.id, "trades", input?.rev, response)) {
-            return skipDbMutation(null);
-          }
-          currentDb.trades ||= {};
-          currentDb.trades[currentUser.id] = payload;
-          return { rev: bumpDataRev(currentDb, currentUser.id, "trades") };
-        });
-        if (!committed) return true;
-        jsonResponse(response, 200, {
-          ok: true,
-          rev: committed.rev,
-          ...payload,
-          portfolio,
-          scorecard: buildPersonalScorecard(payload, portfolio),
-          settlement: buildSettlementSchedule(payload.records, toTaipeiCompactDate(), tradingCalendarCache.value?.holidayRows || []),
-          instrumentWarnings: canonical.warnings,
-          instrumentDataQuality: canonical.dataQuality,
-        });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-    return true;
+    return;
   }
+}
 
-  if (requestUrl.pathname === "/api/broker/settings") {
-    if (!ensureAuthed(auth, response)) return true;
-    if (request.method === "GET") {
-      jsonResponse(response, 200, await getBrokerSettingsStatus(auth.user.id));
-      return true;
-    }
-    if (request.method === "POST") {
-      try {
-        const input = await readJsonBody(request);
-        jsonResponse(response, 200, await saveBrokerSettings(auth, input));
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    if (request.method === "DELETE") {
-      try {
-        jsonResponse(response, 200, await deleteBrokerSettings(auth));
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-    return true;
+async function apiBrokerSettings({ request, requestUrl, response, auth }) {
+  if (request.method === "GET") {
+    jsonResponse(response, 200, await getBrokerSettingsStatus(auth.user.id));
+    return;
   }
-
-  if (requestUrl.pathname === "/api/broker/test") {
-    if (!ensureAuthed(auth, response)) return true;
-    if (request.method !== "POST") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
+  if (request.method === "POST") {
+    try {
+      const input = await readJsonBody(request);
+      jsonResponse(response, 200, await saveBrokerSettings(auth, input));
+    } catch (error) {
+      mutationErrorResponse(response, error, 400);
     }
-    const input = await readJsonBody(request).catch(() => ({}));
-    const code = cleanCode(input.code || "2330") || "2330";
-    const body = await getBrokerTestQuote(auth, code);
+    return;
+  }
+  if (request.method === "DELETE") {
+    try {
+      jsonResponse(response, 200, await deleteBrokerSettings(auth));
+    } catch (error) {
+      mutationErrorResponse(response, error, 400);
+    }
+    return;
+  }
+}
+
+async function apiBrokerTest({ request, requestUrl, response, auth }) {
+  const input = await readJsonBody(request).catch(() => ({}));
+  const code = cleanCode(input.code || "2330") || "2330";
+  const body = await getBrokerTestQuote(auth, code);
+  jsonResponse(response, body.ok ? 200 : 503, body);
+  return;
+}
+
+async function apiSymbols({ request, requestUrl, response, auth }) {
+  const query = String(requestUrl.searchParams.get("q") || "").trim();
+  if (!query) {
+    jsonResponse(response, 400, { ok: false, error: "缺少搜尋關鍵字" });
+    return;
+  }
+  try {
+    const reference = await getReferenceData();
+    const codeQuery = cleanCode(query);
+    const upperQuery = query.toUpperCase();
+    const matches = [];
+    for (const quote of reference.byCode.values()) {
+      const name = String(quote.name || "");
+      const upperName = name.toUpperCase();
+      const exactCode = codeQuery && quote.code === codeQuery;
+      const codePrefix = codeQuery && quote.code.startsWith(codeQuery);
+      const nameStarts = upperName.startsWith(upperQuery);
+      const nameIncludes = upperName.includes(upperQuery);
+      if (!exactCode && !codePrefix && !nameIncludes) continue;
+      matches.push({
+        weight: exactCode ? 0 : nameStarts ? 1 : codePrefix ? 2 : 3,
+        code: quote.code,
+        name,
+        exchange: quote.exchange,
+        price: quote.price,
+        changePct: quote.changePct,
+      });
+    }
+    matches.sort((a, b) => a.weight - b.weight || a.code.localeCompare(b.code));
+    jsonResponse(response, 200, {
+      ok: true,
+      query,
+      generatedAt: new Date().toISOString(),
+      results: matches.slice(0, 20).map(({ weight, ...rest }) => rest),
+      warnings: reference.warnings || [],
+      dataQuality: {
+        degraded: Boolean(reference.degraded),
+        referenceComplete: Boolean(reference.coverageComplete),
+        markets: reference.markets,
+      },
+    });
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiSources({ request, requestUrl, response, auth }) {
+  jsonResponse(response, 200, await buildSourceStatus(auth));
+  return;
+}
+
+async function apiMarketSession({ request, requestUrl, response, auth }) {
+  try {
+    jsonResponse(response, 200, await getMarketSessionStatus());
+  } catch (error) {
+    // 開休市狀態不可拖垮行情：即使兩個日曆來源同時失敗也回 unknown，由前端短暫重試。
+    jsonResponse(response, 200, {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      timezone: "Asia/Taipei",
+      stock: { date: compactToIsoDate(toTaipeiCompactDate()), tradingDay: null, holidayName: "", confidence: "unknown", degraded: true },
+      warnings: [`開休市狀態暫時無法確認：${error.message}`],
+    });
+  }
+  return;
+}
+
+async function apiMarkets({ request, requestUrl, response, auth }) {
+  try {
+    const provider = getDataProvider(requestUrl.searchParams.get("source"));
+    const body = await provider.getMarkets(auth);
     jsonResponse(response, body.ok ? 200 : 503, body);
-    return true;
+  } catch (error) {
+    apiFailure(response, 502, error);
   }
+  return;
+}
 
-  if (requestUrl.pathname === "/api/symbols") {
-    const query = String(requestUrl.searchParams.get("q") || "").trim();
-    if (!query) {
-      jsonResponse(response, 400, { ok: false, error: "缺少搜尋關鍵字" });
-      return true;
-    }
-    try {
-      const reference = await getReferenceData();
-      const codeQuery = cleanCode(query);
-      const upperQuery = query.toUpperCase();
-      const matches = [];
-      for (const quote of reference.byCode.values()) {
-        const name = String(quote.name || "");
-        const upperName = name.toUpperCase();
-        const exactCode = codeQuery && quote.code === codeQuery;
-        const codePrefix = codeQuery && quote.code.startsWith(codeQuery);
-        const nameStarts = upperName.startsWith(upperQuery);
-        const nameIncludes = upperName.includes(upperQuery);
-        if (!exactCode && !codePrefix && !nameIncludes) continue;
-        matches.push({
-          weight: exactCode ? 0 : nameStarts ? 1 : codePrefix ? 2 : 3,
-          code: quote.code,
-          name,
-          exchange: quote.exchange,
-          price: quote.price,
-          changePct: quote.changePct,
-        });
-      }
-      matches.sort((a, b) => a.weight - b.weight || a.code.localeCompare(b.code));
-      jsonResponse(response, 200, {
-        ok: true,
-        query,
-        generatedAt: new Date().toISOString(),
-        results: matches.slice(0, 20).map(({ weight, ...rest }) => rest),
-        warnings: reference.warnings || [],
-        dataQuality: {
-          degraded: Boolean(reference.degraded),
-          referenceComplete: Boolean(reference.coverageComplete),
-          markets: reference.markets,
-        },
-      });
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
+async function apiMarketBreadth({ request, requestUrl, response, auth }) {
+  // 唯讀、免登入（比照其他行情端點）：大盤位階、漲跌家數、期指基差、未來 7 天事件。
+  try {
+    jsonResponse(response, 200, await buildMarketBreadth());
+  } catch (error) {
+    apiFailure(response, 502, error);
   }
-  if (requestUrl.pathname === "/api/sources") {
-    jsonResponse(response, 200, await buildSourceStatus(auth));
-    return true;
+  return;
+}
+
+async function apiQuotes({ request, requestUrl, response, auth }) {
+  try {
+    const codes = parseRequestedCodes(requestUrl.searchParams.get("codes"));
+    const provider = getDataProvider(requestUrl.searchParams.get("source"));
+    const body = await provider.getQuotes(codes, auth);
+    jsonResponse(response, body.ok ? 200 : 503, body);
+  } catch (error) {
+    const validationError = /股票代號|至少需要/.test(error.message || "");
+    if (validationError) jsonResponse(response, 400, { ok: false, error: error.message });
+    else apiFailure(response, 502, error);
   }
-  if (requestUrl.pathname === "/api/market-session") {
-    if (request.method !== "GET") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    try {
-      jsonResponse(response, 200, await getMarketSessionStatus());
-    } catch (error) {
-      // 開休市狀態不可拖垮行情：即使兩個日曆來源同時失敗也回 unknown，由前端短暫重試。
-      jsonResponse(response, 200, {
-        ok: true,
-        generatedAt: new Date().toISOString(),
-        timezone: "Asia/Taipei",
-        stock: { date: compactToIsoDate(toTaipeiCompactDate()), tradingDay: null, holidayName: "", confidence: "unknown", degraded: true },
-        warnings: [`開休市狀態暫時無法確認：${error.message}`],
-      });
-    }
-    return true;
+  return;
+}
+
+async function apiInstitutional({ request, requestUrl, response, auth }) {
+  try {
+    const codes = parseRequestedCodes(requestUrl.searchParams.get("codes"), defaultCodes, 300);
+    const dateCompact = parseHistoricalQueryDate(requestUrl.searchParams.get("date"));
+    const body = await getInstitutionalData({ codes, dateCompact });
+    jsonResponse(response, body.ok ? 200 : 503, body);
+  } catch (error) {
+    if (/日期|股票代號|至少需要/.test(error.message || "")) jsonResponse(response, 400, { ok: false, error: error.message });
+    else apiFailure(response, 502, error);
   }
-  if (requestUrl.pathname === "/api/markets") {
-    try {
-      const provider = getDataProvider(requestUrl.searchParams.get("source"));
-      const body = await provider.getMarkets(auth);
-      jsonResponse(response, body.ok ? 200 : 503, body);
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
+  return;
+}
+
+async function apiOvernightVerify({ request, requestUrl, response, auth }) {
+  try {
+    jsonResponse(response, 200, await buildSignalVerification());
+  } catch (error) {
+    apiFailure(response, 502, error);
   }
-  if (requestUrl.pathname === "/api/market/breadth") {
-    // 唯讀、免登入（比照其他行情端點）：大盤位階、漲跌家數、期指基差、未來 7 天事件。
-    try {
-      jsonResponse(response, 200, await buildMarketBreadth());
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
+  return;
+}
+
+async function apiOvernightVerifyHistory({ request, requestUrl, response, auth }) {
+  try {
+    jsonResponse(response, 200, await withVerificationBenchmarks(await buildVerificationHistory(),'overnight'));
+  } catch (error) {
+    apiFailure(response, 502, error);
   }
-  if (requestUrl.pathname === "/api/quotes") {
-    if (request.method !== "GET") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    try {
-      const codes = parseRequestedCodes(requestUrl.searchParams.get("codes"));
-      const provider = getDataProvider(requestUrl.searchParams.get("source"));
-      const body = await provider.getQuotes(codes, auth);
-      jsonResponse(response, body.ok ? 200 : 503, body);
-    } catch (error) {
-      const validationError = /股票代號|至少需要/.test(error.message || "");
-      if (validationError) jsonResponse(response, 400, { ok: false, error: error.message });
-      else apiFailure(response, 502, error);
-    }
-    return true;
+  return;
+}
+
+async function apiMargin({ request, requestUrl, response, auth }) {
+  try {
+    const codes = parseRequestedCodes(requestUrl.searchParams.get("codes"), defaultCodes, 300);
+    const dateCompact = parseHistoricalQueryDate(requestUrl.searchParams.get("date"));
+    const body = await getMarginData({ codes, dateCompact });
+    jsonResponse(response, body.ok ? 200 : 503, body);
+  } catch (error) {
+    if (/日期|股票代號|至少需要/.test(error.message || "")) jsonResponse(response, 400, { ok: false, error: error.message });
+    else apiFailure(response, 502, error);
   }
-  if (requestUrl.pathname === "/api/institutional") {
-    if (request.method !== "GET") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    try {
-      const codes = parseRequestedCodes(requestUrl.searchParams.get("codes"), defaultCodes, 300);
-      const dateCompact = parseHistoricalQueryDate(requestUrl.searchParams.get("date"));
-      const body = await getInstitutionalData({ codes, dateCompact });
-      jsonResponse(response, body.ok ? 200 : 503, body);
-    } catch (error) {
-      if (/日期|股票代號|至少需要/.test(error.message || "")) jsonResponse(response, 400, { ok: false, error: error.message });
-      else apiFailure(response, 502, error);
-    }
-    return true;
+  return;
+}
+
+async function apiNotesRecent({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  db.stockNotes ||= {};
+  const limit = Math.min(50, Math.max(1, Number(requestUrl.searchParams.get("limit") || 20)));
+  let reference = null;
+  try {
+    reference = await getReferenceData();
+  } catch {
+    // 名稱補不到就只顯示代號。
   }
-  if (requestUrl.pathname === "/api/overnight/verify") {
-    try {
-      jsonResponse(response, 200, await buildSignalVerification());
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/overnight/verify/history") {
-    try {
-      jsonResponse(response, 200, await withVerificationBenchmarks(await buildVerificationHistory(),'overnight'));
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/margin") {
-    if (request.method !== "GET") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    try {
-      const codes = parseRequestedCodes(requestUrl.searchParams.get("codes"), defaultCodes, 300);
-      const dateCompact = parseHistoricalQueryDate(requestUrl.searchParams.get("date"));
-      const body = await getMarginData({ codes, dateCompact });
-      jsonResponse(response, body.ok ? 200 : 503, body);
-    } catch (error) {
-      if (/日期|股票代號|至少需要/.test(error.message || "")) jsonResponse(response, 400, { ok: false, error: error.message });
-      else apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/notes/recent") {
-    const db = await loadDb();
-    db.stockNotes ||= {};
-    const limit = Math.min(50, Math.max(1, Number(requestUrl.searchParams.get("limit") || 20)));
-    let reference = null;
-    try {
-      reference = await getReferenceData();
-    } catch {
-      // 名稱補不到就只顯示代號。
-    }
-    const notes = publicNotes(
-      Object.values(db.stockNotes)
-        .flat()
-        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-        .slice(0, limit)
-        .map((note) => ({ ...note, name: reference?.byCode.get(note.code)?.name || "" })),
-      auth,
-    );
-    jsonResponse(response, 200, { ok: true, notes });
-    return true;
-  }
-  if (requestUrl.pathname === "/api/notes") {
-    const db = await loadDb();
-    db.stockNotes ||= {};
-    // 讀取開放未登入（本機看盤模式）；新增與刪除仍需要登入。
-    if (request.method === "GET") {
-      const code = cleanCode(requestUrl.searchParams.get("code"));
-      if (!code) {
-        jsonResponse(response, 400, { ok: false, error: "缺少股票代號" });
-        return true;
-      }
-      jsonResponse(response, 200, { ok: true, code, notes: publicNotes(db.stockNotes[code] || [], auth) });
-      return true;
-    }
-    if (!ensureAuthed(auth, response)) return true;
-    if (request.method === "POST") {
-      try {
-        const input = await readJsonBody(request);
-        if (rejectPersonalRestoreBusy(response)) return true;
-        const code = cleanCode(input.code);
-        const text = String(input.text || "").trim().slice(0, 500);
-        if (!code || !text) throw new Error("需要股票代號與備註內容");
-        if (!SECURITY_CODE_PATTERN.test(code)) {
-          throw Object.assign(new Error("股票代號需為 4～6 碼英數"), { status: 400 });
-        }
-        const committed = await commitDbMutation((currentDb) => {
-          const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
-          if (rejectPersonalRestoreBusy(response)) return skipDbMutation(null);
-          currentDb.stockNotes ||= {};
-          currentDb.stockNotes[code] ||= [];
-          if (currentDb.stockNotes[code].length >= 50) {
-            jsonResponse(response, 409, {
-              ok: false,
-              code: "NOTE_CAPACITY_REACHED",
-              error: "這檔股票的共享備註已達 50 則上限；請先整理既有內容。",
-            });
-            return skipDbMutation(null);
-          }
-          const note = {
-            id: `n_${randomBytes(6).toString("hex")}`,
-            code,
-            userId: currentUser.id,
-            userName: currentUser.displayName || currentUser.username,
-            text,
-            createdAt: new Date().toISOString(),
-          };
-          currentDb.stockNotes[code].push(note);
-          bumpSharedRev(currentDb, "stockNotes");
-          return cloneJson(currentDb.stockNotes[code]);
-        });
-        if (!committed) return true;
-        jsonResponse(response, 201, { ok: true, code, notes: publicNotes(committed, auth) });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    if (request.method === "DELETE") {
-      try {
-        if (rejectPersonalRestoreBusy(response)) return true;
-        const code = cleanCode(requestUrl.searchParams.get("code"));
-        const id = String(requestUrl.searchParams.get("id") || "");
-        const notes = await commitDbMutation((currentDb) => {
-          const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
-          if (rejectPersonalRestoreBusy(response)) return skipDbMutation(null);
-          const currentNotes = currentDb.stockNotes?.[code] || [];
-          const target = currentNotes.find((note) => note.id === id);
-          if (!target) throw Object.assign(new Error("找不到這則備註"), { status: 404 });
-          if (target.userId !== currentUser.id && currentUser.role !== "admin") {
-            throw Object.assign(new Error("只能刪除自己的備註"), { status: 403 });
-          }
-          currentDb.stockNotes[code] = currentNotes.filter((note) => note.id !== id);
-          bumpSharedRev(currentDb, "stockNotes");
-          return cloneJson(currentDb.stockNotes[code]);
-        });
-        if (!notes) return true;
-        jsonResponse(response, 200, { ok: true, code, notes: publicNotes(notes, auth) });
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-    return true;
-  }
-  if (requestUrl.pathname === "/api/company") {
-    const db = await loadDb();
-    db.companyProfiles ||= {};
-    const buildBody = async (code) => {
-      let meta = {};
-      let directory = null;
-      try {
-        directory = await getCompanyDirectory();
-        meta = directory.companyMeta.get(code) || {};
-      } catch {
-        // 官方基本資料端點失敗時，至少回手動簡介，不讓整頁壞掉。
-      }
-      const profile = db.companyProfiles[code] || null;
-      return {
-        ok: true,
-        code,
-        industry: meta.industry || "",
-        shortName: meta.shortName || "",
-        summary: profile?.summary || "",
-        updatedAt: profile?.updatedAt || "",
-        updatedByName: profile?.updatedByName || "",
-        warnings: directory?.warnings || [],
-        dataQuality: directory ? { degraded: directory.degraded, markets: directory.markets } : { degraded: true },
-      };
-    };
-    // 讀取開放未登入（本機看盤模式）；編輯簡介仍需要登入。
-    if (request.method === "GET") {
-      const code = cleanCode(requestUrl.searchParams.get("code"));
-      if (!code) {
-        jsonResponse(response, 400, { ok: false, error: "缺少股票代號" });
-        return true;
-      }
-      jsonResponse(response, 200, await buildBody(code));
-      return true;
-    }
-    if (!ensureAuthed(auth, response)) return true;
-    if (request.method === "PUT" || request.method === "POST") {
-      try {
-        const input = await readJsonBody(request);
-        const code = cleanCode(input.code);
-        if (!code) throw new Error("需要股票代號");
-        if (!SECURITY_CODE_PATTERN.test(code)) {
-          throw Object.assign(new Error("股票代號需為 4～6 碼英數"), { status: 400 });
-        }
-        const summary = String(input.summary || "").trim().slice(0, 800);
-        await commitDbMutation((currentDb) => {
-          const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
-          currentDb.companyProfiles ||= {};
-          if (summary) {
-            currentDb.companyProfiles[code] = {
-              code,
-              summary,
-              updatedAt: new Date().toISOString(),
-              updatedBy: currentUser.id,
-              updatedByName: currentUser.displayName || currentUser.username,
-            };
-          } else {
-            // 清空視為刪除簡介。
-            delete currentDb.companyProfiles[code];
-          }
-        });
-        jsonResponse(response, 200, await buildBody(code));
-      } catch (error) {
-        mutationErrorResponse(response, error, 400);
-      }
-      return true;
-    }
-    jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-    return true;
-  }
-  if (requestUrl.pathname === "/api/fundamentals") {
-    // 讀取開放未登入（本機看盤模式），比照 /api/company。
+  const notes = publicNotes(
+    Object.values(db.stockNotes)
+      .flat()
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, limit)
+      .map((note) => ({ ...note, name: reference?.byCode.get(note.code)?.name || "" })),
+    auth,
+  );
+  jsonResponse(response, 200, { ok: true, notes });
+  return;
+}
+
+async function apiNotes({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  db.stockNotes ||= {};
+  // 讀取開放未登入（本機看盤模式）；新增與刪除仍需要登入。
+  if (request.method === "GET") {
     const code = cleanCode(requestUrl.searchParams.get("code"));
     if (!code) {
       jsonResponse(response, 400, { ok: false, error: "缺少股票代號" });
-      return true;
+      return;
     }
-    try {
-      jsonResponse(response, 200, await buildFundamentals(code));
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
+    jsonResponse(response, 200, { ok: true, code, notes: publicNotes(db.stockNotes[code] || [], auth) });
+    return;
   }
-  if (requestUrl.pathname === "/api/overnight") {
+  if (!ensureAuthed(auth, response)) return;
+  if (request.method === "POST") {
     try {
-      const dateCompact = toCompactDate(requestUrl.searchParams.get("date"));
-      const maxPerGroup = Math.min(50, Math.max(1, Number(requestUrl.searchParams.get("limit") || 20)));
-      const body = await buildOvernightSignals({ dateCompact, maxPerGroup });
-      jsonResponse(response, 200, publicSignalsView(body));
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/backtest/overnight") {
-    try {
-      const days = Math.min(90, Math.max(10, Number(requestUrl.searchParams.get("days") || 30)));
-      const body = await buildBacktest({ days });
-      jsonResponse(response, 200, body);
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/swing/inspect") {
-    try {
-      const code = requestUrl.searchParams.get("code") || "";
-      if (!code.trim()) {
-        jsonResponse(response, 400, { ok: false, error: "請提供股票代碼或股名" });
-        return true;
+      const input = await readJsonBody(request);
+      if (rejectPersonalRestoreBusy(response)) return;
+      const code = cleanCode(input.code);
+      const text = String(input.text || "").trim().slice(0, 500);
+      if (!code || !text) throw new Error("需要股票代號與備註內容");
+      if (!SECURITY_CODE_PATTERN.test(code)) {
+        throw Object.assign(new Error("股票代號需為 4～6 碼英數"), { status: 400 });
       }
-      const body = await inspectSwingStock(code);
-      jsonResponse(response, body.ok ? 200 : body.retryable ? 503 : 404, body);
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/swing") {
-    if (request.method !== "GET") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    try {
-      const scenarioKey = requestUrl.searchParams.get("scenario") || "";
-      const limit = Math.min(80, Math.max(5, Number(requestUrl.searchParams.get("limit") || 40)));
-      const forceRefresh = requestUrl.searchParams.get("refresh") === "1";
-      if (forceRefresh && !ensureAuthed(auth, response)) return true;
-      if (forceRefresh) {
-        // 有副作用的 GET：SameSite=Lax 在跨站「頂層導覽」時仍會帶 cookie，惡意頁 window.open 這個
-        // 網址就能觸發全市場重掃（CPU＋官方配額）。只接受 App 內的 fetch。
-        const fetchMode = String(request.headers["sec-fetch-mode"] || "").toLowerCase();
-        const fetchSite = String(request.headers["sec-fetch-site"] || "").toLowerCase();
-        if (fetchMode === "navigate" || fetchSite === "cross-site") {
-          jsonResponse(response, 403, { ok: false, code: "SWING_REFRESH_FORBIDDEN", error: "重新掃描只能從 App 內觸發。" });
-          return true;
-        }
-        const elapsed = Date.now() - lastSwingForceRefreshAt;
-        if (elapsed < SWING_FORCE_REFRESH_COOLDOWN_MS) {
-          jsonResponse(response, 429, {
+      const committed = await commitDbMutation((currentDb) => {
+        const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
+        if (rejectPersonalRestoreBusy(response)) return skipDbMutation(null);
+        currentDb.stockNotes ||= {};
+        currentDb.stockNotes[code] ||= [];
+        if (currentDb.stockNotes[code].length >= 50) {
+          jsonResponse(response, 409, {
             ok: false,
-            code: "SWING_REFRESH_COOLDOWN",
-            error: "波段全市場掃描剛執行過，請稍後再重新整理。",
-            retryAfterSeconds: Math.ceil((SWING_FORCE_REFRESH_COOLDOWN_MS - elapsed) / 1000),
+            code: "NOTE_CAPACITY_REACHED",
+            error: "這檔股票的共享備註已達 50 則上限；請先整理既有內容。",
           });
-          return true;
+          return skipDbMutation(null);
         }
-        lastSwingForceRefreshAt = Date.now();
-      }
-      const body = await buildSwingBoard({ scenarioKey, limit, forceRefresh });
-      jsonResponse(response, 200, publicSignalsView(body));
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/swing/verify") {
-    try {
-      jsonResponse(response, 200, await withVerificationBenchmarks(await buildSwingVerificationSummary(),'swing'));
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/surveillance-board") {
-    if (request.method !== "GET") {
-      jsonResponse(response, 405, { ok: false, error: "Method not allowed" });
-      return true;
-    }
-    try {
-      const rawDate = requestUrl.searchParams.get("date");
-      const today = toTaipeiCompactDate();
-      if (rawDate !== null) {
-        const requestedDate = toCompactDate(rawDate);
-        if (!/^\d{8}$/.test(requestedDate) || requestedDate !== today) {
-          jsonResponse(response, 400, {
-            ok: false,
-            error: "處置看板只提供伺服器今日資料；不可用 date 參數建立過去或未來快照。",
-          });
-          return true;
-        }
-      }
-      const body = await getSurveillanceBoardSingleFlight(today);
-      jsonResponse(response, 200, body);
-    } catch (error) {
-      apiFailure(response, 502, error);
-    }
-    return true;
-  }
-  if (requestUrl.pathname === "/api/technical-analysis") {
-    try {
-      const body = await buildTechnicalAnalysis({
-        code: requestUrl.searchParams.get("code"),
-        period: requestUrl.searchParams.get("period"),
+        const note = {
+          id: `n_${randomBytes(6).toString("hex")}`,
+          code,
+          userId: currentUser.id,
+          userName: currentUser.displayName || currentUser.username,
+          text,
+          createdAt: new Date().toISOString(),
+        };
+        currentDb.stockNotes[code].push(note);
+        bumpSharedRev(currentDb, "stockNotes");
+        return cloneJson(currentDb.stockNotes[code]);
       });
-      jsonResponse(response, body.ok ? 200 : body.retryable ? 503 : 400, body);
+      if (!committed) return;
+      jsonResponse(response, 201, { ok: true, code, notes: publicNotes(committed, auth) });
     } catch (error) {
-      apiFailure(response, 502, error);
+      mutationErrorResponse(response, error, 400);
     }
-    return true;
+    return;
   }
-  return false;
+  if (request.method === "DELETE") {
+    try {
+      if (rejectPersonalRestoreBusy(response)) return;
+      const code = cleanCode(requestUrl.searchParams.get("code"));
+      const id = String(requestUrl.searchParams.get("id") || "");
+      const notes = await commitDbMutation((currentDb) => {
+        const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
+        if (rejectPersonalRestoreBusy(response)) return skipDbMutation(null);
+        const currentNotes = currentDb.stockNotes?.[code] || [];
+        const target = currentNotes.find((note) => note.id === id);
+        if (!target) throw Object.assign(new Error("找不到這則備註"), { status: 404 });
+        if (target.userId !== currentUser.id && currentUser.role !== "admin") {
+          throw Object.assign(new Error("只能刪除自己的備註"), { status: 403 });
+        }
+        currentDb.stockNotes[code] = currentNotes.filter((note) => note.id !== id);
+        bumpSharedRev(currentDb, "stockNotes");
+        return cloneJson(currentDb.stockNotes[code]);
+      });
+      if (!notes) return;
+      jsonResponse(response, 200, { ok: true, code, notes: publicNotes(notes, auth) });
+    } catch (error) {
+      mutationErrorResponse(response, error, 400);
+    }
+    return;
+  }
+}
+
+async function apiCompany({ request, requestUrl, response, auth }) {
+  const db = await loadDb();
+  db.companyProfiles ||= {};
+  const buildBody = async (code) => {
+    let meta = {};
+    let directory = null;
+    try {
+      directory = await getCompanyDirectory();
+      meta = directory.companyMeta.get(code) || {};
+    } catch {
+      // 官方基本資料端點失敗時，至少回手動簡介，不讓整頁壞掉。
+    }
+    const profile = db.companyProfiles[code] || null;
+    return {
+      ok: true,
+      code,
+      industry: meta.industry || "",
+      shortName: meta.shortName || "",
+      summary: profile?.summary || "",
+      updatedAt: profile?.updatedAt || "",
+      updatedByName: profile?.updatedByName || "",
+      warnings: directory?.warnings || [],
+      dataQuality: directory ? { degraded: directory.degraded, markets: directory.markets } : { degraded: true },
+    };
+  };
+  // 讀取開放未登入（本機看盤模式）；編輯簡介仍需要登入。
+  if (request.method === "GET") {
+    const code = cleanCode(requestUrl.searchParams.get("code"));
+    if (!code) {
+      jsonResponse(response, 400, { ok: false, error: "缺少股票代號" });
+      return;
+    }
+    jsonResponse(response, 200, await buildBody(code));
+    return;
+  }
+  if (!ensureAuthed(auth, response)) return;
+  if (request.method === "PUT" || request.method === "POST") {
+    try {
+      const input = await readJsonBody(request);
+      const code = cleanCode(input.code);
+      if (!code) throw new Error("需要股票代號");
+      if (!SECURITY_CODE_PATTERN.test(code)) {
+        throw Object.assign(new Error("股票代號需為 4～6 碼英數"), { status: 400 });
+      }
+      const summary = String(input.summary || "").trim().slice(0, 800);
+      await commitDbMutation((currentDb) => {
+        const { user: currentUser } = requireCurrentMutationAuth(currentDb, auth);
+        currentDb.companyProfiles ||= {};
+        if (summary) {
+          currentDb.companyProfiles[code] = {
+            code,
+            summary,
+            updatedAt: new Date().toISOString(),
+            updatedBy: currentUser.id,
+            updatedByName: currentUser.displayName || currentUser.username,
+          };
+        } else {
+          // 清空視為刪除簡介。
+          delete currentDb.companyProfiles[code];
+        }
+      });
+      jsonResponse(response, 200, await buildBody(code));
+    } catch (error) {
+      mutationErrorResponse(response, error, 400);
+    }
+    return;
+  }
+}
+
+async function apiFundamentals({ request, requestUrl, response, auth }) {
+  // 讀取開放未登入（本機看盤模式），比照 /api/company。
+  const code = cleanCode(requestUrl.searchParams.get("code"));
+  if (!code) {
+    jsonResponse(response, 400, { ok: false, error: "缺少股票代號" });
+    return;
+  }
+  try {
+    jsonResponse(response, 200, await buildFundamentals(code));
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiOvernight({ request, requestUrl, response, auth }) {
+  try {
+    const dateCompact = toCompactDate(requestUrl.searchParams.get("date"));
+    const maxPerGroup = Math.min(50, Math.max(1, Number(requestUrl.searchParams.get("limit") || 20)));
+    const body = await buildOvernightSignals({ dateCompact, maxPerGroup });
+    jsonResponse(response, 200, publicSignalsView(body));
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiBacktestOvernight({ request, requestUrl, response, auth }) {
+  try {
+    const days = Math.min(90, Math.max(10, Number(requestUrl.searchParams.get("days") || 30)));
+    const body = await buildBacktest({ days });
+    jsonResponse(response, 200, body);
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiSwingInspect({ request, requestUrl, response, auth }) {
+  try {
+    const code = requestUrl.searchParams.get("code") || "";
+    if (!code.trim()) {
+      jsonResponse(response, 400, { ok: false, error: "請提供股票代碼或股名" });
+      return;
+    }
+    const body = await inspectSwingStock(code);
+    jsonResponse(response, body.ok ? 200 : body.retryable ? 503 : 404, body);
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiSwing({ request, requestUrl, response, auth }) {
+  try {
+    const scenarioKey = requestUrl.searchParams.get("scenario") || "";
+    const limit = Math.min(80, Math.max(5, Number(requestUrl.searchParams.get("limit") || 40)));
+    const forceRefresh = requestUrl.searchParams.get("refresh") === "1";
+    if (forceRefresh && !ensureAuthed(auth, response)) return;
+    if (forceRefresh) {
+      // 有副作用的 GET：SameSite=Lax 在跨站「頂層導覽」時仍會帶 cookie，惡意頁 window.open 這個
+      // 網址就能觸發全市場重掃（CPU＋官方配額）。只接受 App 內的 fetch。
+      const fetchMode = String(request.headers["sec-fetch-mode"] || "").toLowerCase();
+      const fetchSite = String(request.headers["sec-fetch-site"] || "").toLowerCase();
+      if (fetchMode === "navigate" || fetchSite === "cross-site") {
+        jsonResponse(response, 403, { ok: false, code: "SWING_REFRESH_FORBIDDEN", error: "重新掃描只能從 App 內觸發。" });
+        return;
+      }
+      const elapsed = Date.now() - lastSwingForceRefreshAt;
+      if (elapsed < SWING_FORCE_REFRESH_COOLDOWN_MS) {
+        jsonResponse(response, 429, {
+          ok: false,
+          code: "SWING_REFRESH_COOLDOWN",
+          error: "波段全市場掃描剛執行過，請稍後再重新整理。",
+          retryAfterSeconds: Math.ceil((SWING_FORCE_REFRESH_COOLDOWN_MS - elapsed) / 1000),
+        });
+        return;
+      }
+      lastSwingForceRefreshAt = Date.now();
+    }
+    const body = await buildSwingBoard({ scenarioKey, limit, forceRefresh });
+    jsonResponse(response, 200, publicSignalsView(body));
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiSwingVerify({ request, requestUrl, response, auth }) {
+  try {
+    jsonResponse(response, 200, await withVerificationBenchmarks(await buildSwingVerificationSummary(),'swing'));
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiSurveillanceBoard({ request, requestUrl, response, auth }) {
+  try {
+    const rawDate = requestUrl.searchParams.get("date");
+    const today = toTaipeiCompactDate();
+    if (rawDate !== null) {
+      const requestedDate = toCompactDate(rawDate);
+      if (!/^\d{8}$/.test(requestedDate) || requestedDate !== today) {
+        jsonResponse(response, 400, {
+          ok: false,
+          error: "處置看板只提供伺服器今日資料；不可用 date 參數建立過去或未來快照。",
+        });
+        return;
+      }
+    }
+    const body = await getSurveillanceBoardSingleFlight(today);
+    jsonResponse(response, 200, body);
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
+}
+
+async function apiTechnicalAnalysis({ request, requestUrl, response, auth }) {
+  try {
+    const body = await buildTechnicalAnalysis({
+      code: requestUrl.searchParams.get("code"),
+      period: requestUrl.searchParams.get("period"),
+    });
+    jsonResponse(response, body.ok ? 200 : body.retryable ? 503 : 400, body);
+  } catch (error) {
+    apiFailure(response, 502, error);
+  }
+  return;
 }
 
 // app shell 每次載入是 app.js 560KiB＋lucide 402KiB＋styles 200KiB＋html 45KiB ≈ 1.18MiB，
@@ -17312,6 +17260,7 @@ export {
   closeTasksDue, hasFormalCapture, runScheduledCloseTasks, startCloseScheduler, stopCloseScheduler, SCHEDULER_INTERVAL_MS,
   formatServerLogLine, staleServerLogFiles, appendServerLog, armServerLogFile, handleFatalError, resetFatalErrorStateForTest, SERVER_LOG_KEEP_DAYS,
   computeShellVersion, applyShellVersion, shellVersionFromParts,
+  apiRoutes,
   summarizeOperationalStatus, benchmarkMemoKey, recordCaptureAttempt,
   SCHEDULER_MAX_FAILURES_PER_DAY, closeSchedulerStateForTest, resetCloseSchedulerStateForTest,
   // 事件日曆／市場位階（market-events.test）

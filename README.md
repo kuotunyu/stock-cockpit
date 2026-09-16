@@ -160,6 +160,53 @@ sequenceDiagram
 | **個人資料** | `/api/watchlists`、`/api/alerts`、`/api/trades`、`/api/trade-plans`、`/api/personal-data/*` | 自選股、到價提醒、交易帳本、個人交易計畫、個人備份匯出與預覽／確認復原 |
 | **券商與備註** | `/api/broker/settings`、`/api/broker/test`、`/api/notes`、`/api/notes/recent` | 登入後管理券商行情設定或新增共享備註；近期共享備註可公開讀取 |
 
+完整端點清單由 `node scripts/api-routes.mjs --write` 從 `server.mjs` 的路由表產生（`tests/backend/api-routes.test.mjs` 釘住不漂移）；方法欄以外的請求一律 405，「需登入」未登入回 401，「需管理者」非管理者回 403：
+
+<!-- api-routes:start -->
+| 方法 | 路徑 | 登入 |
+|---|---|---|
+| `GET` | `/api/admin/machine-export` | 需管理者 |
+| `GET`、`POST`、`PATCH`、`DELETE` | `/api/admin/users` | 需管理者 |
+| `GET`、`PUT` | `/api/alerts` | 需登入 |
+| `GET` | `/api/app-version` | 免登入 |
+| `POST` | `/api/auth/login` | 免登入（`REQUIRE_LOGIN=on` 也開放） |
+| `POST` | `/api/auth/logout` | 免登入（`REQUIRE_LOGIN=on` 也開放） |
+| `GET` | `/api/auth/me` | 免登入（`REQUIRE_LOGIN=on` 也開放） |
+| `POST` | `/api/auth/password` | 需登入 |
+| `GET` | `/api/backtest/overnight` | 免登入 |
+| `GET`、`POST`、`DELETE` | `/api/broker/settings` | 需登入 |
+| `POST` | `/api/broker/test` | 需登入 |
+| `GET`、`PUT`、`POST` | `/api/company` | 免登入；登入後帶個人狀態 |
+| `GET` | `/api/fundamentals` | 免登入 |
+| `GET` | `/api/health` | 免登入（`REQUIRE_LOGIN=on` 也開放） |
+| `GET` | `/api/institutional` | 免登入 |
+| `GET` | `/api/instrument-profile` | 免登入 |
+| `GET` | `/api/margin` | 免登入 |
+| `GET` | `/api/market-session` | 免登入 |
+| `GET` | `/api/market/breadth` | 免登入 |
+| `GET` | `/api/markets` | 免登入；登入後帶個人狀態 |
+| `GET`、`POST`、`DELETE` | `/api/notes` | 免登入；登入後帶個人狀態 |
+| `GET` | `/api/notes/recent` | 免登入；登入後帶個人狀態 |
+| `GET` | `/api/operational-status` | 免登入 |
+| `GET` | `/api/overnight` | 免登入 |
+| `GET` | `/api/overnight/verify` | 免登入 |
+| `GET` | `/api/overnight/verify/history` | 免登入 |
+| `GET` | `/api/personal-data/export` | 需登入 |
+| `POST` | `/api/personal-data/restore` | 需登入 |
+| `POST` | `/api/personal-data/restore/preview` | 需登入 |
+| `GET` | `/api/quotes` | 免登入；登入後帶個人狀態 |
+| `GET` | `/api/sources` | 免登入；登入後帶個人狀態 |
+| `GET` | `/api/surveillance-board` | 免登入 |
+| `GET` | `/api/swing` | 免登入；登入後帶個人狀態 |
+| `GET` | `/api/swing/inspect` | 免登入 |
+| `GET` | `/api/swing/verify` | 免登入 |
+| `GET` | `/api/symbols` | 免登入 |
+| `GET` | `/api/technical-analysis` | 免登入 |
+| `GET`、`PUT` | `/api/trade-plans` | 需登入 |
+| `GET`、`PUT` | `/api/trades` | 需登入 |
+| `GET`、`PUT` | `/api/watchlists` | 需登入 |
+<!-- api-routes:end -->
+
 ---
 
 ## 快速開始
