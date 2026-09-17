@@ -50,6 +50,15 @@ if (-not [System.IO.Path]::IsPathRooted($dataDir)) { $dataDir = Join-Path $root 
 $logDir = Join-Path $dataDir "logs"
 $windowTitle = "Stock1 server ({0})" -f $port
 
+# 同一個埠只允許一個常駐守門（2026-09-17：重新登記時舊守門變成孤兒，出現兩個守門同時在跑）。
+# 用具名 mutex：程序結束（含被強制終止）時 Windows 自動釋放。-Once 是登記腳本手動拉起伺服器用的，不搶鎖。
+if (-not $Once) {
+  $script:guardMutex = New-Object System.Threading.Mutex($false, ("Local\Stock1-watchdog-{0}" -f $port))
+  $acquired = $false
+  try { $acquired = $script:guardMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+  if (-not $acquired) { exit 0 }
+}
+
 function Write-GuardLog($text) {
   try {
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null

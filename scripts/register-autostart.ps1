@@ -11,7 +11,7 @@
 
   伺服器與守門的訊息都寫在 DATA_DIR/logs/server-YYYYMMDD.log（保留 14 天），視窗關了也查得到。
   這是「登入才啟動」，電腦關機或沒登入時仍然不會採集；收盤排程也要電腦當時開著。
-  要更新程式：git pull 後關掉「Stock1 server (5174)」視窗，再跑一次這支腳本（或等守門自己拉起新版）。
+  要更新程式：git pull 後跑這支腳本加 -Restart（等寫入落盤、停掉舊伺服器、用新程式重新啟動）。
 
   檔案存成 UTF-8 with BOM：Windows PowerShell 5.1 讀沒有 BOM 的 .ps1 會用系統 ANSI（Big5）解碼，中文會變亂碼、連語法都會壞。
 
@@ -21,13 +21,18 @@
 .PARAMETER NoStart
   只登記，不立刻啟動。
 
+.PARAMETER Restart
+  程式更新後用：等伺服器手上的寫入都落盤，停掉正在跑的舊伺服器，再用目前的程式重新啟動。
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1
+  powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1 -Restart
   powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1 -Unregister
 #>
 param(
   [switch]$Unregister,
-  [switch]$NoStart
+  [switch]$NoStart,
+  [switch]$Restart
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,10 +44,45 @@ function Test-Listening5174 {
   return [bool](Get-NetTCPConnection -State Listen -LocalPort 5174 -ErrorAction SilentlyContinue)
 }
 
+# 停掉所有常駐守門。工作排程的程序是 conhost，守門 powershell 是它的子程序：Stop-ScheduledTask 只收掉 conhost，
+# 守門會變成孤兒繼續跑（2026-09-17 實際出現兩個），所以另外照命令列找出來停。-Once 的單次檢查不算。
+function Stop-Stock1Watchdogs {
+  $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if ($task -and $task.State -eq "Running") { $null = Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
+  $guards = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*stock1-watchdog.ps1*" -and $_.CommandLine -notlike "*-Once*" -and $_.ProcessId -ne $PID })
+  foreach ($guard in $guards) { Stop-Process -Id $guard.ProcessId -Force -ErrorAction SilentlyContinue }
+  if ($guards.Count) { Start-Sleep -Seconds 1 }
+  return $guards.Count
+}
+
+# 停掉正在跑的盤勢雷達伺服器，讓新程式接手。回傳 "stopped"／"not-running"／"foreign"／"busy"。
+# 先等 /api/health 的 pendingWrites 歸零（最多 15 秒）才停：資料檔是原子寫入，停在兩次寫入之間不會壞檔也不會丟資料。
+# 以前的做法是「關掉視窗」，那對 node 等同直接終止，這裡至少多了一道「沒有寫到一半」的確認。
+function Stop-Stock1Server([int]$Port) {
+  $conn = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $conn) { return "not-running" }
+  $proc = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $conn.OwningProcess) -ErrorAction SilentlyContinue
+  if (-not $proc -or $proc.Name -ne "node.exe" -or $proc.CommandLine -notlike "*server.mjs*") { return "foreign" }
+  $idle = $false
+  for ($i = 0; $i -lt 15; $i++) {
+    try {
+      $health = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/health" -f $Port) -TimeoutSec 3
+      if ([int]$health.persistence.pendingWrites -eq 0) { $idle = $true; break }
+    } catch { }
+    Start-Sleep -Seconds 1
+  }
+  if (-not $idle) { return "busy" }
+  Stop-Process -Id $conn.OwningProcess -Force
+  $deadline = (Get-Date).AddSeconds(10)
+  while ((Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 300 }
+  return "stopped"
+}
+
 if ($Unregister) {
+  $null = Stop-Stock1Watchdogs
   $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   if ($existing) {
-    if ($existing.State -eq "Running") { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
     Write-Host ("[Stock1] 已停止守門並移除工作排程「{0}」（已在跑的伺服器視窗不受影響）。" -f $taskName)
   } else {
@@ -71,12 +111,9 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
   -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew -StartWhenAvailable
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
-# 已在跑的舊守門（可能是看得到的那個空白視窗）先停掉，下面用新設定重新啟動；伺服器若跟著被停，新守門第一輪就會拉起來。
-$running = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($running -and $running.State -eq "Running") {
-  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 2
-}
+# 舊守門（含重新登記後留下的孤兒）全部停掉，下面用新設定重新啟動；守門停掉不影響已在跑的伺服器。
+$stoppedGuards = Stop-Stock1Watchdogs
+if ($stoppedGuards -gt 1) { Write-Host ("[Stock1] 清掉 {0} 個守門程序（其中有舊版登記腳本留下的重複守門）。" -f $stoppedGuards) }
 
 Register-ScheduledTask -TaskName $taskName -Description "盤勢雷達本機伺服器：登入時啟動守門，每 10 分鐘確認 5174 在跑、掛了就重新啟動（Zeabur 上線前的過渡方案）" `
   -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
@@ -84,9 +121,18 @@ Write-Host ("[Stock1] 已登記工作排程「{0}」：登入 Windows 時在 {1}
 
 if ($NoStart) { exit 0 }
 
+if ($Restart) {
+  switch (Stop-Stock1Server 5174) {
+    "stopped" { Write-Host "[Stock1] 已停止舊的伺服器，接著用目前的程式重新啟動。" }
+    "not-running" { Write-Host "[Stock1] 5174 沒有伺服器在跑，直接啟動。" }
+    "foreign" { Write-Host "[Stock1] 5174 被別的程式占用，不是盤勢雷達伺服器，不動它。"; exit 1 }
+    "busy" { Write-Host "[Stock1] 伺服器還有資料在寫入（或 15 秒內沒回應），這次不重啟，守門照常運作；稍後再跑一次。"; Start-ScheduledTask -TaskName $taskName; exit 1 }
+  }
+}
+
 if (Test-Listening5174) {
   $owner = (Get-NetTCPConnection -State Listen -LocalPort 5174 -ErrorAction SilentlyContinue)[0].OwningProcess
-  Write-Host ("[Stock1] 5174 已經有伺服器在跑（PID {0}），這次不再啟動。" -f $owner)
+  Write-Host ("[Stock1] 5174 已經有伺服器在跑（PID {0}），這次不重啟它。程式更新後要換新版，請加 -Restart 再跑一次。" -f $owner)
 }
 
 $task = Get-ScheduledTask -TaskName $taskName

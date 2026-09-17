@@ -224,7 +224,7 @@ npm start
 
 啟動後開 <http://127.0.0.1:5174>。Windows 也可以直接雙擊專案根目錄的 **`start.bat`**，把它「傳送到 → 桌面（建立捷徑）」就不用每次開終端機。啟動器先檢查 runtime Node 範圍（22.13 以上的 22.x 或 24+）、lock 與已安裝 runtime 套件。缺套件、檔案消失或 lock 更新時以 `npm ci` 修復；一般使用只安裝 runtime 套件，原本已有開發套件時則保留開發安裝。開發／測試的 jsdom Node 要求仍較高。
 
-想讓它在登入 Windows 時自己開、掛了自己回來（伺服器沒開的交易日不會有收盤快照）：在 PowerShell 跑一次 `powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1`。它登記工作排程「Stock1-server」：登入時以無視窗方式（`conhost --headless`）啟動 `scripts/stock1-watchdog.ps1` 常駐，每 10 分鐘看一次伺服器埠，沒在監聽就用最小化視窗重新啟動 `server.mjs`（當機、誤關視窗都會在 10 分鐘內拉回來），登記完也立刻啟動一次；`-Unregister` 停止守門並移除工作。伺服器與守門的訊息都寫在 `DATA_DIR/logs/server-YYYYMMDD.log`（保留 14 天；`LOG_FILE=off` 可關），視窗關了也查得到。這是「登入才啟動」，電腦關機時仍不會採集。要更新程式：`git pull` 後關掉「Stock1 server (5174)」視窗，再跑一次上面的指令（或等守門在 10 分鐘內自己拉起新版）。
+想讓它在登入 Windows 時自己開、掛了自己回來（伺服器沒開的交易日不會有收盤快照）：在 PowerShell 跑一次 `powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1`。它登記工作排程「Stock1-server」：登入時以無視窗方式（`conhost --headless`）啟動 `scripts/stock1-watchdog.ps1` 常駐，每 10 分鐘看一次伺服器埠，沒在監聽就用最小化視窗重新啟動 `server.mjs`（當機、誤關視窗都會在 10 分鐘內拉回來），登記完也立刻啟動一次；`-Unregister` 停止守門並移除工作。伺服器與守門的訊息都寫在 `DATA_DIR/logs/server-YYYYMMDD.log`（保留 14 天；`LOG_FILE=off` 可關），視窗關了也查得到。這是「登入才啟動」，電腦關機時仍不會採集。要更新程式：`git pull` 後在同一行指令後面加 `-Restart` 再跑一次，它會等伺服器手上的寫入落盤、停掉舊的，再用新程式啟動。
 
 `start.bat` 透過 `scripts/start-local.mjs` 啟動真正的 `server.mjs`，載入 `.env`，等本次子程序的 IPC 與 `/api/health` 身份都確認 ready 才開瀏覽器，使用實際綁定埠（含自訂 `PORT`）。port 已被使用、初始化或安裝失敗會保留錯誤訊息，不會把另一個服務當成啟動成功。Ctrl+C 或關閉啟動器會停止子程序；正常關閉會排空寫入並釋放資料租約。強制終止或作業系統強制關窗仍不保證完成尚未落盤的工作。
 
@@ -300,7 +300,7 @@ node scripts/unpack-machine-export.mjs "D:/下載/stock1-machine-export-….json
 4. 使用新 DATA_DIR／DB_PATH、獨立測試埠（例如 `PORT=0`）及 `SCHEDULER=off` 啟動驗證，確認帳本、計畫、正式發布、pending／final 與基本面累積；券商連線需另還原密鑰／憑證檔，弱密鑰包則重新設定。
 5. 驗證完成後先停止驗證服務，再切換正式設定並啟動。不要將檔案覆蓋到仍運作的服務目錄。需要回復時，同樣先停止新服務，再切回保留的原資料與設定。
 
-工作排程器也必須安排在服務已停止的時段；程式填 `npm.cmd` 完整路徑，引數填 `run backup "D:\OneDrive\stock1-backup"`，起始位置填專案資料夾。不要把失敗重跑當成熱備份。有登記守門（`register-autostart.ps1`）的話，服務停掉後 10 分鐘內會被重新啟動：手動備份前先 `-Unregister`，備份完再登記回來。
+工作排程器也必須安排在服務已停止的時段；程式填 `npm.cmd` 完整路徑，引數填 `run backup "D:\OneDrive\stock1-backup"`，起始位置填專案資料夾。不要把失敗重跑當成熱備份。有登記守門（`register-autostart.ps1`）的話，服務停掉後 10 分鐘內會被重新啟動：手動備份前先 `-Unregister`（會一併停掉守門），再關掉伺服器視窗，備份完再登記回來。
 
 ### 個人交易計畫與可攜備份
 
