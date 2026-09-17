@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Zeabur 上線前的過渡方案：伺服器沒開的交易日不會有收盤快照，成績單就少一天。
-  這支腳本登記一個「使用者登入時」觸發的工作：以隱藏視窗常駐 scripts/stock1-watchdog.ps1（守門），
+  這支腳本登記一個「使用者登入時」觸發的工作：以無視窗方式（conhost --headless）常駐 scripts/stock1-watchdog.ps1（守門），
   守門每 10 分鐘看一次伺服器埠，沒在監聽就在專案目錄用 node 跑 server.mjs（視窗最小化）——
   當機、誤關視窗都會在 10 分鐘內拉回來。登記完立刻啟動一次並回報 5174 是否已在監聽。
   不需要系統管理員，只影響目前這個 Windows 帳號。
@@ -61,13 +61,22 @@ if (-not (Test-Path $watchdog)) {
   exit 1
 }
 
-# 登入時以隱藏視窗常駐守門腳本；伺服器本身由守門用 start "…" /min 另開最小化視窗跑（日誌看得到、不擋畫面）。
-$argument = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $watchdog + '"'
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument -WorkingDirectory $root
+# 登入時以「完全沒有視窗」的方式常駐守門腳本；伺服器本身由守門用 start "…" /min 另開最小化視窗跑（日誌看得到、不擋畫面）。
+# 用 conhost --headless 而不是 powershell -WindowStyle Hidden：預設終端機是 Windows Terminal 的電腦（Windows 11 預設）
+# 不理會 Hidden，登入後會多一個一直開著的空白終端機視窗，關掉它守門就沒了（2026-09-17 使用者回報）。
+$argument = '--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $watchdog + '"'
+$action = New-ScheduledTaskAction -Execute "conhost.exe" -Argument $argument -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
   -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew -StartWhenAvailable
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+
+# 已在跑的舊守門（可能是看得到的那個空白視窗）先停掉，下面用新設定重新啟動；伺服器若跟著被停，新守門第一輪就會拉起來。
+$running = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($running -and $running.State -eq "Running") {
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+}
 
 Register-ScheduledTask -TaskName $taskName -Description "盤勢雷達本機伺服器：登入時啟動守門，每 10 分鐘確認 5174 在跑、掛了就重新啟動（Zeabur 上線前的過渡方案）" `
   -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null

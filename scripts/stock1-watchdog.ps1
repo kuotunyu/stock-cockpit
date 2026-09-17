@@ -3,7 +3,7 @@
   盤勢雷達本機伺服器的守門：每 10 分鐘看一次伺服器埠有沒有在監聽，沒有就重新啟動（最小化視窗）。
 
 .DESCRIPTION
-  由 scripts/register-autostart.ps1 登記的工作排程「Stock1-server」在登入時以隱藏視窗啟動這支腳本，之後常駐。
+  由 scripts/register-autostart.ps1 登記的工作排程「Stock1-server」在登入時以無視窗方式（conhost --headless）啟動這支腳本，之後常駐。
   伺服器當機、被誤關視窗、或登入時 node 還沒裝好，10 分鐘內會再試一次；每次啟動都寫進
   DATA_DIR/logs/server-YYYYMMDD.log（跟 server.mjs 自己的日誌同一個檔），事後看得出「什麼時候掛、什麼時候被拉起來」。
 
