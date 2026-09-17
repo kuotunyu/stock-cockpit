@@ -4211,6 +4211,8 @@ function normalizeTaiexIndex(row) {
 }
 
 async function fetchTaiexIndex() {
+  // 同一個上游的請求都記在同一本帳上；指數 15 秒才一次，不因預算用完而不抓，只扣 token 讓個股那邊少打一次。
+  takeMisToken();
   const timestamp = Date.now();
   const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_=${timestamp}`;
   const payload = await fetchJson(url, {
@@ -7789,40 +7791,150 @@ function lookupStockSurveillance(code, board) {
   return null;
 }
 
-async function fetchMisQuotes(codes, reference) {
-  const channels = [];
-  for (const code of codes) {
-    const fallback = reference.byCode.get(code);
-    if (fallback?.exchange === "TPEx") {
-      channels.push(`otc_${code}.tw`);
-    } else if (fallback?.exchange === "TWSE") {
-      channels.push(`tse_${code}.tw`);
-    } else {
-      // reference 在單一市場降級時不能武斷猜上市；兩個 channel 一起詢問，MIS 只會回存在的那檔。
-      channels.push(`tse_${code}.tw`, `otc_${code}.tw`);
+// ===== MIS 請求預算與逐檔快取（2026-09-17）=====
+// 使用者的底線：「不要讓我被 Ban 或限流」。以前這裡沒有任何全站上限：每個 /api/quotes 依「代號清單」各自快取，
+// 清單不同就各打一次 MIS——一個人用沒事，搬上 Zeabur 幾個朋友各有各的自選股，請求量就乘上人數；到價提醒的背景輪詢、
+// 處置看板也各打各的。MIS 沒有公開額度（坊間經驗值約每 5 秒 3 個請求），回應自己標 userDelay=5000。
+// 2026-09-17 盤中實測：資料本身就比 MIS 時鐘舊 5～13 秒，密集查詢時還出現 20～60 秒不更新——再快也快不過來源，
+// 所以不縮短輪詢，改成保證「不管多少人用，對 MIS 的請求都不超過預算」：
+//   ① 逐檔快取：每檔即時列保留 ttlMs（與原本整包快取同為 10 秒），不同清單重疊的代號只抓一次；
+//   ② token bucket：最多連發 capacity 個、之後每 refillMs 補 1 個（長期 0.4 req/s）；
+//   ③ 超過預算的批次這一輪不打上游：有舊列（staleMaxMs 內）就沿用，沒有就退回收盤備援，並在 warnings 明講；
+//   ④ 序列化：同時進來的請求排隊，後者看得到前者剛抓的列，不會同時各抓一份。
+// 測試環境預設「不限、不重用」（capacity=Infinity、ttl=0），行為與改動前完全相同；要測預算的測試用 configureMisBudgetForTest 開。
+const MIS_BATCH_CHANNELS = 50;
+const MIS_ROW_CACHE_MAX = 4000;
+const misTestDefaults = process.env.NODE_ENV === "test";
+const misBudget = misTestDefaults
+  ? { capacity: Infinity, refillMs: 2500, tokens: Infinity, updatedAt: 0 }
+  : { capacity: 3, refillMs: 2500, tokens: 3, updatedAt: 0 };
+const misRowPolicy = misTestDefaults ? { ttlMs: 0, staleMaxMs: 0 } : { ttlMs: 10 * 1000, staleMaxMs: 5 * 60 * 1000 };
+const misRowCache = new Map(); // code → { row | null, fetchedAt }
+let misQueue = Promise.resolve();
+
+// 純函式（budget 可注入）：拿得到 token 才准打 MIS。
+function takeMisToken(now = Date.now(), budget = misBudget) {
+  if (!Number.isFinite(budget.capacity)) return true;
+  if (!budget.updatedAt) budget.updatedAt = now;
+  const refill = Math.floor((now - budget.updatedAt) / budget.refillMs);
+  if (refill > 0) {
+    budget.tokens = Math.min(budget.capacity, budget.tokens + refill);
+    budget.updatedAt += refill * budget.refillMs;
+  }
+  if (budget.tokens <= 0) return false;
+  budget.tokens -= 1;
+  return true;
+}
+function configureMisBudgetForTest({ capacity = Infinity, refillMs = 2500, ttlMs = 0, staleMaxMs = 0 } = {}) {
+  Object.assign(misBudget, { capacity, refillMs, tokens: capacity, updatedAt: 0 });
+  Object.assign(misRowPolicy, { ttlMs, staleMaxMs });
+  misRowCache.clear();
+}
+
+function misChannelsFor(code, reference) {
+  const fallback = reference.byCode.get(code);
+  if (fallback?.exchange === "TPEx") return [`otc_${code}.tw`];
+  if (fallback?.exchange === "TWSE") return [`tse_${code}.tw`];
+  // reference 在單一市場降級時不能武斷猜上市；兩個 channel 一起詢問，MIS 只會回存在的那檔。
+  return [`tse_${code}.tw`, `otc_${code}.tw`];
+}
+
+async function requestMisBatch(channels) {
+  const timestamp = Date.now();
+  const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(channels.join("|"))}&json=1&delay=0&_=${timestamp}`;
+  // 排隊的請求會等前一個：MIS 平常一秒內回，給 8 秒就夠，避免一個卡住的連線把整條隊伍拖 20 秒。
+  const payload = await fetchJson(url, { timeoutMs: 8000, headers: { referer: "https://mis.twse.com.tw/stock/index.jsp" } });
+  return Array.isArray(payload.msgArray) ? payload.msgArray : [];
+}
+
+function setMisRow(code, row, fetchedAt) {
+  misRowCache.delete(code);
+  misRowCache.set(code, { row, fetchedAt });
+  if (misRowCache.size > MIS_ROW_CACHE_MAX) {
+    for (const key of misRowCache.keys()) {
+      misRowCache.delete(key);
+      if (misRowCache.size <= MIS_ROW_CACHE_MAX * 0.9) break;
     }
   }
-  if (!channels.length) return [];
+}
 
+async function fetchMisQuotesNow(codes, reference) {
+  const requested = [...new Set(codes)];
+  const startedAt = Date.now();
+  const wanted = requested.filter((code) => {
+    const hit = misRowCache.get(code);
+    return !(hit && startedAt - hit.fetchedAt < misRowPolicy.ttlMs);
+  });
+  // 沒抓過的排最前面，其餘越舊越先：預算不夠時，先讓完全沒有即時價的股票拿到資料。
+  wanted.sort((a, b) => (misRowCache.get(a)?.fetchedAt ?? -1) - (misRowCache.get(b)?.fetchedAt ?? -1));
   const batches = [];
-  for (let index = 0; index < channels.length; index += 50) {
-    batches.push(channels.slice(index, index + 50));
+  let current = { codes: [], channels: [] };
+  for (const code of wanted) {
+    const channels = misChannelsFor(code, reference);
+    if (current.channels.length && current.channels.length + channels.length > MIS_BATCH_CHANNELS) {
+      batches.push(current);
+      current = { codes: [], channels: [] };
+    }
+    current.codes.push(code);
+    current.channels.push(...channels);
   }
+  if (current.channels.length) batches.push(current);
 
-  const results = [];
+  const fetchedNow = new Set();
+  const throttledCodes = new Set();
+  const failedCodes = new Set();
+  let error = null;
   for (const batch of batches) {
-    const timestamp = Date.now();
-    const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(batch.join("|"))}&json=1&delay=0&_=${timestamp}`;
-    const payload = await fetchJson(url, {
-      headers: {
-        referer: "https://mis.twse.com.tw/stock/index.jsp",
-      },
-    });
-    if (Array.isArray(payload.msgArray)) {
-      results.push(...payload.msgArray);
+    if (!takeMisToken()) {
+      for (const code of batch.codes) throttledCodes.add(code);
+      continue;
+    }
+    try {
+      const rows = await requestMisBatch(batch.channels);
+      const fetchedAt = Date.now();
+      const byCode = new Map();
+      for (const row of rows) {
+        const code = cleanCode(row.c);
+        if (code) byCode.set(code, row);
+      }
+      for (const code of batch.codes) {
+        setMisRow(code, byCode.get(code) || null, fetchedAt);
+        fetchedNow.add(code);
+      }
+    } catch (batchError) {
+      error ||= batchError;
+      for (const code of batch.codes) failedCodes.add(code);
     }
   }
-  return results;
+
+  const finishedAt = Date.now();
+  const rows = [];
+  let staleServed = 0;
+  for (const code of requested) {
+    const hit = misRowCache.get(code);
+    if (!hit?.row) continue;
+    const age = finishedAt - hit.fetchedAt;
+    if (fetchedNow.has(code) || age < misRowPolicy.ttlMs) rows.push(hit.row);
+    else if ((throttledCodes.has(code) || failedCodes.has(code)) && age < misRowPolicy.staleMaxMs) {
+      rows.push(hit.row);
+      staleServed += 1;
+    }
+  }
+  return { rows, throttledCodes, staleServed, error: error ? (error.message || String(error)) : null };
+}
+
+// 回 { rows, throttledCodes, staleServed, error }；排隊執行，永不因上一個請求失敗而卡住隊伍。
+function fetchMisQuotesBudgeted(codes, reference) {
+  const run = misQueue.then(() => fetchMisQuotesNow(codes, reference));
+  misQueue = run.catch(() => {});
+  return run;
+}
+
+// 舊介面（處置看板用）：只要列；全部失敗且沒有任何列可用時照舊 throw，由呼叫端的 try/catch 降級。
+async function fetchMisQuotes(codes, reference) {
+  const result = await fetchMisQuotesBudgeted(codes, reference);
+  if (result.error && !result.rows.length) throw new Error(result.error);
+  return result.rows;
 }
 
 async function getQuotes(codes) {
@@ -7841,9 +7953,15 @@ async function getQuotes(codes) {
   }
 
   let realtimeRows = [];
-  let realtimeError = null;
+  let realtimeError;
+  let misThrottledCodes = new Set();
+  let misStaleServed = 0;
   try {
-    realtimeRows = await fetchMisQuotes(normalizedCodes, reference);
+    const mis = await fetchMisQuotesBudgeted(normalizedCodes, reference);
+    realtimeRows = mis.rows;
+    realtimeError = mis.error;
+    misThrottledCodes = mis.throttledCodes;
+    misStaleServed = mis.staleServed;
   } catch (error) {
     realtimeError = error.message;
   }
@@ -7859,6 +7977,8 @@ async function getQuotes(codes) {
   // 官方 MIS 沒給即時成交價（priceStale，price 退回昨收）的股票，改用 Yahoo 即時價補上，
   // 盤中才看得到真實現價而不是昨收。Yahoo 有 30 秒快取，並限制同時抓取數避免狂打。
   const staleCodes = normalizedCodes.filter((code) => {
+    // 這一輪因 MIS 預算沒去問的代號不轉嫁給 Yahoo（那只是把被限流的風險搬到另一個上游，而且 Yahoo 慢 20 分鐘）；下一輪就會補上。
+    if (misThrottledCodes.has(code)) return false;
     const q = realtimeQuotes.get(code);
     return !q || q.priceStale;
   });
@@ -7948,11 +8068,14 @@ async function getQuotes(codes) {
     realtimeError,
     referenceCounts: reference.counts,
     missingCodes: normalizedCodes.filter((code) => !quotes.some((quote) => quote.code === code)),
-    warnings: unique([...(reference.warnings || []), ...(companyDirectory.warnings || [])]),
+    warnings: unique([...(reference.warnings || []), ...(companyDirectory.warnings || []),
+      ...(misThrottledCodes.size ? [`即時來源限速保護中：這一輪有 ${misThrottledCodes.size} 檔沒有向證交所重新查詢（${misStaleServed} 檔沿用稍早的即時價，其餘暫顯示收盤價），下一輪補上。這是為了不被證交所限流。`] : [])]),
     dataQuality: {
       degraded: Boolean(reference.degraded || companyDirectory.degraded),
       referenceComplete: Boolean(reference.coverageComplete),
       markets: reference.markets,
+      // MIS 請求預算用完：不是來源壞掉，所以不算 degraded，另外標示。
+      throttled: misThrottledCodes.size > 0,
     },
     notes: [
       "price, open, high, low, previousClose, volumeLots are sourced from official endpoints when available.",
@@ -17261,6 +17384,7 @@ export {
   formatServerLogLine, staleServerLogFiles, appendServerLog, armServerLogFile, handleFatalError, resetFatalErrorStateForTest, SERVER_LOG_KEEP_DAYS,
   computeShellVersion, applyShellVersion, shellVersionFromParts,
   apiRoutes,
+  takeMisToken, configureMisBudgetForTest, fetchMisQuotesBudgeted,
   summarizeOperationalStatus, benchmarkMemoKey, recordCaptureAttempt,
   SCHEDULER_MAX_FAILURES_PER_DAY, closeSchedulerStateForTest, resetCloseSchedulerStateForTest,
   // 事件日曆／市場位階（market-events.test）
