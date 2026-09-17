@@ -5,18 +5,21 @@
 .DESCRIPTION
   Zeabur 上線前的過渡方案：伺服器沒開的交易日不會有收盤快照，成績單就少一天。
   這支腳本登記一個「使用者登入時」觸發的工作：以無視窗方式（conhost --headless）常駐 scripts/stock1-watchdog.ps1（守門），
-  守門每 10 分鐘看一次伺服器埠，沒在監聽就在專案目錄用 node 跑 server.mjs（視窗最小化）——
-  當機、誤關視窗都會在 10 分鐘內拉回來。登記完立刻啟動一次並回報 5174 是否已在監聽。
+  守門每 10 分鐘看一次伺服器埠，沒在監聽就在專案目錄用 node 跑 server.mjs——
+  伺服器和守門都沒有視窗，當機也會在 10 分鐘內拉回來。登記完立刻啟動一次並回報 5174 是否已在監聽。
   不需要系統管理員，只影響目前這個 Windows 帳號。
 
-  伺服器與守門的訊息都寫在 DATA_DIR/logs/server-YYYYMMDD.log（保留 14 天），視窗關了也查得到。
+  伺服器與守門的訊息都寫在 DATA_DIR/logs/server-YYYYMMDD.log（保留 14 天）。
   這是「登入才啟動」，電腦關機或沒登入時仍然不會採集；收盤排程也要電腦當時開著。
   要更新程式：git pull 後跑這支腳本加 -Restart（等寫入落盤、停掉舊伺服器、用新程式重新啟動）。
 
   檔案存成 UTF-8 with BOM：Windows PowerShell 5.1 讀沒有 BOM 的 .ps1 會用系統 ANSI（Big5）解碼，中文會變亂碼、連語法都會壞。
 
 .PARAMETER Unregister
-  停止守門並移除這個工作（已在跑的伺服器視窗不受影響，要停伺服器請自己關視窗）。
+  移除自動啟動：停掉守門與伺服器，並刪除這個工作排程。
+
+.PARAMETER Stop
+  暫停：停掉守門與伺服器（等寫入落盤），工作排程保留，下次登入 Windows 會自動恢復。手動備份前用這個。
 
 .PARAMETER NoStart
   只登記，不立刻啟動。
@@ -27,12 +30,14 @@
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1
   powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1 -Restart
+  powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1 -Stop
   powershell -ExecutionPolicy Bypass -File scripts/register-autostart.ps1 -Unregister
 #>
 param(
   [switch]$Unregister,
   [switch]$NoStart,
-  [switch]$Restart
+  [switch]$Restart,
+  [switch]$Stop
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,12 +84,29 @@ function Stop-Stock1Server([int]$Port) {
   return "stopped"
 }
 
-if ($Unregister) {
+# 伺服器沒有視窗，停它只能靠指令：-Stop（暫停，下次登入恢復）與 -Unregister（移除自動啟動）共用這段。先停守門，免得它把伺服器拉回來。
+function Stop-Stock1All {
   $null = Stop-Stock1Watchdogs
+  switch (Stop-Stock1Server 5174) {
+    "stopped" { Write-Host "[Stock1] 已停止伺服器（寫入都已落盤）。" }
+    "not-running" { Write-Host "[Stock1] 5174 沒有伺服器在跑。" }
+    "foreign" { Write-Host "[Stock1] 5174 被別的程式占用，不是盤勢雷達伺服器，不動它。" }
+    "busy" { Write-Host "[Stock1] 伺服器還有資料在寫入（或 15 秒內沒回應），這次沒有停它；守門已停，稍後再跑一次。"; exit 1 }
+  }
+}
+
+if ($Stop) {
+  Stop-Stock1All
+  Write-Host "[Stock1] 已暫停。下次登入 Windows 會自動恢復；要立刻恢復請跑這支腳本（不加參數）。"
+  exit 0
+}
+
+if ($Unregister) {
+  Stop-Stock1All
   $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   if ($existing) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-    Write-Host ("[Stock1] 已停止守門並移除工作排程「{0}」（已在跑的伺服器視窗不受影響）。" -f $taskName)
+    Write-Host ("[Stock1] 已移除工作排程「{0}」，之後登入不會再自動啟動。" -f $taskName)
   } else {
     Write-Host ("[Stock1] 沒有找到工作排程「{0}」。" -f $taskName)
   }
@@ -101,7 +123,7 @@ if (-not (Test-Path $watchdog)) {
   exit 1
 }
 
-# 登入時以「完全沒有視窗」的方式常駐守門腳本；伺服器本身由守門用 start "…" /min 另開最小化視窗跑（日誌看得到、不擋畫面）。
+# 登入時以「完全沒有視窗」的方式常駐守門腳本；伺服器本身也由守門以沒有視窗的方式啟動，訊息在日誌檔。
 # 用 conhost --headless 而不是 powershell -WindowStyle Hidden：預設終端機是 Windows Terminal 的電腦（Windows 11 預設）
 # 不理會 Hidden，登入後會多一個一直開著的空白終端機視窗，關掉它守門就沒了（2026-09-17 使用者回報）。
 $argument = '--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $watchdog + '"'
@@ -147,8 +169,8 @@ if ($task.State -eq "Running") {
 }
 
 if (Test-Listening5174) {
-  Write-Host "[Stock1] 伺服器已在 http://127.0.0.1:5174 監聽；守門每 10 分鐘會再確認一次。瀏覽器按 Ctrl+F5 更新外殼。"
+  Write-Host "[Stock1] 伺服器已在 http://127.0.0.1:5174 背景執行（沒有視窗）；守門每 10 分鐘會再確認一次。瀏覽器按 Ctrl+F5 更新外殼。"
 } else {
-  Write-Host ("[Stock1] 40 秒內沒看到 5174 監聽；請看最小化的「Stock1 server (5174)」視窗，或 {0} 裡今天的 server-*.log。" -f (Join-Path $root ".data\logs"))
+  Write-Host ("[Stock1] 40 秒內沒看到 5174 監聽；請看 {0} 裡今天的 server-*.log。" -f (Join-Path $root ".data\logs"))
   exit 1
 }
