@@ -13,6 +13,19 @@ after(() => app.cleanup());
 
 const json = (expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 
+test('行情正常與風險公告缺漏分開命名，不互相掩蓋',()=>{
+  app.evalIn(`dataState.error='';marketState.error='';sourceState.error='';dataState.warnings=[];dataState.degraded=false;dataState.fallbackCount=0;
+    state.screen='overnight';overnightState.warnings=['TWSE 注意股抓取失敗'];overnightState.groups={};overnightState.loaded=true;overnightState.loading=false;overnightState.error='';state.overnightView='overview';renderOvernightGroups();`);
+  const host=app.doc.createElement('div');host.innerHTML=app.evalIn('renderDataTrustCompact()');
+  assert.match(host.textContent,/行情來源狀態.*本批行情可用/s);
+  assert.match(app.doc.querySelector('#overnightGroups').textContent,/注意／處置標記部分缺漏.*查無標記不代表沒有風險/s);
+  app.evalIn(`overnightState.warnings=[];dataState.warnings=['收盤資料沿用 last-good'];dataState.degraded=true;renderOvernightGroups();`);
+  host.innerHTML=app.evalIn('renderDataTrustCompact()');
+  assert.match(host.textContent,/資料降級/);
+  assert.doesNotMatch(app.doc.querySelector('#overnightGroups').textContent,/標記部分缺漏/);
+  app.evalIn(`dataState.warnings=[];dataState.degraded=false;`);
+});
+
 test("dataState 具備 warnings／degraded 欄位（與其他 state 一致）", () => {
   const shape = json(`({
     hasWarnings: Array.isArray(dataState.warnings),

@@ -12,6 +12,15 @@ after(() => app.cleanup());
 
 const json = (expr) => JSON.parse(app.evalIn(`JSON.stringify(${expr})`));
 
+test('更多第一層直接提供看盤工具，手機介面只留設定', () => {
+  app.evalIn(`state.screen='more';state.morePanel='source';render();`);
+  const shortcuts=app.doc.querySelector('.more-screen-shortcuts');
+  assert.ok(shortcuts);
+  assert.deepEqual([...shortcuts.querySelectorAll('[data-go-screen]')].map(n=>n.dataset.goScreen),['screener','surveillance']);
+  assert.ok(shortcuts.compareDocumentPosition(app.doc.querySelector('.settings-panel')) & 4);
+  assert.doesNotMatch(app.evalIn('renderMobileSettingsPanel()'),/data-go-screen=/);
+});
+
 test("resolveScreenSwipe：≥ 70px、水平明顯大於垂直、600ms 內才算；被擋一律不算", () => {
   const cases = [
     [{ dx: -120, dy: 10, elapsed: 200, blocked: false }, "next"],

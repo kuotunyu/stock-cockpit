@@ -147,6 +147,7 @@ button {
 }
 
 .workspace {
+  container-type: inline-size;
   min-width: 0;
   max-width: 100vw;
   padding-bottom: calc(var(--bottom-nav-height, 78px) + 28px);
@@ -168,6 +169,7 @@ button {
 }
 
 .topbar h1 {
+  white-space: nowrap;
   margin: 0;
   text-align: center;
   font-size: 24px;
@@ -385,6 +387,45 @@ button {
 
 /* 手機版資料來源 pill：桌機維持兩顆按鈕，手機收成一顆、點開才展開 */
 .source-pill { display: none; }
+.more-screen-shortcuts { display: none; }
+.hold-quote-help { display: none; }
+@media (max-width: 760px) {
+  .hold-quote-help { display: block; margin: 0 0 12px; color: var(--muted-2); font-size: var(--fs-note); }
+  .hold-quote-help summary { min-height: 44px; padding: 10px 0; cursor: pointer; }
+  .is-nav-5 .more-screen-shortcuts { display: block; margin-bottom: 18px; }
+  .more-screen-shortcuts h2 { font-size: var(--fs-body); color: var(--muted-2); }
+  .more-screen-shortcuts .mobile-go-screens { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .more-screen-shortcuts button { display: flex; gap: 8px; align-items: center; justify-content: center; min-height: 44px; }
+  .more-screen-shortcuts svg { width: 20px; height: 20px; flex: 0 0 auto; }
+}
+/* 依中央工作區寬度分列，三欄桌面也有足夠空間容納標題。 */
+@media (min-width: 761px) {
+  @container (max-width: 900px) {
+    .topbar {
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      grid-template-areas: "title title help actions" "market source source source";
+      gap: 6px 12px;
+    }
+    .topbar h1 { grid-area: title; text-align: left; }
+    .topbar .screen-help { grid-area: help; }
+    .topbar .top-actions { grid-area: actions; }
+    .topbar .market-pill { grid-area: market; min-width: 0; }
+    .topbar .source-switch {
+      grid-area: source; position: relative; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .topbar .source-pill {
+      display: inline-flex; align-items: center; flex: 0 0 auto;
+      padding: 0 12px; border: 1px solid var(--line);
+    }
+    .topbar .source-switch small { min-width: 0; flex: 1; }
+    .topbar .source-switch:not(.is-expanded) .source-switch-buttons { display: none; }
+    .topbar .source-switch.is-expanded .source-switch-buttons {
+      position: absolute; top: calc(100% + 6px); right: 0;
+      min-width: 232px; z-index: 30; box-shadow: var(--shadow);
+    }
+  }
+}
 @media (max-width: 1039px) {
   .source-pill {
     display: inline-flex;

@@ -71,23 +71,25 @@ test("隔日沖四則警告：摘要只列前 2 則＋（另有 2 則），全�
   const view = renderOvernight(WARNINGS);
   assert.equal(view.present, true);
   assert.match(view.visibleText, /整批收盤資料日尚未對齊/, "第一則關鍵語意要在摘要");
-  assert.match(view.visibleText, /注意股抓取失敗/, "第二則也在摘要");
+  assert.match(view.visibleText, /注意／處置標記部分缺漏；查無標記不代表沒有風險/, "第二則摘要明確說明風險範圍");
   assert.match(view.visibleText, /另有 2 則/);
   assert.doesNotMatch(view.visibleText, /除權除息計算結果表/, "第 3、4 則全文不在常駐摘要");
   assert.ok(view.foldText, "要有原生 details 放全文（手機沒有 hover，不能只存 title）");
   assert.match(view.foldText, /除權除息計算結果表/);
+  assert.match(view.foldText, /注意股抓取失敗/, "完整來源錯誤仍可展開閱讀");
   assert.match(view.foldText, /收盤資料尚未更新到 2026\/09\/08/);
   assert.equal(view.foldOpen, false, "預設收合");
   // 位階列的 ⚠ 按鈕來自 marketBreadthState 的警告（不是 overnightState.warnings），本檔不種 breadth 資料，不在此驗。
   assert.equal(view.summaryFlow, true);
 });
 
-test("隔日沖 ≤2 則警告：直接全文顯示，不需要 details", () => {
+test("隔日沖 ≤2 則警告：風險缺漏保留摘要與全文，普通警告直接顯示", () => {
   const view = renderOvernight(WARNINGS.slice(0, 2));
   assert.match(view.visibleText, /整批收盤資料日尚未對齊/);
-  assert.match(view.visibleText, /注意股抓取失敗/);
+  assert.match(view.visibleText, /查無標記不代表沒有風險/);
   assert.doesNotMatch(view.visibleText, /另有/);
-  assert.equal(view.foldText, null);
+  assert.match(view.foldText, /注意股抓取失敗/);
+  assert.equal(renderOvernight([WARNINGS[0]]).foldText, null);
   assert.equal(renderOvernight([]).present, false, "沒有警告就沒有警告區");
 });
 

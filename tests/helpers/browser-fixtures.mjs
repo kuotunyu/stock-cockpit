@@ -303,7 +303,7 @@ export async function assertExpectedLayout(page, { width, detailOpen = false }) 
   }
   const topbar = await expectedRect(page.locator(".topbar"), `${width}px 頂欄`);
   assertInside(topbar, viewport, `${width}px 頂欄`);
-  const sourceControls = width < 1040
+  const sourceControls = await page.locator('#sourcePill').isVisible()
     ? [["#sourcePill", "資料來源 pill"]]
     : [
         ['[data-source-option="official"]', "官方資料按鈕"],

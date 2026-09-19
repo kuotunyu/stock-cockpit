@@ -71,7 +71,7 @@ function seed({ records = [], totals = dividendTotals(records), holdings = [] } 
         stockRatio: 0, isToday: true, daysUntil: 0
       }
     });
-    state.watchList = "hold";
+    state.screen = "watchlist"; state.watchList = "hold";
     renderHoldingsPanel();
   `);
 }

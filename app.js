@@ -1315,7 +1315,7 @@ function renderDataTrustCompact() {
   // mixed 有兩種來源：真有收盤備援檔，或只是後端回了警告／降級。標題「部分備援」配「收盤備援 0 檔」自相矛盾，
   // 只有 fallbackCount > 0 才叫部分備援，其餘叫資料降級（tone 本身不變，CSS 與既有測試沿用）。
   const toneText = {
-    good: "資料正常",
+    good: "本批行情可用",
     mixed: (dataState.fallbackCount || 0) > 0 ? "部分備援" : "資料降級",
     warn: "需要確認",
   }[tone];
@@ -1331,11 +1331,11 @@ function renderDataTrustCompact() {
   const warnings = dataState.warnings || [];
   const warningText = warnings.slice(0, 2).join("；");
   const warningHtml = warnings.length
-    ? `<small class="data-trust-warning" title="${escapeHtml(warnings.join("\n"))}">${escapeHtml(warningText)}${warnings.length > 2 ? `（另有 ${warnings.length - 2} 則）` : ""}</small>`
+    ? `<small class="data-trust-warning" title="${escapeHtml(warnings.join("\n"))}">${escapeHtml(warningText)}${warnings.length > 2 ? `（另有 ${warnings.length - 2} 則）` : ""}</small>${warnings.length > 2 ? `<details data-quote-warnings><summary>查看全部行情警告</summary>${warnings.map(w => `<p>${escapeHtml(w)}</p>`).join('')}</details>` : ''}`
     : "";
   return `
     <aside class="data-trust-card is-${tone}">
-      <span>資料可信度</span>
+      <span>行情來源狀態</span>
       <strong>${escapeHtml(toneText)}</strong>
       <p>${escapeHtml(sourceLabel)} / 更新 ${escapeHtml(updated)}</p>
       <small>${escapeHtml(detail)}</small>
@@ -1379,7 +1379,7 @@ function renderTodayFocusPanel() {
           <span>${escapeHtml(signalLabel)} 訊號重點</span>
           <strong>先看清單，再看風險</strong>
         </div>
-        <p>三組清單、自選股狀態與資料可信度，先集中看這裡。</p>
+        <p>三組清單、自選股狀態與行情來源狀態，先集中看這裡。</p>
       </header>
       <div class="today-focus-grid">
         ${renderFocusPickCard("strongContinuation", getOvernightTopPick("strongContinuation"))}
@@ -2269,6 +2269,7 @@ function clearUserScopedState({ renderNow = true } = {}) {
   alertWrite.pending = null;
   tradesWrite.pending = null;
   pendingTradeAddition = null;
+  tradeFormDrafts.clear();
   tradePlanWrite.pending = null;
   resetPersonalBackupRestoreState({ closeModal: true });
   resetTradePlansForAccount();
@@ -3258,6 +3259,57 @@ let tradesMutationVersion = 0;
 let tradesLoadSeq = 0;
 let tradesHistoryLimit = 40;
 let tradesEditingId = "";
+const tradeFormDrafts = new Map();
+
+function tradeFormDraftKey(editingId = tradesEditingId) {
+  return JSON.stringify([String(authState.user?.id || ''), editingId]);
+}
+
+function captureTradeFormDraft(form) {
+  const draft = {
+    key: tradeFormDraftKey(form.dataset.editingId || ''), scope: captureAuthScope(),
+    values: [...form.elements].filter(n => n.name).map(n => ({name:n.name, value:n.value,
+      checked: ['checkbox','radio'].includes(n.type) ? n.checked : null})),
+    expanded: [...form.querySelectorAll('details')].map(n => n.open), error: null,
+  };
+  tradeFormDrafts.set(draft.key, draft);
+  return draft;
+}
+
+function settleTradeFormDraft(draft, error = null) {
+  if (!draft || !isCurrentAuthScope(draft.scope) || tradeFormDrafts.get(draft.key) !== draft) return;
+  if (!error) { tradeFormDrafts.delete(draft.key); return; }
+  const message = String(error.message || '儲存失敗');
+  const oversell = message.match(/賣出\s*(?:[A-Z0-9]{4,6}(?:\s*[,，]\s*|\s+))?([\d,]+)\s*股.*庫存只有\s*([\d,]+)\s*股/);
+  draft.error = { field: oversell ? 'shares' : '',
+    summary: error.outcomeUnknown ? message : oversell ? `未儲存：可賣 ${oversell[2]} 股，輸入 ${oversell[1]} 股` : `未儲存：${message}`,
+    detail: oversell ? message : '' };
+}
+
+function restoreTradeFormDraft(form, { focus = false } = {}) {
+  const draft = tradeFormDrafts.get(tradeFormDraftKey(form?.dataset.editingId || ''));
+  if (!form || !draft || !isCurrentAuthScope(draft.scope)) return;
+  for (const saved of draft.values) {
+    const field = form.elements[saved.name];
+    if (!field) continue;
+    field.value = saved.value;
+    if (saved.checked !== null) field.checked = saved.checked;
+  }
+  form.querySelectorAll('details').forEach((n, i) => { n.open = draft.expanded[i] || false; });
+  syncTradeFormControls(form);
+  if (draft.error) {
+    showTradeFormError(form, draft.error.field, draft.error.summary, { focus });
+    const details = form.querySelector('[data-trade-error-detail]');
+    details.hidden = !draft.error.detail;
+    details.querySelector('p').textContent = draft.error.detail;
+  }
+}
+
+// 每次輸入屬於當前表單的新草稿；舊回應只能清除自己送出的那一份。
+for (const eventName of ['input', 'change']) document.addEventListener(eventName, event => {
+  const form = event.target.closest('[data-trade-form]');
+  if (form && authState.user) captureTradeFormDraft(form);
+});
 let tradeInstrumentProfileSeq = 0;
 const tradeInstrumentProfileRequests = new WeakMap();
 
@@ -3428,7 +3480,7 @@ function clearTradeFormError(form) {
   });
 }
 
-function showTradeFormError(form, fieldName, message) {
+function showTradeFormError(form, fieldName, message, { focus = true } = {}) {
   const box = form?.querySelector("[data-trade-form-error]");
   if (box) {
     box.id ||= "tradeFormError";
@@ -3440,7 +3492,7 @@ function showTradeFormError(form, fieldName, message) {
     field.setAttribute("aria-invalid", "true");
     // 讀屏回到欄位時不只聽到「invalid」，還聽得到錯在哪。
     if (box) field.setAttribute("aria-describedby", box.id);
-    field.focus();
+    if (focus) field.focus();
   }
   // 錯誤列本身是 role=alert：再 toast 一次讀屏會把同一句唸兩遍。只有沒有錯誤列的表單才退回 toast。
   if (!box) showToast(message);
@@ -3585,7 +3637,26 @@ function beginTradeMutation() {
 function finishTradeMutation(scope) {
   if (!isCurrentAuthScope(scope)) return;
   tradesState.mutating = false;
+  const active = document.activeElement;
+  const panelFocus = el.holdingsPanel?.contains(active) ? captureLiveFocus() : null;
+  const summaryIdentity = panelFocus && active.matches('summary')
+    ? [...active.parentElement.attributes].filter(a => a.name.startsWith('data-')).map(a => [a.name, a.value]) : [];
+  const form = active?.closest?.('[data-trade-form]');
+  const focusedName = form ? active.name : '';
+  const formKey = form ? tradeFormDraftKey(form.dataset.editingId || '') : '';
+  const mayFocusError = active === document.body || Boolean(form);
+  if (panelFocus) active.blur();
   render();
+  if (state.screen === 'watchlist' && state.watchList === 'hold') {
+    const current = el.holdingsPanel?.querySelector('[data-trade-form]');
+    restoreTradeFormDraft(current, { focus: mayFocusError });
+    if (focusedName && current && tradeFormDraftKey(current.dataset.editingId || '') === formKey) current.elements[focusedName]?.focus();
+    if (!form && panelFocus) {
+      restoreLiveFocus(panelFocus);
+      if (summaryIdentity.length) [...el.holdingsPanel.querySelectorAll('details')]
+        .find(n => summaryIdentity.every(([key, value]) => n.getAttribute(key) === value))?.querySelector('summary')?.focus({preventScroll:true});
+    }
+  }
 }
 
 function applyTradesPayload(payload) {
@@ -3697,7 +3768,7 @@ async function putTradesWithRetry(buildNext, intentKey) {
   }
 }
 
-async function addTradeRecord(fields) {
+async function addTradeRecord(fields, formDraft = null) {
   if (!authState.user) {
     showToast("記帳需要登入（更多 → 帳號管理）");
     return false;
@@ -3714,6 +3785,7 @@ async function addTradeRecord(fields) {
   try {
     await putTradesWithRetry(() => ({ settings: tradesState.settings, records: tradesState.records.some(item => item.id === record.id) ? tradesState.records : [...tradesState.records, record] }), `add:${fingerprint}`);
     pendingTradeAddition = null;
+    settleTradeFormDraft(formDraft);
     showToast(`已記一筆：${fields.side === "sell" ? "賣出" : fields.side === "dividend" ? "股利" : "買進"} ${fields.code}`);
     if (fields.side === "sell") {
       const { breaches } = evaluateDiscipline();
@@ -3724,7 +3796,8 @@ async function addTradeRecord(fields) {
     if (!isCurrentAuthScope(mutationScope)) return false;
     if (error.outcomeUnknown) pendingTradeAddition = retained || { fingerprint, record };
     else pendingTradeAddition = null;
-    if (!handleAuthRequired(error)) showToast(error.message); // 賣超等驗證訊息直接給使用者看
+    settleTradeFormDraft(formDraft, error);
+    if (!handleAuthRequired(error)) showToast(formDraft?.error?.field === 'shares' ? formDraft.error.summary : error.message);
     return false;
   } finally {
     finishTradeMutation(mutationScope);
@@ -3763,6 +3836,8 @@ async function updateTradeRecord(id, patch, {
   vanishedMessage = "這筆股利已在其他視窗刪除，未進行入帳更新",
   successMessage = "股利已確認入帳",
   errorPrefix = "股利入帳失敗",
+  formDraft = null,
+  editingId = '',
 } = {}) {
   const recordId = String(id || "");
   if (!recordId || !tradesState.records.some((record) => record.id === recordId)) {
@@ -3783,11 +3858,14 @@ async function updateTradeRecord(id, patch, {
         )),
       };
     });
-    renderHoldingsPanel();
+    settleTradeFormDraft(formDraft);
+    if (editingId && tradesEditingId === editingId && (!formDraft || !tradeFormDrafts.has(formDraft.key))) tradesEditingId = '';
     showToast(successMessage);
     return true;
   } catch (error) {
-    if (!handleAuthRequired(error)) showToast(`${errorPrefix}：${error.message}`);
+    if (!isCurrentAuthScope(mutationScope)) return false;
+    settleTradeFormDraft(formDraft, error);
+    if (!handleAuthRequired(error)) showToast(formDraft?.error?.field === 'shares' ? formDraft.error.summary : `${errorPrefix}：${error.message}`);
     return false;
   } finally {
     finishTradeMutation(mutationScope);
@@ -3858,9 +3936,9 @@ function buildTradeEditPatch(current, fields, { feeProvided, taxProvided }) {
   return patch;
 }
 
-async function saveEditedTradeRecord(id, fields, actuals) {
+async function saveEditedTradeRecord(id, fields, actuals, formDraft = null) {
   const recordId = String(id || "");
-  const saved = await updateTradeRecord(
+  return updateTradeRecord(
     recordId,
     (current) => buildTradeEditPatch(current, fields, actuals),
     {
@@ -3868,13 +3946,10 @@ async function saveEditedTradeRecord(id, fields, actuals) {
       vanishedMessage: "這筆交易已在其他視窗刪除，未進行修正",
       successMessage: "交易紀錄已修正",
       errorPrefix: "交易紀錄修正失敗",
+      formDraft,
+      editingId: recordId,
     },
   );
-  if (saved && tradesEditingId === recordId) {
-    tradesEditingId = "";
-    renderHoldingsPanel();
-  }
-  return saved;
 }
 
 function beginTradeEdit(id) {
@@ -3895,6 +3970,7 @@ function beginTradeEdit(id) {
 function cancelTradeEdit() {
   if (!tradesEditingId) return;
   document.activeElement?.blur?.();
+  tradeFormDrafts.delete(tradeFormDraftKey());
   tradesEditingId = "";
   renderHoldingsPanel();
 }
@@ -3948,6 +4024,12 @@ function renderSettlementLine() {
   return `<p class="hold-settlement" title="T+2 交割：成交日後第 2 個交易日，買進要付價金＋手續費、賣出收價金−費稅；${source}"><strong>交割款</strong> ${parts.join("・")}</p>`;
 }
 
+function personalWinRateLabel(trades, rate, minTrades) {
+  const value = finiteNumberOrNull(rate);
+  if (!Number.isInteger(trades) || trades <= 0 || value === null) return '--';
+  return trades < minTrades ? `${value}%（${trades}/${minTrades} 筆・樣本不足）` : `${value}%（${trades} 筆）`;
+}
+
 function renderPersonalScorecard(open = false) {
   const settlement = renderDisciplineBanner() + renderSettlementLine();
   const card = tradesState.scorecard;
@@ -3959,11 +4041,11 @@ function renderPersonalScorecard(open = false) {
   const year = (card.years || []).find((item) => item.key === today.slice(0, 4));
   const minTrades = Number(card.minTrades) || 20;
   const enough = o.trades >= minTrades;
-  const rateText = !o.trades ? "--" : enough ? `${o.winRate}%` : `累積中 ${o.trades}/${minTrades} 筆`;
+  const rateText = !o.trades ? "--" : enough ? personalWinRateLabel(o.trades, o.winRate, minTrades) : `累積中 ${o.trades}/${minTrades} 筆`;
   const pf = o.profitFactor != null ? String(o.profitFactor) : o.profitFactorReason === "no-losing-trade" ? "尚無虧損筆" : "--";
   const money = (value) => formatMoney(value, { signed: true });
   const tone = (value) => (value > 0 ? "is-up" : value < 0 ? "is-down" : "");
-  const monthRows = (card.months || []).slice(0, 12).map((item) => `<tr><td>${item.key.slice(0, 4)}/${item.key.slice(4, 6)}</td><td class="${tone(item.realizedPnl)}">${money(item.realizedPnl)}</td><td>${item.trades}</td><td>${item.trades ? `${item.winRate}%` : "--"}</td><td>${formatMoney(item.fees + item.taxes)}</td><td>${item.dividendsNet ? formatMoney(item.dividendsNet) : "--"}</td></tr>`).join("");
+  const monthRows = (card.months || []).slice(0, 12).map((item) => `<tr><td>${escapeHtml(item.key.slice(0, 4))}/${escapeHtml(item.key.slice(4, 6))}</td><td class="${tone(item.realizedPnl)}">${money(item.realizedPnl)}</td><td>${escapeHtml(String(item.trades))}</td><td>${escapeHtml(personalWinRateLabel(item.trades, item.winRate, minTrades))}</td><td>${formatMoney(item.fees + item.taxes)}</td><td>${item.dividendsNet ? formatMoney(item.dividendsNet) : "--"}</td></tr>`).join("");
   return `${settlement}
     <details class="hold-scorecard" data-holdings-scorecard-fold${open ? " open" : ""}>
       <summary><strong>${glossLink("我的成績單")}</strong><span>本月 ${money(month?.realizedPnl || 0)}・今年 ${money(year?.realizedPnl || 0)}・勝率 ${rateText}</span></summary>
@@ -4149,18 +4231,37 @@ document.addEventListener('click', async event => {
 });
 // 手機庫存摘要條（M4）：今日損益／未實現／市值／本月已實現四格一條（桌機 CSS 不顯示，仍用原本的總覽格）。
 // 今日損益＝Σ(現價 − 昨收) × 股數，只算有昨收的檔；缺昨收另計檔數，不用 0 冒充。本月已實現讀伺服器成績單的當月桶。
-function renderHoldingsStrip({ todayPnl, todayCounted, todayMissing, totalUnrealized, totalValue, unpriced }) {
+function summarizeHoldingQuoteBasis(rows) {
+  let value = 0, validCount = 0, missingPrice = 0, missingPreviousClose = 0;
+  const dates = new Set();
+  for (const row of rows) {
+    const price = positivePriceOrNull(row.price);
+    const previousClose = positivePriceOrNull(row.previousClose);
+    if (price === null) missingPrice++;
+    if (previousClose === null) missingPreviousClose++;
+    dates.add(extractIsoDate(row.quoteDate));
+    if (price !== null && previousClose !== null && Number.isFinite(row.shares) && row.shares > 0) {
+      value += (price - previousClose) * row.shares;
+      validCount++;
+    }
+  }
+  const mixedDates = [...dates].filter(Boolean).length > 1;
+  const dateLabel = mixedDates ? '日期不一致' : !dates.size || dates.has('') ? '行情日期未知' : `行情 ${compactDateLabel([...dates][0])}`;
+  return {value: validCount ? value : null, validCount, totalCount: rows.length, missingPrice, missingPreviousClose, dateLabel, mixedDates};
+}
+
+function renderHoldingsStrip({ quoteBasis, totalUnrealized, totalValue, unpriced }) {
   const monthKey = taipeiTodayCompact().slice(0, 6);
   const card = tradesState.scorecard;
   const monthRealized = card ? ((card.months || []).find((item) => item.key === monthKey)?.realizedPnl ?? 0) : null;
   const tone = (value) => (value > 0 ? "is-up" : value < 0 ? "is-down" : "");
   return `
-    <div class="hold-strip" aria-label="今天的四個數字">
-      <div><span>今日損益</span><strong class="${todayCounted ? tone(todayPnl) : ""}">${todayCounted ? formatMoney(todayPnl, { signed: true }) : "--"}</strong>${todayMissing ? `<small>缺 ${todayMissing} 檔昨收</small>` : ""}</div>
+    <div class="hold-strip" aria-label="持股與帳本摘要">
+      <div><span>持股估值變動</span><strong class="${tone(quoteBasis.value)}">${formatMoney(quoteBasis.value, { signed: true })}</strong><small>${escapeHtml(quoteBasis.dateLabel)} · ${quoteBasis.validCount < quoteBasis.totalCount ? '部分估算' : '已知'} ${quoteBasis.validCount}/${quoteBasis.totalCount} 檔</small></div>
       <div><span>未實現</span><strong class="${tone(totalUnrealized)}">${formatMoney(totalUnrealized, { signed: true })}</strong></div>
       <div><span>市值</span><strong>${unpriced ? "--" : formatMoney(totalValue)}</strong></div>
       <div><span>本月已實現</span><strong class="${monthRealized === null ? "" : tone(monthRealized)}">${monthRealized === null ? "--" : formatMoney(monthRealized, { signed: true })}</strong></div>
-    </div>`;
+    </div><details class="hold-quote-help" data-holding-quote-help><summary>計算說明</summary><p>目前持股 × 最近報價相對昨收的價差；不含當日已賣部位、費稅及股利，非帳戶當日總損益。${quoteBasis.missingPrice ? `缺 ${quoteBasis.missingPrice} 檔現價。` : ''}${quoteBasis.missingPreviousClose ? `缺 ${quoteBasis.missingPreviousClose} 檔昨收。` : ''}</p></details>`;
 }
 
 function renderHoldingsPanel() {
@@ -4235,7 +4336,9 @@ function renderHoldingsPanel() {
   let pricedCost = 0; // 報酬率的分母只能算「有報價、已計入市值與未實現」的那部分成本
   let unpriced = 0;
   const holdingValues = []; // 有報價的各檔市值，算集中度用
-  let todayPnl = 0; let todayCounted = 0; let todayMissing = 0; // 手機摘要條的今日損益
+  const quoteBasis = summarizeHoldingQuoteBasis(holdings.map(h => ({...h, price:byCode.get(h.code)?.price,
+    previousClose:byCode.get(h.code)?.previousClose, quoteDate:byCode.get(h.code)?.asOf})));
+  const quoteHelpOpen = panel.querySelector('[data-holding-quote-help]')?.open || false;
   const holdRows = holdings
     .map((h) => {
       const stock = byCode.get(h.code);
@@ -4249,8 +4352,6 @@ function renderHoldingsPanel() {
         totalUnrealized += unrealized;
         pricedCost += h.cost;
         holdingValues.push(value);
-        const previousClose = finiteNumberOrNull(stock?.previousClose);
-        if (previousClose !== null && previousClose > 0) { todayPnl += (price - previousClose) * h.shares; todayCounted += 1; } else todayMissing += 1;
       } else {
         unpriced += 1;
       }
@@ -4418,7 +4519,7 @@ function renderHoldingsPanel() {
   const previousRiskFoldOpen = Boolean(panel.querySelector("[data-holdings-risk-fold]")?.open);
   const previousScorecardOpen = Boolean(panel.querySelector("[data-holdings-scorecard-fold]")?.open);
   panel.innerHTML = `
-    ${renderHoldingsStrip({ todayPnl, todayCounted, todayMissing, totalUnrealized, totalValue, unpriced })}
+    ${renderHoldingsStrip({ quoteBasis, totalUnrealized, totalValue, unpriced })}
     <div class="hold-summary">
       <div data-hold-kpi="value"><span>總市值</span><strong>${unpriced ? '--' : formatMoney(totalValue)}</strong>${unpriced ? `<small>已報價市值 ${formatMoney(totalValue)}</small>` : ''}</div>
       ${top3Share != null ? `<div title="前三大持股市值 ÷ 已報價總市值；僅顯示觀察占比，不代表分散安全"><span>前三大占比${unpriced ? '（總市值未知）' : ''}</span><strong>${unpriced ? '--' : `${top3Share}%`}</strong></div>` : ""}
@@ -4444,6 +4545,7 @@ function renderHoldingsPanel() {
     <form class="trade-form${editingRecord ? " is-editing" : ""}" data-trade-form${editingRecord ? ` data-editing-id="${escapeHtml(editingRecord.id)}"` : ""}>
       ${editingRecord ? `<div class="trade-edit-banner" role="status"><strong>正在修正 ${escapeHtml(byCode.get(editingRecord.code)?.name || editingRecord.code)} ${escapeHtml(editingRecord.code)}</strong><span>儲存後保留原紀錄編號與建立時間；清空實際費稅會改回估算。</span></div>` : ""}
       <p class="trade-form-error" data-trade-form-error role="alert" hidden></p>
+      <details data-trade-error-detail hidden><summary>錯誤詳情</summary><p></p></details>
       <div class="trade-form-main">
         <label><span>代號</span><input name="code" placeholder="2330／00725B" value="${escapeHtml(String(editingRecord?.code || state.selectedCode || ""))}" maxlength="6" autocapitalize="characters" aria-label="證券代號" required /></label>
         <label><span>類別</span><select name="side" aria-label="買賣別">
@@ -4507,6 +4609,9 @@ function renderHoldingsPanel() {
     </div>
   `;
   syncTradeFormControls(panel.querySelector("[data-trade-form]"));
+  restoreTradeFormDraft(panel.querySelector('[data-trade-form]'));
+  const quoteHelp = panel.querySelector('[data-holding-quote-help]');
+  if (quoteHelp) quoteHelp.open = quoteHelpOpen;
 }
 
 function getSelectedStock() {
@@ -5226,7 +5331,7 @@ function renderDataStatus() {
       // 狀態列從頭到尾不提，使用者只會看到「即時 N 檔」比平常少。
       const partialText = dataState.error ? " ・ 部分即時源失敗" : "";
       refreshStatus.textContent = closedToday
-        ? `${closedLabel} ・ 最近行情 ${dataState.lastUpdated || "載入中"}`
+        ? `${closedLabel} ・ ${batch.dateLabel ? `行情 ${batch.dateLabel}` : '行情日期未知'} ・ 取得 ${dataState.lastUpdated || "載入中"}${partialText}`
         : dataState.lastUpdated
           ? `官方行情 ・ ${batch.statusCount}${partialText} ・ ${dataState.lastUpdated} ${batch.verb}`
           : "官方行情 ・ 載入中…";
@@ -5990,14 +6095,10 @@ function renderMobileSettingsPanel() {
   return `
     <div class="mobile-settings">
       <h3>底部導覽</h3>
-      <p>手機（760px 以下）預設 5 籤：隔日沖、策略雷達、自選股、技術分析、更多；盤中選股與處置看板從這裡進。桌機側欄不受影響。</p>
+      <p>手機（760px 以下）預設 5 籤：隔日沖、策略雷達、自選股、技術分析、更多；盤中選股與處置看板可從更多頁上方的「看盤工具」進入。桌機側欄不受影響。</p>
       <div class="mobile-nav-mode" role="group" aria-label="底部導覽籤數">
         <button type="button" class="watch-secondary-action${mode === "5" ? " is-active" : ""}" data-nav-tabs="5" aria-pressed="${mode === "5" ? "true" : "false"}">5 籤</button>
         <button type="button" class="watch-secondary-action${mode === "7" ? " is-active" : ""}" data-nav-tabs="7" aria-pressed="${mode === "7" ? "true" : "false"}">7 籤（全部放底部）</button>
-      </div>
-      <div class="mobile-go-screens" role="group" aria-label="收在更多裡的分頁">
-        <button type="button" class="watch-secondary-action" data-go-screen="screener">盤中選股</button>
-        <button type="button" class="watch-secondary-action" data-go-screen="surveillance">處置看板</button>
       </div>
       <p class="more-note">在內容區左右滑動可以切換底部分頁；表格、chips 這類橫向捲動的地方不會誤觸。</p>
       <h3>加到主畫面 <em class="${install.tone}">${install.status}</em></h3>
@@ -6009,6 +6110,17 @@ function renderMorePanel() {
   const screen = document.querySelector('[data-screen-panel="more"]');
   const panel = screen?.querySelector(".settings-panel");
   if (!screen || !panel) return;
+
+  if (!screen.querySelector('.more-screen-shortcuts')) {
+    const shortcuts = document.createElement('section');
+    shortcuts.className = 'more-screen-shortcuts';
+    shortcuts.setAttribute('aria-label', '看盤工具');
+    shortcuts.innerHTML = `<h2>看盤工具</h2><div class="mobile-go-screens">
+      <button type="button" class="watch-secondary-action" data-go-screen="screener"><i data-lucide="list-filter"></i>盤中選股</button>
+      <button type="button" class="watch-secondary-action" data-go-screen="surveillance"><i data-lucide="shield-alert"></i>處置看板</button>
+    </div>`;
+    screen.insertBefore(shortcuts, panel);
+  }
 
   let summary = screen.querySelector(".more-status");
   if (!summary) {
@@ -6696,13 +6808,17 @@ function renderOvernightGroups() {
   // 展開狀態依同一個 data 鍵跨行情重繪保留（同 verificationFoldAttributes 的做法），⚠ 按鈕 toast 與摘要條單一 wrap 流不變。
   const warningList = (overnightState.warnings || []).filter(Boolean);
   const warningSpan = (warning) => `<span class="overnight-warning">⚠ ${escapeHtml(warning)}</span>`;
+  const riskWarnings = warningList.filter(w => /注意|處置/.test(w) && /失敗|缺漏|不足|未完整|last-good/.test(w));
+  const previewWarning = w => warningSpan(riskWarnings.includes(w) ? '注意／處置標記部分缺漏；查無標記不代表沒有風險。' : w);
+  const riskAction = riskWarnings.length ? `<button type="button" class="watch-secondary-action" data-go-screen="surveillance">查看處置看板</button>` : '';
   let warnings;
   if (warningList.length > 2) {
     const previousFold = el.overnightGroups.querySelector("details[data-overnight-warnings-fold]");
-    warnings = warningList.slice(0, 2).map(warningSpan).join("")
-      + `<details data-overnight-warnings-fold${previousFold?.open ? " open" : ""}><summary>另有 ${warningList.length - 2} 則資料警告，展開看全部 ${warningList.length} 則</summary>${warningList.map(warningSpan).join("")}</details>`;
+    warnings = warningList.slice(0, 2).map(previewWarning).join("")
+      + `<details data-overnight-warnings-fold${previousFold?.open ? " open" : ""}><summary>另有 ${warningList.length - 2} 則資料警告，展開看全部 ${warningList.length} 則</summary>${warningList.map(warningSpan).join("")}${riskAction}</details>`;
   } else {
-    warnings = warningList.map(warningSpan).join("");
+    warnings = warningList.map(previewWarning).join("");
+    if (riskWarnings.length) warnings += `<details data-overnight-warnings-fold${el.overnightGroups.querySelector('[data-overnight-warnings-fold]')?.open ? ' open' : ''}><summary>風險標記來源詳情</summary>${riskWarnings.map(warningSpan).join('')}${riskAction}</details>`;
   }
   el.overnightGroups.innerHTML = `
     <div class="overnight-summary">
@@ -8096,8 +8212,10 @@ function renderInspectCard(d) {
       </div>`;
   }).join("");
 
-  const rr = Number(d.rr);
-  const rrTone = !Number.isFinite(rr) ? "rr-na" : rr >= 2 ? "rr-high" : rr >= 1 ? "rr-mid" : "rr-low";
+  const rr = finiteNumberOrNull(d.rr);
+  const rrNet = finiteNumberOrNull(d.plan?.rrNet);
+  const rrTone = rrNet === null ? "rr-na" : rrNet >= 2 ? "rr-high" : rrNet >= 1 ? "rr-mid" : "rr-low";
+  const rrNote = rrNet === null ? '淨盈虧比未知，無法核對成本後門檻。' : rrNet < 1 ? '扣模型成本後低於榜單門檻；此處仍提供試算。' : '';
   const entry = Number(d.plan?.entry);
   const stop = Number(d.plan?.structuralStop);
   const target = Number(d.plan?.target);
@@ -8140,8 +8258,9 @@ function renderInspectCard(d) {
         <div class="swing-stat"><span>${glossLink("結構停損")}</span><strong>${formatNumber(d.plan?.structuralStop)}</strong></div>
         <div class="swing-stat swing-stat-sub"><span>${glossLink("啟動移停")} <i class="swing-stat-hint">+5%</i></span><strong>${formatNumber(d.plan?.trailingTrigger)}</strong></div>
         <div class="swing-stat"><span>${glossLink("目標")}</span><strong>${formatNumber(d.plan?.target)}</strong></div>
-        <div class="swing-stat swing-rr ${rrTone}"><span>${glossLink("盈虧比")}</span><strong>${Number.isFinite(rr) ? rr.toFixed(1) : "—"}</strong></div>
+        <div class="swing-stat swing-rr ${rrTone}"><span>${glossLink("盈虧比")}</span><strong>毛 ${rr === null ? '--' : rr.toFixed(1)}／淨 ${rrNet === null ? '--' : rrNet.toFixed(2)}</strong></div>
       </div>
+      <p class="inspect-foot">毛值未扣成本；淨值已扣模型成本。${rrNote}試算參考，不保證成交。</p>
       ${rrBar}
       <button class="inspect-open" type="button" data-swing-code="${d.code}">查看完整個股詳情 →</button>
     </article>
@@ -13093,6 +13212,7 @@ document.addEventListener("submit", (event) => {
   const tradeForm = event.target.closest("[data-trade-form]");
   if (tradeForm) {
     event.preventDefault();
+    if (tradesState.mutating) return;
     const editingId = String(tradesEditingId || "");
     const editingRecord = editingId ? tradesState.records.find((record) => record.id === editingId) : null;
     if (editingId && (!editingRecord || editingRecord.side === "dividend")) {
@@ -13196,6 +13316,7 @@ document.addEventListener("submit", (event) => {
       showTradeFormError(tradeForm, "receivedAmount", "手動記錄已入帳股利時，請填實際收到的總金額");
       return;
     }
+    const formDraft = captureTradeFormDraft(tradeForm);
     document.activeElement?.blur?.(); // 讓面板可重繪
     const submitButton = tradeForm.querySelector('button[type="submit"]');
     if (submitButton && !tradesState.mutating) {
@@ -13207,9 +13328,9 @@ document.addEventListener("submit", (event) => {
       saveEditedTradeRecord(editingRecord.id, fields, {
         feeProvided: feeText !== "",
         taxProvided: fields.side === "sell" && taxText !== "",
-      });
+      }, formDraft);
     } else {
-      addTradeRecord(fields);
+      addTradeRecord(fields, formDraft);
     }
   }
 });
@@ -15073,6 +15194,15 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Escape") return;
+  const expandedSource = document.querySelector('.source-switch.is-expanded');
+  if (!top && expandedSource) {
+    expandedSource.classList.remove('is-expanded');
+    const pill = document.getElementById('sourcePill');
+    pill?.setAttribute('aria-expanded', 'false');
+    pill?.focus();
+    event.preventDefault();
+    return;
+  }
   if (!top) {
     closeDetailPanel();
     return;

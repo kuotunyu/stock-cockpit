@@ -181,7 +181,7 @@ test("S7 資料可信度：只有警告沒有備援時叫「資料降級」，�
   assert.match(labels.warningsOnly, /資料降級/);
   assert.doesNotMatch(labels.warningsOnly, /部分備援/, "備援 0 檔不能叫部分備援");
   assert.match(labels.fallbackOnly, /部分備援/);
-  assert.match(labels.clean, /資料正常/);
+  assert.match(labels.clean, /本批行情可用/);
 });
 
 test("到價提醒說明：盤中說即時價，收盤後說今日收盤價，非交易日說最近收盤價", () => {

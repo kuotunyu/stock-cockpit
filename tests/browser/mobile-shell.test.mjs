@@ -275,7 +275,7 @@ test("375px 成績單逐日表一天一行＋展開＋顯示更早、策略卡�
         bodyFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth };
     });
     assert.equal(strip.visible, true, "手機有摘要條");
-    assert.deepEqual(strip.cells.map((c) => c.label), ["今日損益", "未實現", "市值", "本月已實現"]);
+    assert.deepEqual(strip.cells.map((c) => c.label), ["持股估值變動", "未實現", "市值", "本月已實現"]);
     assert.ok(strip.cells.every((c) => c.w >= 80), JSON.stringify(strip.cells));
     assert.equal(strip.hiddenTiles, 2, "總覽格裡重複的市值／未實現在手機藏起來");
     assert.equal(strip.bodyFits, true);

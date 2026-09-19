@@ -49,13 +49,24 @@ test("成績單：摘要行講本月／今年／勝率，六格與逐月表，�
   assert.match(text, /最長連虧 ?1 筆/);
   assert.match(text, /今年費稅 ?737/, "263 + 474");
   assert.match(text, /今年股利入帳 ?4,990/);
-  assert.match(text, /2026\/08 ?\+9,491 ?2 ?100% ?509 ?4,990/, "逐月表：月份、已實現、筆數、勝率、費稅、股利");
+  assert.match(text, /2026\/08 ?\+9,491 ?2 ?100%（2\/20 筆・樣本不足） ?509 ?4,990/, "逐月表：月份、已實現、筆數、勝率、費稅、股利");
   assert.match(text, /最佳一筆 2330 \+9,491，最差一筆 2317 -2,228/);
   assert.match(html, /data-glossary-term="我的成績單"/);
   const open = json(`document.querySelector("[data-holdings-scorecard-fold]").open`);
   assert.equal(open, false, "預設收合，摘要行已有主要數字");
   app.evalIn(`document.querySelector("[data-holdings-scorecard-fold]").open = true; renderHoldingsPanel();`);
   assert.equal(json(`document.querySelector("[data-holdings-scorecard-fold]").open`), true, "重繪保留展開狀態");
+});
+
+test('逐月勝率使用各月分母，保留有效零與未知',()=>{
+  seed();
+  for(const count of [0,1,19,20]) for(const rate of [0,100,null]) {
+    app.evalIn(`tradesState.scorecard.overall.trades=30;tradesState.scorecard.months=[{key:'202608',trades:${count},winRate:${rate},fees:0,taxes:0}];`);
+    const host=app.doc.createElement('div');host.innerHTML=app.evalIn('renderPersonalScorecard(true)');
+    const cell=host.querySelector('tbody tr').children[3].textContent;
+    if(!count || rate === null) assert.equal(cell,'--');
+    else assert.equal(cell,count<20?`${rate}%（${count}/20 筆・樣本不足）`:`${rate}%（${count} 筆）`);
+  }
 });
 
 test("交割款：最近兩週的 T+2 應付／應收放在成績單上方、不收合，開休市表未載入要講", () => {

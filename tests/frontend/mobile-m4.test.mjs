@@ -105,8 +105,8 @@ test("庫存摘要條：今日損益只算有昨收的檔、缺昨收另計；�
     return { cells: [...s.children].map((c) => [c.querySelector("span").textContent, c.querySelector("strong").textContent, c.querySelector("strong").className, c.querySelector("small")?.textContent || ""]),
       kpi: [...el.holdingsPanel.querySelectorAll(".hold-summary > [data-hold-kpi]")].map((n) => n.dataset.holdKpi) };
   })()`);
-  assert.deepEqual(strip.cells.map((c) => c[0]), ["今日損益", "未實現", "市值", "本月已實現"]);
-  assert.deepEqual(strip.cells[0].slice(1), ["+5,000", "is-up", "缺 1 檔昨收"], "(110−105)×1000；台泥缺昨收不算也不冒充 0");
+  assert.deepEqual(strip.cells.map((c) => c[0]), ["持股估值變動", "未實現", "市值", "本月已實現"]);
+  assert.deepEqual(strip.cells[0].slice(1), ["+5,000", "is-up", "行情日期未知 · 部分估算 1/2 檔"], "(110−105)×1000；台泥缺昨收不算也不冒充 0");
   assert.deepEqual(strip.cells[1].slice(1, 3), ["+6,000", "is-up"], "未實現 = (110×1000−100000) + (38×2000−80000)");
   assert.equal(strip.cells[2][1], "186,000");
   assert.equal(strip.cells[3][1], "--");
