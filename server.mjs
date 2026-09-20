@@ -49,7 +49,7 @@ const SEEDED_ADMIN_PASSWORD = "admin1234";
 // `usingDefaultAdminPassword` 回答的是「**這個行程**的環境變數設定安不安全」，
 // 那是 validateStartupSecurity 的 fail-closed 判準，不能動。
 // 但「**這個帳號現在的密碼**是不是系統種的那一組」是另一個問題，答案只存在於 DB 裡。
-// 兩件事被混成同一個布林值，造成畫面上那顆燈永遠說錯話（見 AUDIT.md P1-02 的未完成部分）：
+// 兩件事原本被混成同一個布林值，造成畫面上那顆「預設密碼」警示燈永遠說錯話：
 //   在 UI 改完密碼 → 燈還是說「仍是預設密碼」（env 沒變）
 //   在既有 DB 上設 ADMIN_PASSWORD → 燈變綠，但種 admin 只在空 DB 生效，hash 根本沒換
 // 所以改用 user.passwordSource 這個持久化欄位回答第二個問題。
