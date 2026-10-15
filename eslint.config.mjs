@@ -20,7 +20,7 @@ const baseRules = {
 export default [
   { ignores: ["node_modules/**", "lucide.min.js", ".data/**", ".data-preview/**", ".agents/**", ".claude/**", "fonts/**"] },
   {
-    files: ["server.mjs", "verification-evidence.mjs", "scripts/**/*.mjs", "tests/**/*.mjs", "eslint.config.mjs"],
+    files: ["server.mjs", "verification-evidence.mjs", "date-utils.mjs", "scripts/**/*.mjs", "tests/**/*.mjs", "eslint.config.mjs"],
     languageOptions: { ecmaVersion: 2025, sourceType: "module", globals: { ...globals.node } },
     rules: baseRules,
   },

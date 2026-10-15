@@ -14,7 +14,7 @@ const owned = [];
 test.after(async () => { for (const dir of owned) await rm(dir, { recursive: true, force: true }); });
 async function fixture(git = true) {
   const dir = await mkdtemp(join(tmpdir(), 'stock1-version-')); owned.push(dir);
-  for (const file of ['server.mjs', 'portfolio-risk.js', 'verification-evidence.mjs', 'package.json', 'package-lock.json', 'app.js']) await cp(resolve(file), join(dir, file));
+  for (const file of ['server.mjs', 'portfolio-risk.js', 'verification-evidence.mjs', 'date-utils.mjs', 'package.json', 'package-lock.json', 'app.js']) await cp(resolve(file), join(dir, file));
   if (git) { command(dir, ['init', '-b', 'main']); command(dir, ['config', 'core.autocrlf', 'false']); command(dir, ['config', 'user.email', 'fixture@example.invalid']); command(dir, ['config', 'user.name', 'Fixture']); await writeFile(join(dir, '.gitignore'), 'query-helper.mjs\ndata/\n'); commit(dir); }
   return dir;
 }

@@ -33,7 +33,7 @@ test('Node 支援保留 22.13 起的 22.x 及 24+，拒絕 20／22.12／23 與�
 
 async function serverFixture(settings = '') {
   const dir = await fixture();
-  for (const file of ['server.mjs', 'portfolio-risk.js', 'verification-evidence.mjs', 'app.js']) await cp(resolve(file), join(dir, file));
+  for (const file of ['server.mjs', 'portfolio-risk.js', 'verification-evidence.mjs', 'date-utils.mjs', 'app.js']) await cp(resolve(file), join(dir, file));
   await writeFile(join(dir, '.env'), `PORT=0\nHOST=127.0.0.1\nDATA_DIR=${join(dir, 'data').replaceAll('\\', '/')}\nUPDATE_CHECK=off\nADMIN_PASSWORD=test-admin-password\nAPP_SECRET=test-app-secret-with-at-least-32-characters\n${settings}`);
   await writeFile(join(dir, 'offline.mjs'), `globalThis.fetch = () => { throw new Error('offline fixture'); };`);
   return dir;

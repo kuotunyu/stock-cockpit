@@ -3,6 +3,12 @@ import { execFileSync } from "node:child_process";
 import './portfolio-risk.js';
 import { prepareCompletedBenchmark, packCaptureOutcomes, readCaptureOutcomes, packCaptureCandidates, readCaptureCandidates, hasCaptureCandidates,
   packPublicationSignals, readPublicationSignals, writePublicationSignals, publicationSignalCount, unpackPublicationView } from './verification-evidence.mjs';
+import {
+  rocYearToWestern, westernYearToRoc, formatDate,
+  toTaipeiCompactDate, toTaipeiTime, toCompactDate,
+  compactToIsoDate, compactToSlashDate, compactToRocSlashDate,
+  addMonthsCompact, addDaysCompact,
+} from './date-utils.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
@@ -3731,99 +3737,8 @@ function parsePercentNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-// 民國年 ↔ 西元年只差 1911；以前六處各自寫 ±1911，任何一處打錯都不會有測試抓到，收斂成兩個函式。
-function rocYearToWestern(year) {
-  return Number(year) + 1911;
-}
-
-function westernYearToRoc(year) {
-  return Number(year) - 1911;
-}
-
-function formatDate(value) {
-  const text = String(value || "").replace(/\D/g, "");
-  if (/^\d{8}$/.test(text)) {
-    return `${text.slice(0, 4)}/${text.slice(4, 6)}/${text.slice(6, 8)}`;
-  }
-  if (/^\d{7}$/.test(text)) {
-    const year = rocYearToWestern(text.slice(0, 3));
-    return `${year}/${text.slice(3, 5)}/${text.slice(5, 7)}`;
-  }
-  return text || "";
-}
-
-const taipeiDateFormatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Asia/Taipei",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-const taipeiTimeFormatter = new Intl.DateTimeFormat("en-GB", {
-  timeZone: "Asia/Taipei",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
-
-function toTaipeiCompactDate(value = new Date()) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const parts = Object.fromEntries(taipeiDateFormatter.formatToParts(date).map((part) => [part.type, part.value]));
-  return `${parts.year}${parts.month}${parts.day}`;
-}
-
-function toTaipeiTime(value) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return taipeiTimeFormatter.format(date);
-}
-
-function toCompactDate(value = new Date()) {
-  if (value instanceof Date) {
-    return toTaipeiCompactDate(value);
-  }
-  const text = String(value || "").replace(/\D/g, "");
-  if (/^\d{8,}/.test(text)) return text.slice(0, 8);
-  if (/^\d{7}$/.test(text)) {
-    const year = rocYearToWestern(text.slice(0, 3));
-    return `${year}${text.slice(3, 5)}${text.slice(5, 7)}`;
-  }
-  return "";
-}
-
-function compactToIsoDate(value) {
-  const text = toCompactDate(value);
-  if (!text) return "";
-  return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
-}
-
-function compactToSlashDate(value) {
-  const text = toCompactDate(value);
-  if (!text) return "";
-  return `${text.slice(0, 4)}/${text.slice(4, 6)}/${text.slice(6, 8)}`;
-}
-
-function compactToRocSlashDate(value) {
-  const text = toCompactDate(value);
-  if (!text) return "";
-  const year = westernYearToRoc(text.slice(0, 4));
-  return `${year}/${text.slice(4, 6)}/${text.slice(6, 8)}`;
-}
-
-function addMonthsCompact(value, delta) {
-  const text = toCompactDate(value);
-  if (!text) return "";
-  const date = new Date(Date.UTC(Number(text.slice(0, 4)), Number(text.slice(4, 6)) - 1 + delta, 1));
-  return `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, "0")}01`;
-}
-
-function addDaysCompact(value, delta) {
-  const text = toCompactDate(value);
-  if (!text) return "";
-  const date = new Date(Date.UTC(Number(text.slice(0, 4)), Number(text.slice(4, 6)) - 1, Number(text.slice(6, 8)) + delta));
-  return `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, "0")}${String(date.getUTCDate()).padStart(2, "0")}`;
-}
+// 日期原語（rocYearToWestern／toCompactDate／addDaysCompact…）已搬到 ./date-utils.mjs，
+// 由檔首 import 帶進來；本檔其餘位置的呼叫方式完全不變。
 
 function parseHistoricalQueryDate(value, maxPastDays = 3660) {
   if (value === null || value === undefined || value === "") return "";
