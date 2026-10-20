@@ -14,7 +14,7 @@ const owned = [];
 test.after(async () => { for (const dir of owned) await rm(dir, { recursive: true, force: true }); });
 async function fixture(git = true) {
   const dir = await mkdtemp(join(tmpdir(), 'stock1-version-')); owned.push(dir);
-  for (const file of ['server.mjs', 'portfolio-risk.js', 'verification-evidence.mjs', 'date-utils.mjs', 'package.json', 'package-lock.json', 'app.js']) await cp(resolve(file), join(dir, file));
+  for (const file of ['server.mjs', 'portfolio-risk.js', 'verification-evidence.mjs', 'date-utils.mjs', 'cache-utils.mjs', 'package.json', 'package-lock.json', 'app.js']) await cp(resolve(file), join(dir, file));
   if (git) { command(dir, ['init', '-b', 'main']); command(dir, ['config', 'core.autocrlf', 'false']); command(dir, ['config', 'user.email', 'fixture@example.invalid']); command(dir, ['config', 'user.name', 'Fixture']); await writeFile(join(dir, '.gitignore'), 'query-helper.mjs\ndata/\n'); commit(dir); }
   return dir;
 }
@@ -62,4 +62,14 @@ test('worktree 的共用 config／packed ref 與 dirty 讀自實際 worktree', a
   const value = imported.mod.readAppBuildInfo(wt);
   assert.equal(value.branch, 'linked'); assert.deepEqual(value.repo, { owner: 'example', repo: 'fixture' }); assert.equal(value.dirty, false);
   await writeFile(join(wt, 'server.mjs'), '// changed'); assert.equal(imported.mod.readAppBuildInfo(wt).dirty, true);
+});
+
+test('快取模組變更必須改變後端來源指紋', async () => {
+  const dir = await fixture(false);
+  await writeFile(join(dir, 'cache-utils.mjs'), '// original cache module\n');
+  const before = imported.mod.readAppBuildInfo(dir);
+  await writeFile(join(dir, 'cache-utils.mjs'), '// changed cache module\n');
+  const after = imported.mod.readAppBuildInfo(dir);
+  assert.match(before.fingerprint, /^[a-f0-9]{64}$/);
+  assert.notEqual(after.fingerprint, before.fingerprint);
 });

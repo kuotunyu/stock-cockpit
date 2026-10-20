@@ -9,6 +9,7 @@ import {
   compactToIsoDate, compactToSlashDate, compactToRocSlashDate,
   addMonthsCompact, addDaysCompact,
 } from './date-utils.mjs';
+import { setBoundedDateCache, getFreshTtlCacheEntry } from './cache-utils.mjs';
 const { calculatePortfolioPlanRisk, calculateNewPositionSize } = globalThis.Stock1Risk;
 import { createServer as createNetServer } from "node:net";
 import { lstat, mkdir, open, readFile, rename, copyFile, readdir, unlink, realpath } from "node:fs/promises";
@@ -317,28 +318,6 @@ let verifyHistoryCache = {
   expiresAt: 0,
   value: null,
 };
-
-function setBoundedDateCache(cache, key, value, maxEntries = 16) {
-  const now = Date.now();
-  for (const [cachedKey, entry] of cache) {
-    if (!entry || entry.expiresAt <= now) cache.delete(cachedKey);
-  }
-  cache.delete(key);
-  cache.set(key, value);
-  while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
-}
-
-function getFreshTtlCacheEntry(cache, key, now = Date.now()) {
-  const entry = cache.get(key);
-  if (!entry || entry.expiresAt <= now) {
-    cache.delete(key);
-    return null;
-  }
-  // Map 的插入順序就是 LRU 順序；命中時把 key 移到最後。
-  cache.delete(key);
-  cache.set(key, entry);
-  return entry;
-}
 
 const COMPANY_DIRECTORY_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPANY_DIRECTORY_RETRY_MS = 5 * 60 * 1000;
@@ -4547,7 +4526,7 @@ function readGitHubRepo(gitDir) {
 function readAppBuildInfo(buildRoot = root) {
   const gitDir = resolveGitDir(buildRoot);
   // 固定的後端來源／相依宣告範圍；不含文件、前端、環境設定或 node_modules 的實際 bytes。
-  const sourceFiles = ["server.mjs", "portfolio-risk.js", "verification-evidence.mjs", "package.json", "package-lock.json"];
+  const sourceFiles = ["server.mjs", "portfolio-risk.js", "verification-evidence.mjs", "cache-utils.mjs", "package.json", "package-lock.json"];
   let fingerprint = "";
   try {
     const hash = createHash("sha256");
